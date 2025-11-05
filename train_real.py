@@ -922,13 +922,13 @@ class SimpleMoEModel(nn.Module):
         num_multimodal_experts: int = None,
         num_shared_experts: int = 1,
         num_routed_experts: int = None,
-        top_k: int = 2,
-        noise_scale: float = 0.01,
+        top_k: int = 1,  # Reduced from 2 to force specialization
+        noise_scale: float = 0.5,  # Increased from 0.01 to 0.5 for better expert exploration
         z_loss_weight: float = 0.001,
         capacity_factor: float = 1.5,
         residual_factor: float = 0.1,
-        temperature_schedule: str = "constant",
-        temperature_start: float = 1.0,
+        temperature_schedule: str = "linear",  # Changed from "constant" to "linear" for better routing
+        temperature_start: float = 2.0,  # Increased from 1.0 to 2.0 for better exploration
         temperature_end: float = 0.1,
         temperature_steps: int = 1000,
     ):
@@ -1594,6 +1594,9 @@ def train_real_model(
     # Build model
     print(f"\n🏗️  Building trainable PyTorch MoE model...")
     
+    # Store dataset size for expert count calculation
+    dataset_size = train_size  # Use training set size for expert calculation
+    
     # Determine expert configuration
     if num_text_experts is not None or num_image_experts is not None or num_multimodal_experts is not None:
         # Explicit configuration
@@ -1610,11 +1613,66 @@ def train_real_model(
             num_text_experts=num_text_experts_val,
             num_image_experts=num_image_experts_val,
             num_multimodal_experts=num_multimodal_experts_val,
+            top_k=1,  # Force specialization
+            noise_scale=0.5,  # Better exploration
+            temperature_schedule="linear",  # Enable annealing
+            temperature_start=2.0,  # High start for exploration
+            temperature_end=0.1,  # Low end for exploitation
         )
     else:
         # Backward compatibility: split num_experts evenly
-        print(f"   Expert configuration: {num_experts} text experts, {num_experts} image experts")
-        model = SimpleMoEModel(vocab_size=10007, embedding_dim=128, num_experts=num_experts)
+        # If num_experts is small (≤2), increase routed experts to prevent routing collapse
+        # But scale based on dataset size to avoid over-parameterization
+        if num_experts <= 2:
+            print(f"   ⚠️  WARNING: num_experts={num_experts} is too small, risks routing collapse.")
+            # Calculate appropriate number of routed experts based on dataset size
+            # Formula: num_experts = max(2, min(num_tokens // 5000, 8))
+            # Alternative: Optimal num_experts ≈ sqrt(num_tokens / 10,000)
+            # Using training samples as "tokens" (num_tokens = dataset_size)
+            if dataset_size:
+                # Direct formula: max(2, min(num_tokens // 5000, 8))
+                num_routed_experts_override = max(2, min(dataset_size // 5000, 8))
+                
+                # Also compute square root formula for comparison
+                sqrt_formula_experts = int((dataset_size / 10000) ** 0.5)
+                sqrt_formula_experts = max(2, min(sqrt_formula_experts, 8))  # Cap at 8
+                
+                # Use the direct formula (more conservative)
+                actual_samples_per_expert = dataset_size // num_routed_experts_override if num_routed_experts_override > 0 else 0
+                print(f"   🔧 Auto-adjusting: Using {num_routed_experts_override} routed experts")
+                print(f"      Formula: max(2, min({dataset_size} // 5000, 8)) = {num_routed_experts_override}")
+                print(f"      Based on {dataset_size} training samples → ~{actual_samples_per_expert} samples/expert")
+                if sqrt_formula_experts != num_routed_experts_override:
+                    print(f"      (sqrt formula would suggest: {sqrt_formula_experts} experts)")
+            else:
+                # Fallback: use minimum 2 experts
+                num_routed_experts_override = 2
+                print(f"   🔧 Auto-adjusting: Using {num_routed_experts_override} routed experts (default minimum)")
+            num_shared_experts_override = 1
+            model = SimpleMoEModel(
+                vocab_size=10007,
+                embedding_dim=128,
+                num_experts=num_experts,  # Keep for backward compat
+                num_shared_experts=num_shared_experts_override,
+                num_routed_experts=num_routed_experts_override,
+                top_k=1,  # Force specialization
+                noise_scale=0.5,  # Better exploration
+                temperature_schedule="linear",  # Enable annealing
+                temperature_start=2.0,  # High start for exploration
+                temperature_end=0.1,  # Low end for exploitation
+            )
+        else:
+            print(f"   Expert configuration: {num_experts} text experts, {num_experts} image experts")
+            model = SimpleMoEModel(
+                vocab_size=10007,
+                embedding_dim=128,
+                num_experts=num_experts,
+                top_k=1,  # Force specialization
+                noise_scale=0.5,  # Better exploration
+                temperature_schedule="linear",  # Enable annealing
+                temperature_start=2.0,  # High start for exploration
+                temperature_end=0.1,  # Low end for exploitation
+            )
     
     model = model.to(device)
     print(f"✅ Model created and moved to {device}")
@@ -2067,8 +2125,9 @@ def train_real_model(
                     expert_usage[unique_experts] += 1
                 
                 # Combine main loss with auxiliary loss (already weighted in forward())
-                # Weight the auxiliary loss to not dominate (typically 0.01-0.1)
-                aux_loss_weight = 0.01
+                # Weight the auxiliary loss to penalize uneven routing more strongly
+                # Increased from 0.01 to 0.1 to prevent routing collapse
+                aux_loss_weight = 0.1  # Increased from 0.01 to 0.1 for stronger load balancing
                 loss = main_loss + aux_loss_weight * aux_loss
                 
                 # Accumulate auxiliary loss components
@@ -2076,6 +2135,64 @@ def train_real_model(
                 total_load_bal_loss += load_bal_loss.item()
                 total_z_loss += z_loss_val.item()
                 total_cap_loss += cap_loss.item() if isinstance(cap_loss, torch.Tensor) else cap_loss
+                
+                # DIAGNOSTIC: Check load balance loss and expert usage (first batch only)
+                if not diagnostics_run and epoch == start_epoch and batch_idx == 0:
+                    print(f"  🔍 Load Balance & Expert Usage Check:")
+                    print(f"     Load balance loss: {load_bal_loss.item():.6f}")
+                    if load_bal_loss.item() == 0.0:
+                        print(f"     ⚠️  WARNING: Load balance loss is zero! This may indicate routing issues.")
+                    else:
+                        print(f"     ✅ Load balance loss is non-zero (good)")
+                    
+                    # Check active experts
+                    num_active_experts = (expert_usage > 0).sum().item()
+                    print(f"     Active experts: {num_active_experts}/{model.num_experts} (routed: {model.num_routed_experts})")
+                    if num_active_experts == 1:
+                        print(f"     ⚠️  WARNING: Only 1 expert is active! This suggests expert collapse.")
+                    elif num_active_experts < model.num_routed_experts:
+                        print(f"     ⚠️  WARNING: Only {num_active_experts} of {model.num_routed_experts} routed experts are active.")
+                    else:
+                        print(f"     ✅ All routed experts are being used")
+                    
+                    # Check per-expert token counts (if available from routing_metrics)
+                    if routing_metrics and 'expert_utilization' in routing_metrics:
+                        expert_util = routing_metrics['expert_utilization']
+                        if isinstance(expert_util, torch.Tensor):
+                            expert_util_list = expert_util.cpu().tolist()
+                            print(f"     Expert utilization per expert: {expert_util_list[:min(10, len(expert_util_list))]}")
+                            if len(expert_util_list) > 10:
+                                print(f"     ... (showing first 10 of {len(expert_util_list)})")
+                            # Check if roughly equal
+                            util_std = torch.tensor(expert_util_list).std().item()
+                            util_mean = torch.tensor(expert_util_list).mean().item()
+                            if util_mean > 0:
+                                util_cv = util_std / util_mean  # Coefficient of variation
+                                print(f"     Utilization CV: {util_cv:.4f} (lower = more balanced)")
+                                if util_cv > 0.5:
+                                    print(f"     ⚠️  WARNING: High variation in expert utilization (CV={util_cv:.4f})")
+                                else:
+                                    print(f"     ✅ Expert utilization is reasonably balanced")
+                    
+                    # Check temperature
+                    current_temp = model_engine.gate_temperature if hasattr(model_engine, 'gate_temperature') else (model.gate_temperature if hasattr(model, 'gate_temperature') else 1.0)
+                    print(f"     Current temperature: {current_temp:.4f}")
+                    if hasattr(model, 'temperature_schedule'):
+                        print(f"     Temperature schedule: {model.temperature_schedule}")
+                        if model.temperature_schedule == 'constant':
+                            print(f"     ⚠️  NOTE: Temperature is constant - consider using 'linear' or 'cosine' schedule")
+                    
+                    # Check noise scale
+                    noise_scale = model_engine.noise_scale if hasattr(model_engine, 'noise_scale') else (model.noise_scale if hasattr(model, 'noise_scale') else 0.01)
+                    print(f"     Noise scale: {noise_scale:.4f}")
+                    if noise_scale < 0.1:
+                        print(f"     ⚠️  NOTE: Noise scale is low ({noise_scale:.4f}). Consider increasing to 0.5-1.0 for better exploration.")
+                    
+                    # Check top_k
+                    top_k = model_engine.top_k if hasattr(model_engine, 'top_k') else (model.top_k if hasattr(model, 'top_k') else 2)
+                    print(f"     Top-k: {top_k} (num_routed_experts: {model.num_routed_experts})")
+                    if top_k >= model.num_routed_experts:
+                        print(f"     ⚠️  NOTE: top_k ({top_k}) >= num_routed_experts ({model.num_routed_experts}). Consider reducing top_k to force specialization.")
                 
                 # Track capacity metrics if available
                 if hasattr(model_engine, '_capacity_metrics'):
@@ -2509,7 +2626,52 @@ def train_real_model(
             print(f"   Train Loss: {avg_loss:.4f}")
             print(f"   Test Loss:  {test_avg_loss:.4f} (evaluated on {total_test_samples} test samples)")
             print(f"🔍 Epoch {epoch + 1}: Aux loss = {avg_aux_loss:.4f} (LoadBal: {avg_load_bal_loss:.4f}, Z-loss: {avg_z_loss:.4f}, Cap: {avg_cap_loss:.4f})")
+            
+            # Verify load balance loss is non-zero
+            if avg_load_bal_loss == 0.0:
+                print(f"   ⚠️  WARNING: Load balance loss is zero! This may indicate routing issues.")
+            else:
+                print(f"   ✅ Load balance loss is non-zero: {avg_load_bal_loss:.6f}")
+            
+            # Check active experts
             print(f"   Expert capacity: Dropped {avg_dropped_fraction*100:.2f}%, Utilization {avg_expert_utilization*100:.2f}%, Active experts = {num_active_experts}/{model.num_experts}")
+            if num_active_experts == 1:
+                print(f"   ⚠️  WARNING: Only 1 expert is active! This suggests expert collapse.")
+            elif num_active_experts < model.num_routed_experts:
+                print(f"   ⚠️  WARNING: Only {num_active_experts} of {model.num_routed_experts} routed experts are active.")
+            else:
+                print(f"   ✅ All {num_active_experts} routed experts are being used")
+            
+            # Print routing metrics if available
+            model_for_metrics = model_engine.module if (use_deepspeed and model_engine is not None and hasattr(model_engine, 'module')) else model
+            if hasattr(model_for_metrics, '_routing_metrics') and model_for_metrics._routing_metrics:
+                routing_metrics = model_for_metrics._routing_metrics
+                print(f"   📊 Routing Metrics:")
+                print(f"      Router entropy: {routing_metrics.get('router_entropy', torch.tensor(0.0)).item():.4f}")
+                print(f"      Load imbalance: {routing_metrics.get('load_imbalance', torch.tensor(0.0)).item():.4f}")
+                print(f"      Top expert fraction: {routing_metrics.get('top_expert_fraction', torch.tensor(0.0)).item():.4f}")
+                print(f"      Token concentration: {routing_metrics.get('token_concentration', torch.tensor(0.0)).item():.4f}")
+                if 'expert_utilization' in routing_metrics:
+                    expert_util = routing_metrics['expert_utilization']
+                    if isinstance(expert_util, torch.Tensor):
+                        expert_util_list = expert_util.cpu().tolist()
+                        print(f"      Expert utilization per expert: {expert_util_list}")
+                        # Check if roughly equal
+                        util_std = expert_util.std().item()
+                        util_mean = expert_util.mean().item()
+                        if util_mean > 0:
+                            util_cv = util_std / util_mean
+                            print(f"      Utilization CV: {util_cv:.4f} (lower = more balanced, target < 0.5)")
+            
+            # Check temperature progression
+            current_temp = model_engine.gate_temperature if (use_deepspeed and model_engine is not None and hasattr(model_engine, 'gate_temperature')) else (model.gate_temperature if hasattr(model, 'gate_temperature') else 1.0)
+            if epoch == start_epoch:
+                print(f"   🌡️  Temperature: {current_temp:.4f} (schedule: {model.temperature_schedule if hasattr(model, 'temperature_schedule') else 'constant'})")
+            else:
+                prev_temp = getattr(model, '_prev_temp', current_temp)
+                temp_change = current_temp - prev_temp
+                print(f"   🌡️  Temperature: {current_temp:.4f} (change: {temp_change:+.4f})")
+                model._prev_temp = current_temp  # Store for next epoch
             if bert_scores:
                 print(f"   Train BERTScore: {avg_bert:.4f} (from {len(bert_scores)} samples)")
             if test_bert_scores:

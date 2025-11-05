@@ -17,30 +17,47 @@ NeuroSeek-MoE integrates text and image reasoning for comprehensive disease anal
 
 ### Model Components
 
-**Shared Expert Pool** (default: 2 experts)
-- Standard 2-layer MLP with 4× expansion: `Linear(dim → 4×dim) → ReLU → Linear(4×dim → dim)`
-- All experts share same architecture (no modality-specific separation)
+**Two-Tier Expert System**
 
-**Gating Network**
-- Linear gate: `nn.Linear(embedding_dim → num_experts)`
-- Top-k sparse routing: Selects top-2 experts per sample (k=2)
-- Temperature scaling for better routing control
+1. **Shared Experts** (always activated, default: 1 expert)
+   - Standard 2-layer MLP with 4× expansion: `Linear(dim → 4×dim) → ReLU → Linear(4×dim → dim)`
+   - Process all tokens to ensure baseline functionality
+   - Provide fail-safe for unprocessed tokens
 
-**Routing Process**
-1. Input → Embedding → Mean pooling → Fixed-size representation
-2. Gate computes logits → Apply temperature → Top-k selection
-3. Compute only selected experts (sparse activation)
-4. Weighted combination → Joint fusion → Decoder → Vocabulary logits
+2. **Routed Experts** (dynamically selected, auto-scaled by dataset size)
+   - Same 2-layer MLP architecture as shared experts
+   - Count determined by: `max(2, min(num_tokens // 5000, 8))`
+   - For ~2000 samples: typically 2-8 experts
+   - Each expert selects `top_k=1` tokens via Expert Choice routing
 
-**Load Balancing**
-- Auxiliary loss: Entropy-based (maximize entropy of expert probabilities)
-- Weight: 0.01× aux_loss added to main cross-entropy loss
-- Logs active experts per epoch
+**Expert Choice Routing**
+- **Mechanism**: Each expert selects top-k tokens to process (not tokens choosing experts)
+- **Gate**: Linear `nn.Linear(embedding_dim → num_routed_experts)`
+- **Temperature**: Scheduled annealing (start=2.0 → end=0.1) for exploration→exploitation
+- **Noise**: Gumbel noise (scale=0.5) for better exploration
+- **Capacity**: Enforced via `capacity_factor * (batch*seq_len) / num_routed_experts`
+
+**Sequence-Level Processing**
+1. Input → Embedding → `[batch, seq_len, embedding_dim]` (no pooling)
+2. Flatten for routing: `[batch*seq_len, embedding_dim]`
+3. Expert Choice: Each expert selects top-k tokens
+4. Capacity enforcement: Excess tokens dropped or routed to shared experts
+5. Expert processing: Shared (all tokens) + Routed (selected tokens)
+6. Combine → Joint fusion → Normalization + Residual → Decoder → Vocabulary logits
+
+**Load Balancing & Auxiliary Losses**
+- **Load Balance Loss**: L2 penalty on deviation from uniform expert utilization
+- **Z-Loss**: Penalizes extreme router logits to encourage balanced routing
+- **Capacity Loss**: L2 penalty for exceeding expert capacity
+- **Total Aux Loss Weight**: 0.1× (LoadBal + Z-loss + Capacity loss)
+- **Main Loss**: `CrossEntropyLoss + 0.1 × aux_loss`
+- Logs active experts, utilization, and routing metrics per epoch
 
 ### Training Details
 
 - **Regularization**: Weight decay (1e-5), dropout (0.1), early stopping (patience=5), LR scheduling, gradient clipping
-- **Loss**: `CrossEntropyLoss + 0.01 × entropy_loss`
+- **Loss**: `CrossEntropyLoss + 0.1 × aux_loss` (where aux_loss = LoadBal + Z-loss + Capacity loss)
+- **Expert Scaling**: Auto-scaled by dataset size: `max(2, min(num_tokens // 5000, 8))`
 - **Split**: 80/20 train/test (automatic)
 - **Metrics**: BERTScore (BLEU removed)
 

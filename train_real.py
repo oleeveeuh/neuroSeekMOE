@@ -963,8 +963,10 @@ class SimpleMoEModel(nn.Module):
         # Validate top_k parameter (controls how many tokens each expert selects)
         if top_k < 1:
             raise ValueError(f"top_k must be >= 1, got {top_k}")
+        # Auto-adjust top_k if it exceeds num_routed_experts (for small expert counts)
         if top_k > num_routed_experts:
-            raise ValueError(f"top_k ({top_k}) cannot exceed num_routed_experts ({num_routed_experts})")
+            print(f"⚠️  Warning: top_k ({top_k}) exceeds num_routed_experts ({num_routed_experts}). Adjusting top_k to {num_routed_experts}")
+            top_k = num_routed_experts
         self.top_k = top_k
         self.noise_scale = noise_scale  # Scale of noise added to router logits during training
         self.z_loss_weight = z_loss_weight  # Weight for Z-loss auxiliary loss

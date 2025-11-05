@@ -269,7 +269,26 @@ def run_nemo_text_biomed_pubmed_pmc(
                         out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     # NeMo-style strict curation (normalize, filter, dedupe, redact)
-    curate_with_nemo([merged_path], out_jsonl, min_chars=200, max_chars=8000, shuffle=True, seed=42)
+    # Try NeMo curation, but fall back to basic processing if not available
+    try:
+        _require_nemo_curator()
+        curate_with_nemo([merged_path], out_jsonl, min_chars=200, max_chars=8000, shuffle=True, seed=42)
+    except ImportError:
+        print("⚠️  NeMo Curator not installed, using basic text processing (no advanced curation)")
+        # Basic processing: just copy merged data with length filtering
+        _ensure_dir(os.path.dirname(os.path.abspath(out_jsonl)) or ".")
+        with open(out_jsonl, "w", encoding="utf-8") as out_f:
+            with open(merged_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                        text = obj.get("text", "")
+                        # Basic length filtering
+                        if len(text) >= 200 and len(text) <= 8000:
+                            out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                    except Exception:
+                        continue
+        print(f"✅ Basic text processing completed: {out_jsonl}")
 
 
 

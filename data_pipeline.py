@@ -1291,6 +1291,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p_biomed.add_argument("--tar-out", default="data/processed/image_shards")
     p_biomed.add_argument("--shard-size", type=int, default=1000)
     p_biomed.add_argument("--export-hf", action="store_true")
+    # Article quality filters
+    p_biomed.add_argument("--min-abstract-length", type=int, default=200, help="Minimum abstract length in characters (default: 200)")
+    p_biomed.add_argument("--article-types", nargs="+", default=["Review", "Meta-Analysis", "Systematic Review"], 
+                         help="Preferred article types (default: Review, Meta-Analysis, Systematic Review)")
+    p_biomed.add_argument("--exclude-types", nargs="+", default=["Case Reports", "Letter", "Editorial", "Retracted Publication"],
+                         help="Article types to exclude (default: Case Reports, Letter, Editorial, Retracted Publication)")
+    p_biomed.add_argument("--min-year", type=int, default=None, help="Minimum publication year (e.g., 2010)")
 
     return p
 

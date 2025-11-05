@@ -341,11 +341,19 @@ class SimpleMoEModel(nn.Module):
         gate_probs, topk_idx = top_k_gating(gate_logits, k=2)
         
         # Compute expert outputs and combine with top-k routing
+        # gate_probs: [batch, k], topk_idx: [batch, k]
         outputs = []
         for i in range(topk_idx.shape[1]):
-            idx = topk_idx[:, i]
-            expert_out = torch.stack([self.experts[j](pooled_text[b:b+1]) for b, j in enumerate(idx)], dim=0)
-            outputs.append(gate_probs[:, i:i+1] * expert_out)
+            idx = topk_idx[:, i]  # [batch] - expert indices for each sample
+            # Compute expert outputs for each sample
+            expert_out_list = []
+            for b in range(pooled_text.shape[0]):
+                expert_idx = idx[b].item()
+                expert_out_list.append(self.experts[expert_idx](pooled_text[b:b+1]))  # [1, embedding_dim]
+            expert_out = torch.cat(expert_out_list, dim=0)  # [batch, embedding_dim]
+            # Multiply by gate probabilities: [batch, 1] * [batch, embedding_dim] -> [batch, embedding_dim]
+            weighted_out = gate_probs[:, i:i+1] * expert_out  # [batch, embedding_dim]
+            outputs.append(weighted_out)
         combined = sum(outputs)  # [batch, embedding_dim]
         
         # Joint fusion with normalization and residual connection
@@ -360,11 +368,15 @@ class SimpleMoEModel(nn.Module):
         output = self.decoder(fused_output)  # [batch, vocab_size]
         
         # Debug: Check output shape (should be [batch, vocab_size])
+        # Only print once to reduce noise
         if len(output.shape) != 2:
-            print(f"⚠️  Model decoder output shape is unexpected: {output.shape}")
-            print(f"   fused_output shape: {fused_output.shape}")
-            print(f"   pooled_text shape: {pooled_text.shape}")
-            print(f"   text_tokens shape: {text_tokens.shape}")
+            if not hasattr(self, '_debug_shape_warned') or not self._debug_shape_warned:
+                print(f"⚠️  Model decoder output shape is unexpected: {output.shape}")
+                print(f"   fused_output shape: {fused_output.shape}")
+                print(f"   pooled_text shape: {pooled_text.shape}")
+                print(f"   text_tokens shape: {text_tokens.shape}")
+                print(f"   This should not happen - model should output [batch, vocab_size]")
+                self._debug_shape_warned = True
         
         if return_load_balance_loss or return_gate_logits:
             if return_gate_logits:
@@ -680,10 +692,6 @@ def train_real_model(
                 output, gate_logits_tuple = model(input_tokens, return_gate_logits=True)  # [batch, vocab_size]
                 gate_logits, _, _ = gate_logits_tuple  # Single shared gate
                 
-                # Debug: Print shapes if unexpected
-                if len(output.shape) != 2:
-                    print(f"⚠️  Unexpected output shape: {output.shape}, input_tokens shape: {input_tokens.shape}")
-                
                 # Ensure output is 2D [batch, vocab_size] - handle any shape issues
                 original_output_shape = output.shape
                 if len(output.shape) > 2:
@@ -691,7 +699,10 @@ def train_real_model(
                     # This shouldn't happen with current model, but handle it gracefully
                     batch_size, output_seq_len, vocab_size = output.shape
                     input_seq_len = input_tokens.shape[1]  # Original input sequence length
-                    print(f"⚠️  Output is 3D {output.shape}, input_tokens shape: {input_tokens.shape}, target_tokens shape: {target_tokens.shape}")
+                    # Only print warning once per epoch
+                    if batch_idx == 0 and epoch == start_epoch:
+                        print(f"⚠️  Output is 3D {output.shape}, reshaping to 2D. This indicates a bug in the model.")
+                        print(f"   input_tokens shape: {input_tokens.shape}, target_tokens shape: {target_tokens.shape}")
                     
                     # Flatten output: [batch, output_seq_len, vocab_size] -> [batch*output_seq_len, vocab_size]
                     output = output.contiguous().view(-1, vocab_size)  # [batch*output_seq_len, vocab_size]
@@ -714,7 +725,8 @@ def train_real_model(
                             padding = torch.full((padding_len,), last_token, dtype=target.dtype, device=target.device)
                             target = torch.cat([target, padding], dim=0)
                     
-                    print(f"   Reshaped: output {output.shape}, target {target.shape}")
+                    if batch_idx == 0 and epoch == start_epoch:
+                        print(f"   Reshaped: output {output.shape}, target {target.shape}")
                 elif len(output.shape) == 1:
                     # If output is 1D [vocab_size], add batch dimension
                     print(f"⚠️  Output is 1D, unsqueezing: {output.shape} -> [1, vocab_size]")
@@ -991,14 +1003,40 @@ def train_real_model(
                     
                     # During evaluation, don't need load-balancing loss
                     output = model(input_tokens, return_load_balance_loss=False)
-                    target = target_tokens[:, -1]
+                    
+                    # Handle output shape (should be [batch, vocab_size] but might be 3D)
+                    original_output_shape = output.shape
+                    if len(output.shape) > 2:
+                        # If output is [batch, seq_len, vocab_size], flatten it
+                        batch_size, output_seq_len, vocab_size = output.shape
+                        output = output.contiguous().view(-1, vocab_size)
+                        # Use corresponding target tokens
+                        if target_tokens.shape[1] >= output_seq_len:
+                            target = target_tokens[:, -output_seq_len:].contiguous().view(-1)
+                        else:
+                            target = target_tokens.contiguous().view(-1)
+                            # Pad if needed
+                            if target.shape[0] < output.shape[0]:
+                                last_token = target[-1].item() if target.numel() > 0 else 0
+                                padding = torch.full((output.shape[0] - target.shape[0],), last_token, 
+                                                   dtype=target.dtype, device=target.device)
+                                target = torch.cat([target, padding], dim=0)
+                    else:
+                        target = target_tokens[:, -1]
                     
                     mask = (target != 0)
                     if mask.sum() == 0:
                         continue
                     
-                    masked_output = output[mask]
+                    masked_output = output[mask, :]  # Explicit indexing
                     masked_target = target[mask]
+                    
+                    # Ensure shapes are correct
+                    if len(masked_output.shape) == 1:
+                        masked_output = masked_output.unsqueeze(0)
+                    if len(masked_target.shape) > 1:
+                        masked_target = masked_target.flatten()
+                    
                     test_loss_val = criterion(masked_output, masked_target)
                     test_total_loss += test_loss_val.item()
                     

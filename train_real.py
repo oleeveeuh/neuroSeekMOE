@@ -562,11 +562,44 @@ def train_real_model(
             print("   Using default DeepSpeed config")
             ds_config = {}
         
-        # Set auto values in config
-        if ds_config.get("optimizer", {}).get("params", {}).get("lr") == "auto":
-            ds_config["optimizer"]["params"]["lr"] = learning_rate
-        if ds_config.get("optimizer", {}).get("params", {}).get("weight_decay") == "auto":
-            ds_config["optimizer"]["params"]["weight_decay"] = 1e-5
+        # Set auto values in config - replace all "auto" strings with actual values
+        # BF16
+        if "bf16" not in ds_config:
+            ds_config["bf16"] = {}
+        if ds_config["bf16"].get("enabled") == "auto":
+            ds_config["bf16"]["enabled"] = False  # Default to FP32 for compatibility
+        
+        # Optimizer params
+        if "optimizer" not in ds_config:
+            ds_config["optimizer"] = {"type": "AdamW", "params": {}}
+        if "params" not in ds_config["optimizer"]:
+            ds_config["optimizer"]["params"] = {}
+        opt_params = ds_config["optimizer"]["params"]
+        if opt_params.get("lr") == "auto":
+            opt_params["lr"] = learning_rate
+        if opt_params.get("betas") == "auto":
+            opt_params["betas"] = [0.9, 0.999]  # Standard Adam/AdamW betas
+        if opt_params.get("eps") == "auto":
+            opt_params["eps"] = 1e-8  # Standard epsilon
+        if opt_params.get("weight_decay") == "auto":
+            opt_params["weight_decay"] = 1e-5
+        
+        # Scheduler params
+        if "scheduler" not in ds_config:
+            ds_config["scheduler"] = {"type": "WarmupLR", "params": {}}
+        if "params" not in ds_config["scheduler"]:
+            ds_config["scheduler"]["params"] = {}
+        sched_params = ds_config["scheduler"]["params"]
+        if sched_params.get("warmup_min_lr") == "auto":
+            sched_params["warmup_min_lr"] = 0.0
+        if sched_params.get("warmup_max_lr") == "auto":
+            sched_params["warmup_max_lr"] = learning_rate
+        if sched_params.get("warmup_num_steps") == "auto":
+            # Default to 10% of total steps (estimate based on epochs)
+            # This is approximate - actual steps depend on dataset size
+            sched_params["warmup_num_steps"] = max(100, int(epochs * 100 * 0.1))
+        
+        # Training batch sizes
         if ds_config.get("train_batch_size") == "auto":
             ds_config["train_batch_size"] = batch_size
         if ds_config.get("train_micro_batch_size_per_gpu") == "auto":
@@ -576,6 +609,25 @@ def train_real_model(
         if ds_config.get("gradient_clipping") == "auto":
             ds_config["gradient_clipping"] = 1.0
         
+        # Zero optimization auto values
+        if "zero_optimization" not in ds_config:
+            ds_config["zero_optimization"] = {}
+        zero_opt = ds_config["zero_optimization"]
+        if zero_opt.get("reduce_bucket_size") == "auto":
+            zero_opt["reduce_bucket_size"] = 5e8
+        if zero_opt.get("stage3_prefetch_bucket_size") == "auto":
+            zero_opt["stage3_prefetch_bucket_size"] = 5e7
+        if zero_opt.get("stage3_param_persistence_threshold") == "auto":
+            zero_opt["stage3_param_persistence_threshold"] = 1e6
+        
+        # Debug: Print config values (first few key ones)
+        print(f"   Config values:")
+        print(f"     Optimizer type: {ds_config.get('optimizer', {}).get('type', 'N/A')}")
+        print(f"     LR: {opt_params.get('lr', 'N/A')}, Betas: {opt_params.get('betas', 'N/A')}, Eps: {opt_params.get('eps', 'N/A')}")
+        print(f"     Weight decay: {opt_params.get('weight_decay', 'N/A')}")
+        print(f"     ZeRO stage: {ds_config.get('zero_optimization', {}).get('stage', 'N/A')}")
+        print(f"     BF16 enabled: {ds_config.get('bf16', {}).get('enabled', 'N/A')}")
+        
         # Initialize DeepSpeed
         model_engine, optimizer, _, scheduler = deepspeed.initialize(
             model=model,
@@ -583,9 +635,9 @@ def train_real_model(
         )
         
         print(f"✅ DeepSpeed initialized")
-        print(f"   Optimizer: AdamW")
+        print(f"   Optimizer: {ds_config.get('optimizer', {}).get('type', 'AdamW')}")
         print(f"   Learning rate: {learning_rate}")
-        print(f"   Weight decay: {ds_config.get('optimizer', {}).get('params', {}).get('weight_decay', 'N/A')}")
+        print(f"   Weight decay: {opt_params.get('weight_decay', 'N/A')}")
         print(f"   ZeRO stage: {ds_config.get('zero_optimization', {}).get('stage', 'N/A')}")
     else:
         if use_deepspeed:

@@ -1166,11 +1166,12 @@ class SimpleMoEModel(nn.Module):
         # std(expert_load) / mean(expert_load) - coefficient of variation
         expert_load_float = expert_load.float()  # [num_routed_experts]
         mean_load = expert_load_float.mean()
-        if mean_load > 0:
+        if mean_load > 0 and num_routed_experts > 1:
+            # std() requires at least 2 elements to avoid the warning
             std_load = expert_load_float.std()
             load_imbalance = std_load / (mean_load + 1e-10)  # Scalar
         else:
-            load_imbalance = torch.tensor(0.0, device=device)  # No imbalance if no load
+            load_imbalance = torch.tensor(0.0, device=device)  # No imbalance if no load or single expert
         
         # Metric 3: Top expert fraction
         # max(expert_load) / total_tokens - fraction going to most loaded expert
@@ -1850,6 +1851,9 @@ def train_real_model(
             total_aux_loss = 0.0  # Track combined auxiliary loss
             total_load_bal_loss = 0.0  # Track load balance loss component
             total_z_loss = 0.0  # Track Z-loss component
+            total_cap_loss = 0.0  # Track capacity loss component
+            total_dropped_fraction = 0.0  # Track dropped token fraction
+            total_expert_utilization = 0.0  # Track expert utilization
             batch_count = 0
             bert_scores = []
             diagnostics_run = False  # Flag to ensure diagnostics run once per first epoch

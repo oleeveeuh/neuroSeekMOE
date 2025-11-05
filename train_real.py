@@ -28,6 +28,13 @@ except ImportError:
     PYTORCH_AVAILABLE = False
     print("⚠️  PyTorch not available. Please install with: pip install torch")
 
+try:
+    import deepspeed
+    DEEPSPEED_AVAILABLE = True
+except ImportError:
+    DEEPSPEED_AVAILABLE = False
+    print("⚠️  DeepSpeed not available. Install with: pip install deepspeed")
+
 from model_architecture import Disease
 
 
@@ -408,6 +415,8 @@ def train_real_model(
     num_multimodal_experts: int = None,
     comparison_mode: bool = False,
     early_stopping_patience: int = 5,
+    deepspeed_config: str = "ds_config.json",
+    use_deepspeed: bool = True,
 ) -> Dict[str, float]:
     """Real PyTorch training with actual parameter updates.
     
@@ -536,18 +545,64 @@ def train_real_model(
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
-    # Add weight decay for regularization (L2 regularization)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-    # Learning rate scheduler to reduce LR when validation plateaus
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6
-    )
     
-    # DIAGNOSTIC 4 (continued): Optimizer state
-    print(f"   Optimizer: {type(optimizer).__name__}")
-    print(f"   Learning rate: {learning_rate}")
-    print(f"   Weight decay: {optimizer.param_groups[0]['weight_decay']}")
-    print(f"   Optimizer param groups: {len(optimizer.param_groups)}")
+    # Initialize DeepSpeed if available and requested
+    model_engine = None
+    optimizer = None
+    scheduler = None
+    
+    if use_deepspeed and DEEPSPEED_AVAILABLE:
+        print(f"\n🚀 Initializing DeepSpeed with config: {deepspeed_config}")
+        # Load DeepSpeed config
+        if os.path.exists(deepspeed_config):
+            with open(deepspeed_config, 'r') as f:
+                ds_config = json.load(f)
+        else:
+            print(f"⚠️  DeepSpeed config file not found: {deepspeed_config}")
+            print("   Using default DeepSpeed config")
+            ds_config = {}
+        
+        # Set auto values in config
+        if ds_config.get("optimizer", {}).get("params", {}).get("lr") == "auto":
+            ds_config["optimizer"]["params"]["lr"] = learning_rate
+        if ds_config.get("optimizer", {}).get("params", {}).get("weight_decay") == "auto":
+            ds_config["optimizer"]["params"]["weight_decay"] = 1e-5
+        if ds_config.get("train_batch_size") == "auto":
+            ds_config["train_batch_size"] = batch_size
+        if ds_config.get("train_micro_batch_size_per_gpu") == "auto":
+            ds_config["train_micro_batch_size_per_gpu"] = batch_size
+        if ds_config.get("gradient_accumulation_steps") == "auto":
+            ds_config["gradient_accumulation_steps"] = 1
+        if ds_config.get("gradient_clipping") == "auto":
+            ds_config["gradient_clipping"] = 1.0
+        
+        # Initialize DeepSpeed
+        model_engine, optimizer, _, scheduler = deepspeed.initialize(
+            model=model,
+            config=ds_config
+        )
+        
+        print(f"✅ DeepSpeed initialized")
+        print(f"   Optimizer: AdamW")
+        print(f"   Learning rate: {learning_rate}")
+        print(f"   Weight decay: {ds_config.get('optimizer', {}).get('params', {}).get('weight_decay', 'N/A')}")
+        print(f"   ZeRO stage: {ds_config.get('zero_optimization', {}).get('stage', 'N/A')}")
+    else:
+        if use_deepspeed:
+            print(f"⚠️  DeepSpeed requested but not available. Using standard PyTorch optimizer.")
+        # Standard PyTorch optimizer
+        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+        # Learning rate scheduler to reduce LR when validation plateaus
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6
+        )
+        model_engine = model
+        
+        # DIAGNOSTIC 4 (continued): Optimizer state
+        print(f"   Optimizer: {type(optimizer).__name__}")
+        print(f"   Learning rate: {learning_rate}")
+        print(f"   Weight decay: {optimizer.param_groups[0]['weight_decay']}")
+        print(f"   Optimizer param groups: {len(optimizer.param_groups)}")
     
     # Initialize tracking variables before checkpoint loading
     start_epoch = 0
@@ -558,41 +613,69 @@ def train_real_model(
     
     # Check for resume checkpoint
     if resume_from_epoch is not None:
-        checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{resume_from_epoch}.pt")
-        if os.path.exists(checkpoint_path):
-            print(f"\n📂 Loading checkpoint from epoch {resume_from_epoch}...")
-            try:
-                checkpoint = torch.load(checkpoint_path, map_location=device)
-                model.load_state_dict(checkpoint['model_state_dict'])
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                start_epoch = checkpoint['epoch']
-                if 'loss' in checkpoint:
-                    loaded_checkpoint_loss = checkpoint['loss']
-                # Load best test loss if available
-                if 'best_test_loss' in checkpoint:
-                    best_test_loss = checkpoint['best_test_loss']
-                if 'best_test_loss_epoch' in checkpoint:
-                    best_test_loss_epoch = checkpoint['best_test_loss_epoch']
-                print(f"✅ Checkpoint loaded successfully!")
-                print(f"   Resuming from epoch {start_epoch}")
-                if loaded_checkpoint_loss is not None:
-                    print(f"   Previous loss: {loaded_checkpoint_loss:.4f}")
-                if best_test_loss != float('inf'):
-                    print(f"   Previous best test loss: {best_test_loss:.4f} (epoch {best_test_loss_epoch})")
-                # Verify model parameters were loaded
-                num_params = sum(p.numel() for p in model.parameters())
-                print(f"   Model parameters: {num_params:,} total")
-                # Check a sample parameter to verify it's not random
-                sample_param = next(model.parameters())
-                print(f"   Sample param stats: mean={sample_param.data.mean().item():.4f}, std={sample_param.data.std().item():.4f}")
-            except Exception as e:
-                print(f"⚠️  Failed to load checkpoint: {e}")
+        if use_deepspeed and DEEPSPEED_AVAILABLE and model_engine is not None:
+            # DeepSpeed checkpoint loading
+            checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{resume_from_epoch}")
+            if os.path.exists(checkpoint_path):
+                print(f"\n📂 Loading DeepSpeed checkpoint from epoch {resume_from_epoch}...")
+                try:
+                    _, client_state = model_engine.load_checkpoint(checkpoint_path)
+                    if client_state:
+                        start_epoch = client_state.get('epoch', resume_from_epoch)
+                        if 'loss' in client_state:
+                            loaded_checkpoint_loss = client_state['loss']
+                        if 'best_test_loss' in client_state:
+                            best_test_loss = client_state['best_test_loss']
+                        if 'best_test_loss_epoch' in client_state:
+                            best_test_loss_epoch = client_state['best_test_loss_epoch']
+                    print(f"✅ DeepSpeed checkpoint loaded successfully!")
+                    print(f"   Resuming from epoch {start_epoch}")
+                except Exception as e:
+                    print(f"⚠️  Failed to load DeepSpeed checkpoint: {e}")
+                    print("   Starting training from scratch...")
+                    start_epoch = 0
+            else:
+                print(f"⚠️  DeepSpeed checkpoint not found: {checkpoint_path}")
                 print("   Starting training from scratch...")
                 start_epoch = 0
         else:
-            print(f"⚠️  Checkpoint not found: {checkpoint_path}")
-            print("   Starting training from scratch...")
-            start_epoch = 0
+            # Standard PyTorch checkpoint loading
+            checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{resume_from_epoch}.pt")
+            if os.path.exists(checkpoint_path):
+                print(f"\n📂 Loading checkpoint from epoch {resume_from_epoch}...")
+                try:
+                    checkpoint = torch.load(checkpoint_path, map_location=device)
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                    if optimizer is not None:
+                        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    start_epoch = checkpoint['epoch']
+                    if 'loss' in checkpoint:
+                        loaded_checkpoint_loss = checkpoint['loss']
+                    # Load best test loss if available
+                    if 'best_test_loss' in checkpoint:
+                        best_test_loss = checkpoint['best_test_loss']
+                    if 'best_test_loss_epoch' in checkpoint:
+                        best_test_loss_epoch = checkpoint['best_test_loss_epoch']
+                    print(f"✅ Checkpoint loaded successfully!")
+                    print(f"   Resuming from epoch {start_epoch}")
+                    if loaded_checkpoint_loss is not None:
+                        print(f"   Previous loss: {loaded_checkpoint_loss:.4f}")
+                    if best_test_loss != float('inf'):
+                        print(f"   Previous best test loss: {best_test_loss:.4f} (epoch {best_test_loss_epoch})")
+                    # Verify model parameters were loaded
+                    num_params = sum(p.numel() for p in model.parameters())
+                    print(f"   Model parameters: {num_params:,} total")
+                    # Check a sample parameter to verify it's not random
+                    sample_param = next(model.parameters())
+                    print(f"   Sample param stats: mean={sample_param.data.mean().item():.4f}, std={sample_param.data.std().item():.4f}")
+                except Exception as e:
+                    print(f"⚠️  Failed to load checkpoint: {e}")
+                    print("   Starting training from scratch...")
+                    start_epoch = 0
+            else:
+                print(f"⚠️  Checkpoint not found: {checkpoint_path}")
+                print("   Starting training from scratch...")
+                start_epoch = 0
     
     # Initialize timing and test metrics before training check
     start_time = time.time()
@@ -685,11 +768,13 @@ def train_real_model(
                     continue
                 
                 # Forward pass
-                optimizer.zero_grad()
+                # DeepSpeed handles zero_grad internally
+                if not (use_deepspeed and DEEPSPEED_AVAILABLE):
+                    optimizer.zero_grad()
                 
                 # Process sequence by averaging, then predict next token
                 # For simplicity, we'll use the full sequence and predict the last token
-                output, gate_logits_tuple = model(input_tokens, return_gate_logits=True)  # [batch, vocab_size]
+                output, gate_logits_tuple = model_engine(input_tokens, return_gate_logits=True)  # [batch, vocab_size]
                 gate_logits, _, _ = gate_logits_tuple  # Single shared gate
                 
                 # Ensure output is 2D [batch, vocab_size] - handle any shape issues
@@ -825,8 +910,17 @@ def train_real_model(
                     print(f"     Aux loss (entropy-based): {aux_loss.item():.4f} (weighted: {load_balance_weight * aux_loss.item():.6f})")
                     print(f"     Total loss: {loss.item():.4f}")
                 
-                # Backward pass
-                loss.backward()
+                # Backward pass and optimizer step
+                if use_deepspeed and DEEPSPEED_AVAILABLE and model_engine is not None:
+                    # DeepSpeed handles backward and step, including gradient clipping
+                    model_engine.backward(loss)
+                    model_engine.step()
+                else:
+                    # Standard PyTorch backward and step
+                    loss.backward()
+                    # Gradient clipping to prevent exploding gradients
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
                 
                 # DIAGNOSTIC 1: Check if gradients are nonzero (first batch only)
                 if not diagnostics_run and epoch == start_epoch:
@@ -842,10 +936,6 @@ def train_real_model(
                     if not grad_found:
                         print(f"     ⚠️  WARNING: All gradients are None!")
                 
-                # Gradient clipping to prevent exploding gradients
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                
                 total_loss += loss.item()
                 
                 # DIAGNOSTIC 2: Sample model output vs target (first batch only)
@@ -853,7 +943,7 @@ def train_real_model(
                     print(f"\n  🔍 DIAGNOSTIC 2: Model Output vs Target")
                     with torch.no_grad():
                         # Get model output for this batch (without load-balance loss for diagnostics)
-                        sample_output = model(input_tokens, return_load_balance_loss=False)
+                        sample_output = model_engine(input_tokens, return_load_balance_loss=False)
                         probs = torch.softmax(sample_output, dim=-1)
                         topk = torch.topk(probs, 5, dim=-1).indices
                         
@@ -1002,7 +1092,7 @@ def train_real_model(
                         continue
                     
                     # During evaluation, don't need load-balancing loss
-                    output = model(input_tokens, return_load_balance_loss=False)
+                    output = model_engine(input_tokens, return_load_balance_loss=False)
                     
                     # Handle output shape (should be [batch, vocab_size] but might be 3D)
                     original_output_shape = output.shape
@@ -1095,8 +1185,16 @@ def train_real_model(
             test_bert = test_avg_bert
             
             # Update learning rate scheduler based on test loss
-            scheduler.step(test_avg_loss)
-            current_lr = optimizer.param_groups[0]['lr']
+            if scheduler is not None:
+                if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(test_avg_loss)
+                else:
+                    # DeepSpeed scheduler handles steps internally
+                    pass
+            if optimizer is not None and hasattr(optimizer, 'param_groups'):
+                current_lr = optimizer.param_groups[0]['lr']
+            else:
+                current_lr = learning_rate
             
             # Track best test loss
             if test_avg_loss < best_test_loss:
@@ -1121,19 +1219,35 @@ def train_real_model(
                     break
             
             # Save checkpoint (include test metrics)
-            checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{epoch + 1}.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_loss,
-                'bertscore': avg_bert,
-                'test_loss': test_avg_loss,
-                'test_bertscore': test_avg_bert,
-                'best_test_loss': best_test_loss,
-                'best_test_loss_epoch': best_test_loss_epoch,
-            }, checkpoint_path)
-            print(f"   Checkpoint saved: {checkpoint_path}")
+            if use_deepspeed and DEEPSPEED_AVAILABLE and model_engine is not None:
+                # DeepSpeed checkpoint saving
+                checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch + 1}")
+                client_state = {
+                    'epoch': epoch + 1,
+                    'loss': avg_loss,
+                    'bertscore': avg_bert,
+                    'test_loss': test_avg_loss,
+                    'test_bertscore': test_avg_bert,
+                    'best_test_loss': best_test_loss,
+                    'best_test_loss_epoch': best_test_loss_epoch,
+                }
+                model_engine.save_checkpoint(checkpoint_path, client_state=client_state)
+                print(f"   DeepSpeed checkpoint saved: {checkpoint_path}")
+            else:
+                # Standard PyTorch checkpoint saving
+                checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{epoch + 1}.pt")
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else None,
+                    'loss': avg_loss,
+                    'bertscore': avg_bert,
+                    'test_loss': test_avg_loss,
+                    'test_bertscore': test_avg_bert,
+                    'best_test_loss': best_test_loss,
+                    'best_test_loss_epoch': best_test_loss_epoch,
+                }, checkpoint_path)
+                print(f"   Checkpoint saved: {checkpoint_path}")
             
             # Update final metrics (from last epoch)
             final_bert = avg_bert
@@ -1230,6 +1344,12 @@ def main() -> None:
     ap.add_argument("--vocab-path", type=str, default=None,
                    help="Path to vocabulary file (auto-generated in outputs_dir if not provided)")
     
+    # DeepSpeed options
+    ap.add_argument("--deepspeed-config", default="ds_config.json",
+                   help="Path to DeepSpeed configuration file (default: ds_config.json)")
+    ap.add_argument("--no-deepspeed", action="store_true",
+                   help="Disable DeepSpeed even if available (use standard PyTorch)")
+    
     args = ap.parse_args()
     
     # Validate
@@ -1263,6 +1383,8 @@ def main() -> None:
         num_image_experts=args.num_image_experts,
         num_multimodal_experts=args.num_multimodal_experts,
         early_stopping_patience=args.early_stopping_patience if args.early_stopping_patience > 0 else None,
+        deepspeed_config=args.deepspeed_config,
+        use_deepspeed=not args.no_deepspeed,
     )
 
 

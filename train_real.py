@@ -704,9 +704,11 @@ def compute_capacity_loss_and_overflow_expert_choice(
     # This encourages balanced load distribution across experts
     avg_load = expert_load_float.mean()  # Average tokens per expert
     load_deviation = expert_load_float - avg_load  # [num_experts]
-    capacity_loss = (load_deviation ** 2).sum().item()  # L2 penalty
+    capacity_loss_tensor = (load_deviation ** 2).sum()  # L2 penalty (keep as tensor for gradients)
     # Normalize by number of experts for scale invariance
-    capacity_loss = capacity_loss / (num_experts + 1e-10)
+    capacity_loss_tensor = capacity_loss_tensor / (num_experts + 1e-10)
+    # Convert to float scalar for return (backward compatibility)
+    capacity_loss = capacity_loss_tensor.item()
     
     # Step 5: Calculate dropped_token_fraction = (overflow tokens) / (total tokens)
     # Count tokens that are masked out (dropped due to overflow)
@@ -721,7 +723,9 @@ def compute_capacity_loss_and_overflow_expert_choice(
     expert_utilization_rate = torch.clamp(expert_utilization_rate, min=0.0, max=2.0)
     
     # Return all 5 values for logging and auxiliary loss computation
-    return capacity_mask, capacity_loss, expert_load, dropped_token_fraction, expert_utilization_rate
+    # Note: capacity_loss is returned as float, but we also need the tensor version
+    # The caller should store the tensor version separately for gradient computation
+    return capacity_mask, capacity_loss, expert_load, dropped_token_fraction, expert_utilization_rate, capacity_loss_tensor
 
 
 def batch_expert_forward_expert_choice(
@@ -1263,7 +1267,7 @@ class SimpleMoEModel(nn.Module):
         
         # Compute capacity constraints and handle overflow
         total_tokens = batch_size * seq_len
-        capacity_mask, capacity_loss, expert_load, dropped_token_fraction, expert_utilization_rate = compute_capacity_loss_and_overflow_expert_choice(
+        capacity_mask, capacity_loss, expert_load, dropped_token_fraction, expert_utilization_rate, capacity_loss_tensor = compute_capacity_loss_and_overflow_expert_choice(
             token_indices=token_indices,
             batch_size=batch_size,
             seq_len=seq_len,
@@ -1273,8 +1277,10 @@ class SimpleMoEModel(nn.Module):
         )
         
         # Store capacity metrics for later access
+        # capacity_loss is float (for logging), capacity_loss_tensor is tensor (for gradients)
         self._capacity_metrics = {
-            'capacity_loss': capacity_loss,  # Store as float scalar
+            'capacity_loss': capacity_loss,  # Store as float for logging
+            'capacity_loss_tensor': capacity_loss_tensor,  # Keep tensor for gradients (preserves computational graph)
             'dropped_token_fraction': dropped_token_fraction,
             'expert_utilization_rate': expert_utilization_rate,  # Tensor [num_experts]
             'expert_load': expert_load,  # Tensor [num_experts]
@@ -1421,12 +1427,15 @@ class SimpleMoEModel(nn.Module):
                         z_loss_val = z_loss_val.to(output.device)
                     
                     # Get capacity loss (computed during forward pass)
-                    # capacity_loss is returned as float scalar from compute_capacity_loss_and_overflow_expert_choice
-                    cap_loss = self._capacity_metrics.get('capacity_loss', 0.0)
-                    if isinstance(cap_loss, torch.Tensor):
-                        cap_loss = cap_loss.item()
-                    # Convert to tensor for loss computation on correct device
-                    cap_loss_tensor = torch.tensor(float(cap_loss), device=output.device, dtype=output.dtype)
+                    # Use tensor version to preserve gradients
+                    cap_loss_tensor = self._capacity_metrics.get('capacity_loss_tensor', None)
+                    if cap_loss_tensor is None:
+                        # Fallback to float version if tensor not available
+                        cap_loss_float = self._capacity_metrics.get('capacity_loss', 0.0)
+                        cap_loss_tensor = torch.tensor(float(cap_loss_float), device=output.device, dtype=output.dtype, requires_grad=False)
+                    else:
+                        # Ensure it's on the correct device
+                        cap_loss_tensor = cap_loss_tensor.to(output.device)
                     
                     # Combined auxiliary loss: weighted sum of all losses
                     aux_loss = load_bal_loss + self.z_loss_weight * z_loss_val + 0.1 * cap_loss_tensor

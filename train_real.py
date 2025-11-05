@@ -2109,30 +2109,50 @@ def train_real_model(
                 if use_deepspeed and DEEPSPEED_AVAILABLE and model_engine is not None:
                     # DeepSpeed handles backward and step, including gradient clipping
                     model_engine.backward(loss)
+                    
+                    # DIAGNOSTIC 1: Check if gradients are nonzero (first batch only, BEFORE step)
+                    # Check right after backward() but before step() which zeros gradients
+                    if not diagnostics_run and epoch == start_epoch:
+                        print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check")
+                        grad_found = False
+                        # Access model through model_engine.module for DeepSpeed
+                        model_for_grads = model_engine.module if hasattr(model_engine, 'module') else model
+                        for n, p in model_for_grads.named_parameters():
+                            if p.grad is not None:
+                                grad_mean = p.grad.abs().mean().item()
+                                grad_max = p.grad.abs().max().item()
+                                print(f"     {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
+                                grad_found = True
+                                break  # Just show first non-None gradient
+                        if not grad_found:
+                            print(f"     ⚠️  WARNING: All gradients are None!")
+                    
                     model_engine.step()
                 else:
                     # Standard PyTorch backward and step
                     loss.backward()
+                    
+                    # DIAGNOSTIC 1: Check if gradients are nonzero (first batch only, BEFORE step)
+                    # Check right after backward() but before optimizer.step() which zeros gradients
+                    if not diagnostics_run and epoch == start_epoch:
+                        print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check")
+                        grad_found = False
+                        for n, p in model.named_parameters():
+                            if p.grad is not None:
+                                grad_mean = p.grad.abs().mean().item()
+                                grad_max = p.grad.abs().max().item()
+                                print(f"     {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
+                                grad_found = True
+                                break  # Just show first non-None gradient
+                        if not grad_found:
+                            print(f"     ⚠️  WARNING: All gradients are None!")
+                    
                     # Gradient clipping to prevent exploding gradients
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                 
                 # Increment global step counter for temperature scheduling
                 global_step += 1
-                
-                # DIAGNOSTIC 1: Check if gradients are nonzero (first batch only)
-                if not diagnostics_run and epoch == start_epoch:
-                    print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check")
-                    grad_found = False
-                    for n, p in model.named_parameters():
-                        if p.grad is not None:
-                            grad_mean = p.grad.abs().mean().item()
-                            grad_max = p.grad.abs().max().item()
-                            print(f"     {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
-                            grad_found = True
-                            break  # Just show first non-None gradient
-                    if not grad_found:
-                        print(f"     ⚠️  WARNING: All gradients are None!")
                 
                 total_loss += loss.item()
                 

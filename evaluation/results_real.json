@@ -1,0 +1,32 @@
+{
+  "neuroseek_moe": {
+    "text": {
+      "bleu": 0.0006666666666666666,
+      "bertscore": 0.5003333333333333,
+      "factuality": 0.5
+    },
+    "image_alignment": {
+      "clipscore": 0.500601049553761,
+      "fid": 0.0
+    },
+    "routing": {
+      "avg_entropy": 0.6819219862150651,
+      "expert_utilization": {
+        "text": 7500,
+        "image": 7500,
+        "joint": 7500
+      }
+    }
+  },
+  "baselines": {
+    "text_only_biogpt": {
+      "bleu": 0.3,
+      "bertscore": 0.55,
+      "factuality": 0.5
+    },
+    "image_only_sd_blip": {
+      "clipscore": 0.35,
+      "fid": 0.9
+    }
+  }
+}

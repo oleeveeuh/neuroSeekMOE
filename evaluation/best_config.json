@@ -1,0 +1,15 @@
+{
+  "config_name": "1text+1image+1multi",
+  "num_text_experts": 1,
+  "num_image_experts": 1,
+  "num_multimodal_experts": 1,
+  "total_experts": 3,
+  "metrics": {
+    "final_loss": 7.425013524256569,
+    "final_bertscore": -0.5183473785718282,
+    "test_loss": 9.099595324198406,
+    "test_bertscore": -0.5002331402566698
+  },
+  "model_path": "outputs/config_1text+1image+1multi/final_model.pt",
+  "checkpoint_dir": "checkpoints/config_1text+1image+1multi"
+}

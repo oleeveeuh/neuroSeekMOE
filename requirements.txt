@@ -1,0 +1,35 @@
+# NeuroSeek-MoE Dependencies
+
+# Core dependencies
+numpy>=1.21.0
+pillow>=8.0.0
+requests>=2.25.0
+
+# Optional dependencies for enhanced functionality
+# Uncomment as needed:
+
+# For NeMo Curator integration
+# nemo-curator>=0.1.0
+
+# For enhanced metrics
+# sacrebleu>=2.0.0
+# bert-score>=0.3.0
+# torch-fidelity>=0.3.0
+# git+https://github.com/openai/CLIP.git
+
+# For model integration
+# diffusers>=0.20.0
+# transformers>=4.20.0
+# accelerate>=0.20.0
+
+# For logging and visualization
+# tensorboard>=2.8.0
+# wandb>=0.12.0
+
+# For web demo
+# gradio>=3.0.0
+
+# For Jupyter notebooks
+# jupyter>=1.0.0
+# matplotlib>=3.5.0
+# seaborn>=0.11.0

@@ -1626,6 +1626,17 @@ def train_real_model(
     print(f"   Total parameters: {total_params:,}")
     print(f"   Trainable parameters: {trainable_params:,}")
     
+    # Verify requires_grad on all parameters
+    params_without_grad = [n for n, p in model.named_parameters() if not p.requires_grad]
+    if params_without_grad:
+        print(f"⚠️  WARNING: {len(params_without_grad)} parameters have requires_grad=False:")
+        for n in params_without_grad[:5]:  # Show first 5
+            print(f"     - {n}")
+        if len(params_without_grad) > 5:
+            print(f"     ... and {len(params_without_grad) - 5} more")
+    else:
+        print(f"✅ All parameters have requires_grad=True")
+    
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
     
@@ -2123,18 +2134,46 @@ def train_real_model(
                     # Check right after backward() but before step() which zeros gradients
                     if not diagnostics_run and epoch == start_epoch:
                         print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check")
-                        grad_found = False
                         # Access model through model_engine.module for DeepSpeed
                         model_for_grads = model_engine.module if hasattr(model_engine, 'module') else model
+                        
+                        # First check: Verify loss requires_grad
+                        print(f"     Loss requires_grad: {loss.requires_grad}")
+                        print(f"     Main loss requires_grad: {main_loss.requires_grad}")
+                        print(f"     Aux loss requires_grad: {aux_loss.requires_grad}")
+                        
+                        # Second check: Verify output requires_grad
+                        print(f"     Output requires_grad: {output.requires_grad}")
+                        
+                        # Third check: Verify model parameters have requires_grad
+                        params_with_grad = [n for n, p in model_for_grads.named_parameters() if p.requires_grad]
+                        params_without_grad = [n for n, p in model_for_grads.named_parameters() if not p.requires_grad]
+                        print(f"     Parameters with requires_grad=True: {len(params_with_grad)}")
+                        if params_without_grad:
+                            print(f"     ⚠️  Parameters with requires_grad=False: {len(params_without_grad)}")
+                            for n in params_without_grad[:3]:
+                                print(f"        - {n}")
+                        
+                        # Fourth check: Check for gradients
+                        grad_found = False
+                        grad_counts = {'with_grad': 0, 'without_grad': 0, 'none': 0}
                         for n, p in model_for_grads.named_parameters():
                             if p.grad is not None:
                                 grad_mean = p.grad.abs().mean().item()
                                 grad_max = p.grad.abs().max().item()
-                                print(f"     {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
-                                grad_found = True
-                                break  # Just show first non-None gradient
+                                if grad_mean > 0 or grad_max > 0:
+                                    print(f"     ✅ {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
+                                    grad_found = True
+                                    grad_counts['with_grad'] += 1
+                                else:
+                                    grad_counts['without_grad'] += 1
+                            else:
+                                grad_counts['none'] += 1
+                        
                         if not grad_found:
                             print(f"     ⚠️  WARNING: All gradients are None!")
+                            print(f"     Gradient summary: {grad_counts['with_grad']} with gradients, {grad_counts['without_grad']} zero gradients, {grad_counts['none']} None gradients")
+                            print(f"     This suggests the computational graph is broken or DeepSpeed is not computing gradients.")
                     
                     model_engine.step()
                 else:
@@ -2145,16 +2184,44 @@ def train_real_model(
                     # Check right after backward() but before optimizer.step() which zeros gradients
                     if not diagnostics_run and epoch == start_epoch:
                         print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check")
+                        
+                        # First check: Verify loss requires_grad
+                        print(f"     Loss requires_grad: {loss.requires_grad}")
+                        print(f"     Main loss requires_grad: {main_loss.requires_grad}")
+                        print(f"     Aux loss requires_grad: {aux_loss.requires_grad}")
+                        
+                        # Second check: Verify output requires_grad
+                        print(f"     Output requires_grad: {output.requires_grad}")
+                        
+                        # Third check: Verify model parameters have requires_grad
+                        params_with_grad = [n for n, p in model.named_parameters() if p.requires_grad]
+                        params_without_grad = [n for n, p in model.named_parameters() if not p.requires_grad]
+                        print(f"     Parameters with requires_grad=True: {len(params_with_grad)}")
+                        if params_without_grad:
+                            print(f"     ⚠️  Parameters with requires_grad=False: {len(params_without_grad)}")
+                            for n in params_without_grad[:3]:
+                                print(f"        - {n}")
+                        
+                        # Fourth check: Check for gradients
                         grad_found = False
+                        grad_counts = {'with_grad': 0, 'without_grad': 0, 'none': 0}
                         for n, p in model.named_parameters():
                             if p.grad is not None:
                                 grad_mean = p.grad.abs().mean().item()
                                 grad_max = p.grad.abs().max().item()
-                                print(f"     {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
-                                grad_found = True
-                                break  # Just show first non-None gradient
+                                if grad_mean > 0 or grad_max > 0:
+                                    print(f"     ✅ {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
+                                    grad_found = True
+                                    grad_counts['with_grad'] += 1
+                                else:
+                                    grad_counts['without_grad'] += 1
+                            else:
+                                grad_counts['none'] += 1
+                        
                         if not grad_found:
                             print(f"     ⚠️  WARNING: All gradients are None!")
+                            print(f"     Gradient summary: {grad_counts['with_grad']} with gradients, {grad_counts['without_grad']} zero gradients, {grad_counts['none']} None gradients")
+                            print(f"     This suggests the computational graph is broken.")
                     
                     # Gradient clipping to prevent exploding gradients
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

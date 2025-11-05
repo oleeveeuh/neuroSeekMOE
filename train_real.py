@@ -18,6 +18,8 @@ import os
 from typing import Dict, List, Tuple, Optional
 import time
 
+# math is already imported, so we can use math.cos and math.pi
+
 try:
     import torch
     import torch.nn as nn
@@ -38,8 +40,244 @@ except ImportError:
 from model_architecture import Disease
 
 
+class ExpertChoiceSTE(torch.autograd.Function):
+    """Expert Choice routing with Straight-Through Estimator.
+    
+    Forward pass: Returns token indices selected by each expert (discrete).
+    Backward pass: Gradients flow through soft probabilities (continuous).
+    This implements Expert Choice routing where experts choose tokens.
+    """
+    
+    @staticmethod
+    def forward(ctx, logits, k):
+        """
+        Args:
+            logits: [batch, num_experts] tensor of router logits (token-to-expert scores)
+            k: Number of top tokens each expert should select
+            
+        Returns:
+            token_indices: [num_experts, k] tensor of token indices selected by each expert
+            expert_probs: [num_experts, k] tensor of soft probabilities for gradient flow
+        """
+        batch_size, num_experts = logits.shape
+        
+        # Transpose: [batch, num_experts] -> [num_experts, batch]
+        # Each expert now sees scores for all tokens
+        expert_logits = logits.t()  # [num_experts, batch]
+        
+        # Each expert selects top-k tokens
+        topk_values, topk_indices = torch.topk(expert_logits, k, dim=-1)  # [num_experts, k]
+        
+        # Compute soft probabilities for backward pass
+        expert_probs = torch.softmax(topk_values, dim=-1)  # [num_experts, k]
+        
+        # Store for backward pass
+        ctx.save_for_backward(expert_probs, topk_indices, logits)
+        ctx.k = k
+        ctx.batch_size = batch_size
+        ctx.num_experts = num_experts
+        
+        return topk_indices, expert_probs
+    
+    @staticmethod
+    def backward(ctx, grad_indices, grad_probs):
+        """
+        Backward pass: Use soft probabilities to allow gradients to flow through routing.
+        """
+        expert_probs, topk_indices, logits = ctx.saved_tensors
+        k = ctx.k
+        batch_size = ctx.batch_size
+        num_experts = ctx.num_experts
+        
+        # Initialize gradient for logits
+        grad_logits = None
+        
+        if ctx.needs_input_grad[0]:
+            expert_logits = logits.t()  # [num_experts, batch]
+            grad_logits = torch.zeros_like(logits)  # [batch, num_experts]
+            
+            # For each expert, distribute gradients through soft probabilities
+            for expert_idx in range(num_experts):
+                # Get gradients for this expert's selected tokens
+                grad_from_probs = grad_probs[expert_idx]  # [k]
+                selected_token_indices = topk_indices[expert_idx]  # [k]
+                
+                # Distribute gradient proportionally to soft probability
+                for i in range(k):
+                    token_idx = selected_token_indices[i].item()
+                    prob_weight = expert_probs[expert_idx, i]
+                    grad_logits[token_idx, expert_idx] += grad_from_probs[i] * prob_weight
+        
+        return grad_logits, None  # No gradient for k
+
+
+class TopKGatingSTE(torch.autograd.Function):
+    """Straight-Through Estimator for top-k gating (Token Choice - legacy).
+    
+    Forward pass: Returns hard one-hot assignments for top-k experts (discrete).
+    Backward pass: Gradients flow through soft probabilities (continuous).
+    This allows better gradient flow through discrete routing decisions.
+    
+    NOTE: This is kept for backward compatibility. Expert Choice routing is preferred.
+    """
+    
+    @staticmethod
+    def forward(ctx, logits, k):
+        """
+        Args:
+            logits: [batch, num_experts] tensor of router logits
+            k: Number of top experts to select
+            
+        Returns:
+            hard_assignments: [batch, num_experts] one-hot tensor for top-k experts
+            topk_indices: [batch, k] indices of selected experts
+        """
+        # Get top-k experts
+        topk_values, topk_indices = torch.topk(logits, k, dim=-1)  # [batch, k]
+        
+        # Compute soft probabilities for backward pass
+        soft_probs = torch.softmax(topk_values, dim=-1)  # [batch, k]
+        
+        # Create hard one-hot assignments (discrete for forward pass)
+        batch_size, num_experts = logits.shape
+        hard_assignments = torch.zeros(batch_size, num_experts, device=logits.device, dtype=logits.dtype)
+        
+        # Create one-hot encoding: each row has k ones at top-k positions
+        batch_indices = torch.arange(batch_size, device=logits.device).unsqueeze(1).expand(-1, k)  # [batch, k]
+        hard_assignments[batch_indices, topk_indices] = 1.0 / k  # Uniform weighting for top-k
+        
+        # Store soft probabilities for backward pass
+        ctx.save_for_backward(soft_probs, topk_indices, logits)
+        ctx.k = k
+        
+        return hard_assignments, topk_indices
+    
+    @staticmethod
+    def backward(ctx, grad_hard, grad_indices):
+        """
+        Backward pass: Use soft probabilities instead of hard assignments.
+        This allows gradients to flow through the routing decision as if it was continuous.
+        
+        The key insight: gradients flow through soft probabilities (continuous),
+        even though forward pass used hard assignments (discrete).
+        """
+        soft_probs, topk_indices, logits = ctx.saved_tensors
+        k = ctx.k
+        
+        # Initialize gradient for logits
+        grad_logits = None
+        
+        if ctx.needs_input_grad[0]:
+            batch_size, num_experts = logits.shape
+            grad_logits = torch.zeros_like(logits)
+            
+            # Get top-k logits and compute softmax for gradient computation
+            topk_values = torch.gather(logits, dim=1, index=topk_indices)  # [batch, k]
+            
+            # Compute soft probabilities for all top-k experts
+            # This is what we use for gradient flow (continuous approximation)
+            soft_probs_normalized = torch.softmax(topk_values, dim=-1)  # [batch, k]
+            
+            # Extract gradients at top-k positions from grad_hard
+            batch_indices = torch.arange(batch_size, device=logits.device).unsqueeze(1).expand(-1, k)  # [batch, k]
+            
+            # For each top-k expert, distribute gradient through soft probability
+            # This is the STE: use soft probabilities in backward even though forward used hard
+            for i in range(k):
+                # Get gradient flowing back through hard assignment at this position
+                grad_from_hard = grad_hard[batch_indices, topk_indices[:, i]]  # [batch]
+                
+                # Distribute gradient proportionally to soft probability
+                # This allows the routing decision to learn via gradient flow
+                grad_logits[batch_indices, topk_indices[:, i]] += (
+                    grad_from_hard.unsqueeze(1) * soft_probs_normalized[:, i:i+1]
+                )
+        
+        return grad_logits, None  # No gradient for k
+
+
+def expert_choice_routing(gate_logits: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Expert Choice routing: each expert selects top-k tokens to process.
+    
+    Unlike token-choice routing (where tokens select experts), Expert Choice has each
+    expert selecting top-k tokens, enabling better load balancing and capacity control.
+    
+    Args:
+        gate_logits: [batch*seq_len, num_routed_experts] tensor of router logits
+            Each row represents a token's scores for all experts.
+            Each column represents an expert's scores for all tokens.
+        k: Number of tokens each expert should select (top-k selection)
+    
+    Returns:
+        token_indices: [num_routed_experts, k] tensor of token indices selected by each expert
+            Values are indices into the flattened batch*seq_len dimension (0 to batch*seq_len-1)
+        expert_probs: [num_routed_experts, k] tensor of soft probabilities for selected tokens
+            Used for gradient flow through routing decisions
+    
+    Implementation Details:
+    1. Transpose gate_logits to get expert-centric view: [num_experts, batch*seq_len]
+    2. For each expert, compute softmax over all tokens to get selection probabilities
+    3. Select top-k tokens with highest probabilities using torch.topk
+    4. Return token indices and their probabilities
+    
+    Edge Cases:
+    - If k exceeds number of available tokens, k is clamped to num_tokens
+    - If num_experts is 0, returns empty tensors
+    """
+    num_tokens, num_experts = gate_logits.shape
+    
+    # Handle edge cases
+    if num_tokens == 0 or num_experts == 0:
+        # Return empty tensors with correct shapes
+        empty_indices = torch.empty((num_experts, 0), dtype=torch.long, device=gate_logits.device)
+        empty_probs = torch.empty((num_experts, 0), dtype=gate_logits.dtype, device=gate_logits.device)
+        return empty_indices, empty_probs
+    
+    # Clamp k to not exceed available tokens
+    k = min(k, num_tokens)
+    
+    # Transpose: [num_tokens, num_experts] -> [num_experts, num_tokens]
+    # Now each row represents an expert seeing scores for all tokens
+    expert_logits = gate_logits.t()  # [num_experts, num_tokens]
+    
+    # For each expert, compute softmax over all tokens to get selection probabilities
+    # This gives each expert a probability distribution over all tokens
+    expert_probs_all = torch.softmax(expert_logits, dim=-1)  # [num_experts, num_tokens]
+    
+    # For each expert, select top-k tokens with highest probabilities
+    # topk_values: [num_experts, k] - probabilities of selected tokens
+    # topk_indices: [num_experts, k] - indices of selected tokens (0 to num_tokens-1)
+    topk_values, topk_indices = torch.topk(expert_probs_all, k, dim=-1)  # [num_experts, k]
+    
+    # Normalize the selected probabilities (softmax over top-k selections)
+    # This ensures probabilities sum to 1 for each expert's selected tokens
+    expert_probs = torch.softmax(topk_values, dim=-1)  # [num_experts, k]
+    
+    # Return token indices and their probabilities
+    # token_indices: [num_experts, k] - indices into flattened batch*seq_len
+    # expert_probs: [num_experts, k] - probabilities for gradient flow
+    return topk_indices, expert_probs
+
+
+def top_k_gating_ste(logits, k=2):
+    """Top-k gating with Straight-Through Estimator for better gradient flow.
+    
+    Args:
+        logits: [batch, num_experts] tensor of router logits
+        k: Number of top experts to select
+        
+    Returns:
+        hard_assignments: [batch, num_experts] one-hot tensor for top-k experts
+        topk_indices: [batch, k] indices of selected experts
+    """
+    return TopKGatingSTE.apply(logits, k)
+
+
 def top_k_gating(logits, k=2):
-    """Select top-k experts per token and return their indices and normalized weights."""
+    """Select top-k experts per token and return their indices and normalized weights.
+    
+    Legacy function for backward compatibility. Consider using top_k_gating_ste for better gradients.
+    """
     topk_values, topk_indices = torch.topk(logits, k, dim=-1)
     gate_probs = torch.softmax(topk_values, dim=-1)
     return gate_probs, topk_indices
@@ -231,25 +469,444 @@ class NeurodegenerativeDataset(Dataset):
         }
 
 
-def load_balance_loss(gate_logits):
-    """Encourages balanced expert usage across the batch using entropy."""
+def load_balance_loss(gate_logits: torch.Tensor) -> torch.Tensor:
+    """Compute auxiliary load balancing loss to encourage balanced expert utilization.
+    
+    This loss penalizes uneven expert utilization by measuring how evenly probability
+    mass is distributed across experts. It encourages the model to use all experts
+    rather than concentrating on a few.
+    
+    Reference: DeepSeek paper uses importance-weighted load balancing where tokens
+    the model is more confident about contribute more to the load balancing objective.
+    This encourages balance in high-confidence assignments while allowing flexibility
+    in low-confidence ones.
+    
+    Args:
+        gate_logits: [batch*seq_len, num_routed_experts] tensor of router logits
+            Each row represents a token's scores for all experts
+    
+    Returns:
+        Scalar loss tensor - penalty for imbalanced expert utilization
+        Higher values indicate more imbalanced routing
+    
+    Implementation Details:
+    1. Compute softmax probabilities: probs = softmax(gate_logits, dim=1)
+    2. Compute importance weights: importance = max(probs, dim=1)[0]
+       (importance of each token = max probability it assigns to any expert)
+    3. Compute expert assignment rates: expert_fraction = mean(probs, dim=0)
+       (fraction of total probability mass going to each expert on average)
+    4. Compute load balance loss: penalizes uneven expert utilization
+    5. Return loss * num_routed_experts for scaling
+    """
     if gate_logits is None or gate_logits.numel() == 0:
         return torch.tensor(0.0, device=gate_logits.device if gate_logits is not None else 'cpu')
-    probs = torch.softmax(gate_logits, dim=-1)
-    mean_probs = probs.mean(dim=0)
-    # Add small epsilon to avoid log(0)
-    entropy = -(mean_probs * (mean_probs + 1e-10).log()).sum()
-    return entropy
+    
+    num_tokens, num_experts = gate_logits.shape
+    
+    # Step 1: Compute softmax probabilities: probs = softmax(gate_logits, dim=1)
+    # probs: [batch*seq_len, num_routed_experts]
+    # Each row sums to 1.0, representing probability distribution over experts for that token
+    probs = torch.softmax(gate_logits, dim=1)  # [batch*seq_len, num_routed_experts]
+    
+    # Step 2: Compute importance weights: importance = max(probs, dim=1)[0]
+    # importance: [batch*seq_len]
+    # Importance of each token = max probability it assigns to any expert
+    # High importance = token is confident about expert selection
+    # Low importance = token is uncertain about expert selection
+    importance = torch.max(probs, dim=1)[0]  # [batch*seq_len]
+    
+    # Step 3: Compute expert assignment rates: expert_fraction = mean(probs, dim=0)
+    # expert_fraction: [num_routed_experts]
+    # Fraction of total probability mass going to each expert on average
+    # If balanced, all experts should have similar fractions (close to 1/num_experts)
+    expert_fraction = probs.mean(dim=0)  # [num_routed_experts]
+    
+    # Step 4: Compute load balance loss
+    # Option 1: Without importance weighting (simpler)
+    # Penalize deviation from uniform distribution
+    # Ideal: each expert gets 1/num_experts of the probability mass
+    ideal_fraction = 1.0 / num_experts
+    deviation = expert_fraction - ideal_fraction  # [num_experts]
+    # L2 penalty on deviation encourages uniform distribution
+    loss = (deviation ** 2).sum()  # Scalar
+    
+    # Alternative: With importance weighting (DeepSeek-style)
+    # Weight the load balancing by token importance
+    # This makes high-confidence tokens contribute more to load balancing
+    # importance_weighted_probs = probs * importance.unsqueeze(1)  # [batch*seq_len, num_experts]
+    # importance_weighted_expert_fraction = importance_weighted_probs.mean(dim=0)  # [num_experts]
+    # importance_weighted_deviation = importance_weighted_expert_fraction - ideal_fraction
+    # loss = (importance_weighted_deviation ** 2).sum()
+    
+    # Step 5: Return loss * num_routed_experts for scaling
+    # This scales the loss to be comparable across different numbers of experts
+    scaled_loss = loss * num_experts
+    
+    return scaled_loss
+
+
+def z_loss(gate_logits: torch.Tensor, z_loss_weight: float = 1.0, target_z: float = 1.0) -> torch.Tensor:
+    """Z-loss: log-sum-exp penalty to encourage balanced expert routing.
+    
+    Z-loss measures the "spread" of routing logits for each token. By penalizing
+    extreme values, it encourages moderate routing confidence, preventing both
+    overconfident (single expert dominates) and underconfident (mass spread too uniformly)
+    routing decisions.
+    
+    Why Z-loss?
+    - High z values mean the model has many competitive routing options
+    - Low z values mean routing is dominated by one expert
+    - By penalizing z^2, we encourage moderate spread, preventing both:
+      a) Overconfident routing (all mass on one expert)
+      b) Underconfident routing (mass spread too uniformly)
+    - This improves load balancing naturally through the routing dynamics
+    
+    Args:
+        gate_logits: [batch*seq_len, num_routed_experts] tensor of router logits
+            Each row represents a token's scores for all experts
+        z_loss_weight: Weight for the Z-loss (default 1.0)
+        target_z: Target Z value for auxiliary loss (default 1.0)
+            If None, only uses mean(z^2) penalty
+    
+    Returns:
+        Scalar loss tensor - penalty for extreme routing confidence
+        Lower values indicate more balanced routing with moderate confidence
+    
+    Implementation Details:
+    1. For each token (row in gate_logits):
+       - Compute log-sum-exp: z_i = log(sum(exp(logits_i))) for token i
+       - This measures the "spread" of logits for that token
+    2. Use torch.logsumexp for numerical stability
+    3. Return loss = mean(z^2) to penalize extreme values
+    4. Optional: Add auxiliary loss = (z.mean() - target_z)^2
+    """
+    if gate_logits is None or gate_logits.numel() == 0:
+        return torch.tensor(0.0, device=gate_logits.device if gate_logits is not None else 'cpu')
+    
+    # Step 1: For each token (row in gate_logits), compute log-sum-exp
+    # z_i = log(sum(exp(logits_i))) for token i
+    # This measures the "spread" of logits for that token
+    # Higher z = more competitive routing options (logits spread out)
+    # Lower z = one expert dominates (logits concentrated)
+    
+    # Step 2: Implementation using torch.logsumexp for numerical stability
+    # logsumexp computes log(sum(exp(x))) numerically stably
+    z = torch.logsumexp(gate_logits, dim=1)  # [batch*seq_len]
+    # z[i] = log(sum(exp(gate_logits[i, :]))) for each token i
+    
+    # Step 3: Return loss = mean(z^2) to penalize extreme values
+    # Penalizing z^2 encourages moderate spread:
+    # - Very high z (many competitive options) -> penalized
+    # - Very low z (one expert dominates) -> penalized
+    # - Moderate z -> lower penalty
+    z_squared_loss = (z ** 2).mean()  # Scalar
+    
+    # Step 4 (Optional): Add auxiliary loss = z_loss_weight * (z.mean() - target_z)^2
+    # This encourages the mean Z value to be close to target_z
+    # target_z = 1.0 is a reasonable default (moderate spread)
+    if target_z is not None:
+        mean_z = z.mean()  # Scalar - average Z across all tokens
+        auxiliary_loss = (mean_z - target_z) ** 2  # Penalty for deviation from target
+        # Combine both losses
+        total_loss = z_squared_loss + z_loss_weight * auxiliary_loss
+    else:
+        total_loss = z_squared_loss
+    
+    return total_loss
+
+
+def compute_capacity_loss_and_overflow_expert_choice(
+    token_indices: torch.Tensor,  # [num_experts, top_k]
+    batch_size: int,
+    seq_len: int,
+    num_experts: int,
+    capacity_factor: float,
+    device: torch.device
+) -> Tuple[Optional[torch.Tensor], float, torch.Tensor, float, torch.Tensor]:
+    """Compute capacity loss and handle token overflow for Expert Choice routing.
+    
+    Ensures sparsity by enforcing that experts don't get overloaded, dropping excess
+    tokens that get routed to shared experts as fallback.
+    
+    Args:
+        token_indices: [num_experts, top_k] tensor of token indices selected by each expert
+            Values are indices into flattened batch*seq_len dimension
+        batch_size: Batch size
+        seq_len: Sequence length
+        num_experts: Number of routed experts
+        capacity_factor: Capacity multiplier (default 1.5)
+            Higher values allow more tokens per expert, lower values enforce stricter sparsity
+        device: Device for tensors
+    
+    Returns:
+        capacity_mask: [num_experts, top_k] bool mask (True = keep token, False = drop/overflow)
+            None if no capacity constraints needed
+        capacity_loss: float scalar - penalty for exceeding capacity
+            L2 penalty on deviation from average load
+        expert_load: [num_experts] tensor - number of tokens assigned to each expert
+            Counts non-unique tokens (same token can be selected multiple times)
+        dropped_token_fraction: float - fraction of tokens dropped due to overflow
+            Range: 0.0 (no drops) to 1.0 (all dropped)
+        expert_utilization_rate: [num_experts] tensor - utilization percentage per expert
+            Values are expert_load / max_tokens_per_expert for each expert
+            Range: 0.0 to potentially >1.0 (if exceeding capacity)
+    
+    Implementation Details:
+    1. Calculate max_tokens_per_expert = capacity_factor * (batch_size * seq_len) / num_experts
+    2. For each expert, count how many tokens it selected (non-unique from token_indices)
+    3. Create capacity_mask where True if within capacity, False if overflow
+    4. Compute capacity_loss as L2 penalty: loss = sum((expert_load - avg_load)^2)
+    5. Calculate dropped_token_fraction = (overflow tokens) / (total tokens)
+    6. Calculate expert_utilization_rate = expert_load / max_tokens_per_expert per expert
+    """
+    num_experts_actual, top_k = token_indices.shape
+    
+    # Handle edge case: no experts or no tokens
+    if num_experts == 0 or num_experts_actual == 0:
+        empty_mask = torch.empty((0, top_k), dtype=torch.bool, device=device)
+        empty_load = torch.zeros(num_experts, dtype=torch.long, device=device)
+        empty_util = torch.zeros(num_experts, dtype=torch.float, device=device)
+        return None, 0.0, empty_load, 0.0, empty_util
+    
+    # Step 1: Calculate max_tokens_per_expert = capacity_factor * (batch_size * seq_len) / num_experts
+    total_tokens = batch_size * seq_len
+    max_tokens_per_expert = capacity_factor * (total_tokens / num_experts)
+    
+    # Step 2: For each expert, count how many tokens it selected (non-unique from token_indices)
+    # Count all token selections, including duplicates (same token selected multiple times)
+    expert_load = torch.zeros(num_experts, dtype=torch.long, device=device)
+    for expert_idx in range(num_experts_actual):
+        if expert_idx < num_experts:
+            # Count all token selections (non-unique count)
+            selected_tokens = token_indices[expert_idx]  # [top_k]
+            expert_load[expert_idx] = len(selected_tokens)  # Count all, including duplicates
+    
+    # Convert to float for calculations
+    expert_load_float = expert_load.float()  # [num_experts]
+    
+    # Step 3: Create capacity_mask where True if within capacity, False if overflow
+    capacity_mask = torch.ones(num_experts_actual, top_k, dtype=torch.bool, device=device)
+    
+    for expert_idx in range(num_experts_actual):
+        if expert_idx < num_experts:
+            if expert_load[expert_idx] > max_tokens_per_expert:
+                # Expert exceeds capacity - mask out excess tokens
+                # Keep first max_tokens_per_expert tokens, drop the rest
+                excess_count = expert_load[expert_idx] - int(max_tokens_per_expert)
+                if excess_count > 0:
+                    # Mask out the last excess_count token selections
+                    # If excess_count >= top_k, mask all tokens
+                    mask_start_idx = max(0, top_k - excess_count)
+                    capacity_mask[expert_idx, mask_start_idx:] = False
+    
+    # Step 4: Compute capacity_loss as L2 penalty on deviation from average load
+    # Formula: loss = sum((expert_load - avg_load)^2)
+    # This encourages balanced load distribution across experts
+    avg_load = expert_load_float.mean()  # Average tokens per expert
+    load_deviation = expert_load_float - avg_load  # [num_experts]
+    capacity_loss = (load_deviation ** 2).sum().item()  # L2 penalty
+    # Normalize by number of experts for scale invariance
+    capacity_loss = capacity_loss / (num_experts + 1e-10)
+    
+    # Step 5: Calculate dropped_token_fraction = (overflow tokens) / (total tokens)
+    # Count tokens that are masked out (dropped due to overflow)
+    total_token_selections = num_experts_actual * top_k
+    dropped_selections = (~capacity_mask).sum().item()
+    dropped_token_fraction = dropped_selections / total_token_selections if total_token_selections > 0 else 0.0
+    
+    # Step 6: Calculate expert_utilization_rate = expert_load / max_tokens_per_expert per expert
+    # Returns tensor with utilization rate for each expert
+    expert_utilization_rate = expert_load_float / (max_tokens_per_expert + 1e-10)  # [num_experts]
+    # Clamp to reasonable range (0 to 2.0) for numerical stability
+    expert_utilization_rate = torch.clamp(expert_utilization_rate, min=0.0, max=2.0)
+    
+    # Return all 5 values for logging and auxiliary loss computation
+    return capacity_mask, capacity_loss, expert_load, dropped_token_fraction, expert_utilization_rate
+
+
+def batch_expert_forward_expert_choice(
+    expert_modules: nn.ModuleList,
+    inputs: torch.Tensor,  # [batch*seq_len, embedding_dim]
+    token_indices: torch.Tensor,  # [num_experts, top_k] - flat indices into batch*seq_len
+    expert_probs: torch.Tensor,  # [num_experts, top_k] - gating probabilities
+    capacity_mask: Optional[torch.Tensor] = None  # [num_experts, top_k] bool
+) -> torch.Tensor:
+    """Vectorized Expert Choice forward pass using scatter_add for efficient GPU computation.
+    
+    In Expert Choice routing, each expert selects which tokens to process.
+    This implementation uses torch.scatter_add_ for efficient in-place accumulation
+    of expert outputs, enabling GPU acceleration.
+    
+    Args:
+        expert_modules: ModuleList of expert networks
+        inputs: [batch*seq_len, embedding_dim] input tensor (flattened batch and sequence)
+        token_indices: [num_experts, top_k] tensor of token indices selected by each expert
+            Values are indices into the flattened batch*seq_len dimension (0 to batch*seq_len-1)
+        expert_probs: [num_experts, top_k] tensor of expert probabilities for selected tokens
+        capacity_mask: Optional [num_experts, top_k] boolean mask (True = keep token, False = drop)
+            If provided, only tokens where mask is True are processed
+    
+    Returns:
+        outputs: [batch*seq_len, embedding_dim] - expert outputs aggregated back to original shape
+            Each token position contains the weighted sum of outputs from all experts that selected it
+    
+    Implementation Details:
+    1. Initialize outputs: [batch*seq_len, embedding_dim] with zeros
+    2. For each expert:
+       a. Get selected token indices for this expert from token_indices[expert_id]
+       b. If capacity_mask exists, mask out overflow tokens
+       c. Gather tokens: selected_tokens = inputs[token_indices]
+       d. Process through expert: expert_output = expert(selected_tokens)
+       e. Weight by probabilities: weighted_output = expert_probs * expert_output
+       f. Scatter back to outputs using torch.scatter_add_ for efficient accumulation
+    3. Return aggregated outputs
+    
+    Key Optimization: Uses torch.scatter_add_ for efficient in-place accumulation of expert outputs
+    instead of looping through tokens. This enables GPU acceleration.
+    """
+    num_tokens, embedding_dim = inputs.shape
+    num_experts, top_k = token_indices.shape
+    
+    # Step 1: Initialize outputs: [batch*seq_len, embedding_dim] with zeros
+    outputs = torch.zeros(num_tokens, embedding_dim, device=inputs.device, dtype=inputs.dtype)
+    
+    # Step 2: For each expert, process selected tokens and scatter outputs back
+    for expert_id, expert in enumerate(expert_modules):
+        if expert_id >= num_experts:
+            break
+        
+        # Step 2a: Get selected token indices for this expert
+        token_idx = token_indices[expert_id]  # [top_k] indices
+        
+        # Step 2b: If capacity_mask exists, mask out overflow tokens
+        if capacity_mask is not None:
+            mask = capacity_mask[expert_id]  # [top_k] bool
+            token_idx = token_idx[mask]  # [selected_k] indices (may be fewer than top_k)
+            
+            # Get corresponding probabilities for selected tokens
+            expert_prob = expert_probs[expert_id][mask]  # [selected_k]
+        else:
+            expert_prob = expert_probs[expert_id]  # [top_k]
+        
+        # Skip if no tokens selected after masking
+        if len(token_idx) == 0:
+            continue
+        
+        # Step 2c: Gather tokens: selected_tokens = inputs[token_indices[expert_id]]
+        # Ensure token indices are within valid range
+        valid_mask = (token_idx >= 0) & (token_idx < num_tokens)
+        if not valid_mask.all():
+            # Filter out invalid indices
+            token_idx = token_idx[valid_mask]
+            expert_prob = expert_prob[valid_mask]
+            if len(token_idx) == 0:
+                continue
+        
+        selected_inputs = inputs[token_idx]  # [selected_k, embedding_dim]
+        
+        # Step 2d: Process through expert: expert_output = expert(selected_tokens)
+        expert_output = expert(selected_inputs)  # [selected_k, embedding_dim]
+        
+        # Step 2e: Weight by probabilities: weighted_output = expert_probs * expert_output
+        # Reshape probabilities to [selected_k, 1] for broadcasting
+        expert_prob_expanded = expert_prob.unsqueeze(-1)  # [selected_k, 1]
+        weighted_output = expert_output * expert_prob_expanded  # [selected_k, embedding_dim]
+        
+        # Step 2f: Scatter back to outputs tensor at original token indices
+        # Use torch.scatter_add_ for efficient in-place accumulation
+        # token_idx: [selected_k] -> expand to [selected_k, embedding_dim] for scatter
+        token_idx_expanded = token_idx.unsqueeze(1).expand(-1, embedding_dim)  # [selected_k, embedding_dim]
+        
+        # Scatter add: accumulate weighted outputs at token positions
+        # This efficiently handles cases where multiple experts select the same token
+        outputs.scatter_add_(0, token_idx_expanded, weighted_output)
+    
+    # Return aggregated outputs [batch*seq_len, embedding_dim]
+    # Each token position now contains the weighted sum of outputs from all experts that selected it
+    return outputs
+
+
+def batch_expert_forward(expert_modules: nn.ModuleList, inputs: torch.Tensor, 
+                         expert_indices: torch.Tensor, gate_probs: torch.Tensor,
+                         capacity_mask: torch.Tensor = None) -> torch.Tensor:
+    """Vectorized expert forward pass using advanced indexing (Token Choice - legacy).
+    
+    Computes expert outputs in parallel and applies gating weights efficiently.
+    This replaces nested loops with vectorized operations for better performance.
+    
+    NOTE: This is kept for backward compatibility. Expert Choice routing is preferred.
+    
+    Args:
+        expert_modules: ModuleList of expert networks
+        inputs: [batch, embedding_dim] input tensor
+        expert_indices: [batch, top_k] tensor of expert indices to select
+        gate_probs: [batch, top_k] tensor of gating probabilities (or hard assignments)
+        capacity_mask: [batch, top_k] boolean mask for tokens within capacity (None = all allowed)
+        
+    Returns:
+        [batch, embedding_dim] tensor of weighted expert outputs
+    """
+    batch_size, embedding_dim = inputs.shape
+    top_k = expert_indices.shape[1]
+    
+    # Compute all expert outputs in parallel (vectorized)
+    # Stack all expert outputs: [batch, num_experts, embedding_dim]
+    all_expert_outputs = torch.stack([
+        expert(inputs) for expert in expert_modules
+    ], dim=1)  # [batch, num_experts, embedding_dim]
+    
+    # Use gather to select top-k expert outputs efficiently
+    # expert_indices: [batch, top_k] -> expand for gather: [batch, top_k, 1]
+    # Gather along expert dimension: [batch, top_k, embedding_dim]
+    expert_indices_expanded = expert_indices.unsqueeze(-1).expand(-1, -1, embedding_dim)  # [batch, top_k, embedding_dim]
+    selected_outputs = torch.gather(
+        all_expert_outputs, 
+        dim=1,  # Gather along expert dimension
+        index=expert_indices_expanded
+    )  # [batch, top_k, embedding_dim]
+    
+    # Apply capacity mask if provided (drop tokens that exceed capacity)
+    if capacity_mask is not None:
+        # Apply mask: set gate_probs to 0 for tokens exceeding capacity
+        gate_probs = gate_probs * capacity_mask.float()  # [batch, top_k]
+        # Renormalize to maintain probability distribution
+        gate_probs_sum = gate_probs.sum(dim=1, keepdim=True)  # [batch, 1]
+        gate_probs = gate_probs / (gate_probs_sum + 1e-10)  # Normalize, avoid division by zero
+    
+    # Apply gating probabilities: [batch, top_k, 1] * [batch, top_k, embedding_dim]
+    gate_probs_expanded = gate_probs.unsqueeze(-1)  # [batch, top_k, 1]
+    weighted_outputs = gate_probs_expanded * selected_outputs  # [batch, top_k, embedding_dim]
+    
+    # Sum over top_k dimension to get final output
+    final_output = weighted_outputs.sum(dim=1)  # [batch, embedding_dim]
+    
+    return final_output
 
 
 class SimpleMoEModel(nn.Module):
     """Simplified trainable MoE model with learnable parameters.
     
-    Supports flexible expert configurations:
-    - num_text_experts: Number of text-only experts
-    - num_image_experts: Number of image-only experts  
-    - num_multimodal_experts: Number of multimodal experts (handle both modalities)
-    """
+    Architecture:
+    - Shared Experts (always activated): Process all tokens, provide baseline functionality
+      - Typically 1-2 experts (num_shared_experts parameter)
+      - Always active regardless of routing decisions
+      - Stored in self.shared_experts ModuleList
+      
+    - Routed Experts (selected via Expert Choice routing): Specialized experts that select tokens
+      - Typically 60+ experts for large-scale models (num_routed_experts parameter)
+      - Each expert selects top_k tokens to process
+      - Selected dynamically via Expert Choice routing
+      - Stored in self.routed_experts ModuleList
+      
+    Routing Mechanism:
+    - Expert Choice: Each routed expert selects top_k tokens to process
+    - Capacity Control: Enforces sparsity via (batch_size * seq_len) / num_routed_experts
+    - Fail-safe: Unprocessed tokens fall back to shared experts
+    
+    Backward Compatibility:
+    - Supports legacy num_experts, num_text_experts, num_image_experts, num_multimodal_experts
+    - If num_routed_experts is None, infers from legacy parameters
+"""
     
     def __init__(
         self,
@@ -259,40 +916,107 @@ class SimpleMoEModel(nn.Module):
         num_text_experts: int = None,
         num_image_experts: int = None,
         num_multimodal_experts: int = None,
+        num_shared_experts: int = 1,
+        num_routed_experts: int = None,
+        top_k: int = 2,
+        noise_scale: float = 0.01,
+        z_loss_weight: float = 0.001,
+        capacity_factor: float = 1.5,
+        residual_factor: float = 0.1,
+        temperature_schedule: str = "constant",
+        temperature_start: float = 1.0,
+        temperature_end: float = 0.1,
+        temperature_steps: int = 1000,
     ):
         super().__init__()
         
-        # Backward compatibility: if only num_experts is provided, use it
-        # Otherwise, use the sum of all expert types or default to num_experts
-        if num_text_experts is None and num_image_experts is None and num_multimodal_experts is None:
-            total_num_experts = num_experts
-        else:
-            num_text_experts = num_text_experts or 0
-            num_image_experts = num_image_experts or 0
-            num_multimodal_experts = num_multimodal_experts or 0
-            total_num_experts = num_text_experts + num_image_experts + num_multimodal_experts
-            if total_num_experts == 0:
-                total_num_experts = num_experts  # Fallback to default
+        # Validate and set shared experts count (typically 1-2)
+        if num_shared_experts < 0:
+            raise ValueError(f"num_shared_experts must be >= 0, got {num_shared_experts}")
+        self.num_shared_experts = num_shared_experts
         
-        self.num_experts = total_num_experts
+        # Determine routed experts count (typically 60+)
+        # Backward compatibility: if num_routed_experts is None, infer from legacy parameters
+        if num_routed_experts is None:
+            # Legacy mode: if only num_experts is provided, use it as routed experts
+            # Otherwise, use the sum of all expert types or default to num_experts
+            if num_text_experts is None and num_image_experts is None and num_multimodal_experts is None:
+                total_num_experts = num_experts
+            else:
+                num_text_experts = num_text_experts or 0
+                num_image_experts = num_image_experts or 0
+                num_multimodal_experts = num_multimodal_experts or 0
+                total_num_experts = num_text_experts + num_image_experts + num_multimodal_experts
+                if total_num_experts == 0:
+                    total_num_experts = num_experts  # Fallback to default
+            
+            # Subtract shared experts from total to get routed experts
+            num_routed_experts = max(1, total_num_experts - num_shared_experts)
+        
+        # Validate routed experts count
+        if num_routed_experts < 1:
+            raise ValueError(f"num_routed_experts must be >= 1, got {num_routed_experts}")
+        
+        self.num_routed_experts = num_routed_experts
+        self.num_experts = num_shared_experts + num_routed_experts  # Total for compatibility
+        
+        # Validate top_k parameter (controls how many tokens each expert selects)
+        if top_k < 1:
+            raise ValueError(f"top_k must be >= 1, got {top_k}")
+        if top_k > num_routed_experts:
+            raise ValueError(f"top_k ({top_k}) cannot exceed num_routed_experts ({num_routed_experts})")
+        self.top_k = top_k
+        self.noise_scale = noise_scale  # Scale of noise added to router logits during training
+        self.z_loss_weight = z_loss_weight  # Weight for Z-loss auxiliary loss
+        self.target_z = 1.0  # Target Z value for Z-loss (default 1.0 for moderate spread)
+        self.capacity_factor = capacity_factor  # Capacity factor for expert load balancing
+        self.residual_factor = residual_factor  # Residual connection strength (default 0.1)
         self.embedding_dim = embedding_dim
         self.vocab_size = vocab_size  # Store vocab_size for validation
         
         # Embedding layer
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         
-        # Shared expert pool (standard 2-layer MLP)
-        self.experts = nn.ModuleList([
+        # ============================================================
+        # Expert Architecture: Shared vs Routed Experts
+        # ============================================================
+        
+        # Shared experts: always activated regardless of gating
+        # These experts process all tokens and provide baseline functionality
+        # Typically 1-2 experts that ensure all tokens are processed
+        self.shared_experts = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(embedding_dim, 4 * embedding_dim),
                 nn.ReLU(),
                 nn.Linear(4 * embedding_dim, embedding_dim),
-            ) for _ in range(total_num_experts)
+            ) for _ in range(self.num_shared_experts)
         ])
         
-        # Single shared gate
-        self.gate = nn.Linear(embedding_dim, total_num_experts)
-        self.gate_temperature = 1.0  # Temperature for softmax (can be tuned)
+        # Routed experts: selected via Expert Choice routing (top-k tokens per expert)
+        # These experts specialize on different patterns and are selected dynamically
+        # Typically 60+ experts for large-scale models
+        # Each expert selects top_k tokens to process via routing
+        self.routed_experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(embedding_dim, 4 * embedding_dim),
+                nn.ReLU(),
+                nn.Linear(4 * embedding_dim, embedding_dim),
+            ) for _ in range(self.num_routed_experts)
+        ])
+        
+        # Router gate: only routes to routed experts (not shared experts)
+        # Input: [batch, embedding_dim] -> Output: [batch, num_routed_experts]
+        # Used for Expert Choice routing where each expert selects top_k tokens
+        self.gate = nn.Linear(embedding_dim, self.num_routed_experts)
+        
+        # Temperature scheduling for router: enables exploration then exploitation
+        # Higher temperature early = soft routing (exploration)
+        # Lower temperature later = sparse routing (exploitation)
+        self.temperature_schedule = temperature_schedule
+        self.temperature_start = temperature_start
+        self.temperature_end = temperature_end
+        self.temperature_steps = temperature_steps
+        self.gate_temperature = temperature_start  # Initialize to start temperature
         
         # Joint fusion (combines expert outputs)
         # Single expert output dimension
@@ -303,13 +1027,184 @@ class SimpleMoEModel(nn.Module):
         )
         self.joint_fusion_norm = nn.LayerNorm(embedding_dim)
         
+        # Output normalization before projection (applied after combining experts)
+        self.output_norm = nn.LayerNorm(embedding_dim)
+        
+        # Dropout for regularization before residual connection
+        self.residual_dropout = nn.Dropout(p=0.1)
+        
         # Output decoder (standard 2-layer MLP)
         self.decoder = nn.Sequential(
             nn.Linear(embedding_dim, 4 * embedding_dim),
             nn.ReLU(),
             nn.Linear(4 * embedding_dim, vocab_size),
         )
+    
+    def update_temperature(self, step: int) -> None:
+        """Update router temperature based on schedule.
         
+        Higher temperature early in training enables exploration (soft routing),
+        then gradually cool down to enforce sparse, decisive routing decisions.
+        
+        Args:
+            step: Current training step (global step counter)
+        
+        Schedules:
+        - "constant": gate_temperature = temperature_start (no change)
+        - "linear": Linear interpolation from start to end
+        - "exponential": Exponential decay from start to end
+        - "cosine": Cosine annealing from start to end
+        """
+        if self.temperature_schedule == "constant":
+            # No change: keep temperature at start value
+            self.gate_temperature = self.temperature_start
+        
+        elif self.temperature_schedule == "linear":
+            # Linear interpolation: temperature_start -> temperature_end over temperature_steps
+            progress = min(step / self.temperature_steps, 1.0)
+            self.gate_temperature = self.temperature_start - (self.temperature_start - self.temperature_end) * progress
+        
+        elif self.temperature_schedule == "exponential":
+            # Exponential decay: temperature_start * (decay_rate ^ step)
+            # decay_rate chosen such that after temperature_steps, we reach temperature_end
+            if self.temperature_start > 0 and self.temperature_end > 0:
+                decay_rate = (self.temperature_end / self.temperature_start) ** (1.0 / self.temperature_steps)
+                progress = min(step / self.temperature_steps, 1.0)
+                current_step = int(progress * self.temperature_steps)
+                self.gate_temperature = self.temperature_start * (decay_rate ** current_step)
+            else:
+                # Fallback to linear if invalid values
+                progress = min(step / self.temperature_steps, 1.0)
+                self.gate_temperature = self.temperature_start - (self.temperature_start - self.temperature_end) * progress
+        
+        elif self.temperature_schedule == "cosine":
+            # Cosine annealing: smooth transition from start to end
+            progress = min(step / self.temperature_steps, 1.0)
+            # Cosine: 1 -> 0 over [0, pi], so we use 0.5 * (1 + cos(pi * progress))
+            cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+            self.gate_temperature = self.temperature_end + (self.temperature_start - self.temperature_end) * cosine_factor
+        
+        else:
+            # Invalid schedule: default to constant
+            print(f"⚠️  Invalid temperature_schedule '{self.temperature_schedule}', using 'constant'")
+            self.gate_temperature = self.temperature_start
+        
+        # Ensure temperature doesn't go below a minimum (avoid division by zero or negative)
+        self.gate_temperature = max(self.gate_temperature, 1e-6)
+    
+    def add_gating_noise(self, logits: torch.Tensor) -> torch.Tensor:
+        """Add noise to router logits during training to improve expert exploration.
+        
+        Adds small Gumbel or Gaussian noise to router logits only when training.
+        This prevents the model from always routing to the same experts early in training.
+        
+        Args:
+            logits: Router logits tensor of shape [batch, num_routed_experts]
+            
+        Returns:
+            Noisy logits of the same shape as input
+        """
+        if not self.training:
+            return logits
+        
+        # Use Gumbel noise (standard for categorical distributions)
+        # Gumbel noise is better for routing decisions as it's used in Gumbel-Softmax
+        # Generate Gumbel noise: -log(-log(U)) where U ~ Uniform(0,1)
+        uniform_noise = torch.rand_like(logits)
+        uniform_noise = torch.clamp(uniform_noise, min=1e-7, max=1.0 - 1e-7)  # Avoid log(0)
+        gumbel_noise = -torch.log(-torch.log(uniform_noise))
+        
+        # Scale the noise and add to logits
+        noisy_logits = logits + self.noise_scale * gumbel_noise
+        
+        return noisy_logits
+    
+    def compute_routing_metrics(
+        self,
+        gate_logits: torch.Tensor,  # [batch*seq_len, num_routed_experts]
+        token_indices: torch.Tensor,  # [num_routed_experts, top_k]
+        expert_load: torch.Tensor,  # [num_routed_experts]
+        total_tokens: int,
+        max_tokens_per_expert: float
+    ) -> Dict[str, torch.Tensor]:
+        """Compute detailed routing metrics for monitoring routing health.
+        
+        Purpose: Enable monitoring of routing health during training to detect issues like
+        expert collapse, load imbalance, or underutilization.
+        
+        Args:
+            gate_logits: [batch*seq_len, num_routed_experts] router logits
+            token_indices: [num_routed_experts, top_k] token indices selected by each expert
+            expert_load: [num_routed_experts] number of tokens assigned to each expert
+            total_tokens: Total number of tokens in the batch
+            max_tokens_per_expert: Maximum capacity per expert
+        
+        Returns:
+            Dictionary with routing metrics:
+            - router_entropy: scalar - entropy of routing distribution
+            - load_imbalance: scalar - standard deviation of expert loads / mean
+            - top_expert_fraction: scalar - fraction of tokens going to top expert
+            - expert_utilization: [num_routed_experts] - utilization per expert (0-1)
+            - token_concentration: scalar - Herfindahl index of token distribution
+        """
+        num_routed_experts = self.num_routed_experts
+        device = gate_logits.device
+        
+        # Metric 1: Router entropy
+        # For each token (row), compute softmax to get routing probabilities
+        # Then compute entropy: -sum(p * log(p)) for each token, then average
+        router_probs = torch.softmax(gate_logits, dim=1)  # [batch*seq_len, num_routed_experts]
+        # Avoid log(0) by clamping probabilities
+        router_probs_clamped = torch.clamp(router_probs, min=1e-10)
+        # Compute entropy per token: -sum(p * log(p)) across experts
+        token_entropies = -(router_probs_clamped * torch.log(router_probs_clamped)).sum(dim=1)  # [batch*seq_len]
+        router_entropy = token_entropies.mean()  # Scalar - average entropy across tokens
+        
+        # Metric 2: Load imbalance
+        # std(expert_load) / mean(expert_load) - coefficient of variation
+        expert_load_float = expert_load.float()  # [num_routed_experts]
+        mean_load = expert_load_float.mean()
+        if mean_load > 0:
+            std_load = expert_load_float.std()
+            load_imbalance = std_load / (mean_load + 1e-10)  # Scalar
+        else:
+            load_imbalance = torch.tensor(0.0, device=device)  # No imbalance if no load
+        
+        # Metric 3: Top expert fraction
+        # max(expert_load) / total_tokens - fraction going to most loaded expert
+        if total_tokens > 0:
+            max_load = expert_load_float.max()
+            top_expert_fraction = max_load / total_tokens  # Scalar
+        else:
+            top_expert_fraction = torch.tensor(0.0, device=device)
+        
+        # Metric 4: Expert utilization
+        # expert_load / max_tokens_per_expert per expert (0-1)
+        # Already computed in capacity computation, but compute here for consistency
+        if max_tokens_per_expert > 0:
+            expert_utilization = expert_load_float / (max_tokens_per_expert + 1e-10)  # [num_routed_experts]
+            expert_utilization = torch.clamp(expert_utilization, min=0.0, max=1.0)  # Clamp to [0, 1]
+        else:
+            expert_utilization = torch.zeros(num_routed_experts, device=device)
+        
+        # Metric 5: Token concentration (Herfindahl index)
+        # sum((token_count_per_expert / total_tokens)^2)
+        # 1.0 = perfect concentration (all tokens to one expert)
+        # 1/num_experts = perfect uniform distribution
+        if total_tokens > 0:
+            expert_fractions = expert_load_float / (total_tokens + 1e-10)  # [num_routed_experts]
+            token_concentration = (expert_fractions ** 2).sum()  # Scalar - Herfindahl index
+        else:
+            token_concentration = torch.tensor(0.0, device=device)
+        
+        return {
+            'router_entropy': router_entropy,
+            'load_imbalance': load_imbalance,
+            'top_expert_fraction': top_expert_fraction,
+            'expert_utilization': expert_utilization,
+            'token_concentration': token_concentration,
+        }
+    
     def forward(self, text_tokens: torch.Tensor, image_features: torch.Tensor = None, return_load_balance_loss: bool = False, return_gate_logits: bool = False):
         # Validate token indices before embedding
         if torch.any((text_tokens < 0) | (text_tokens >= self.vocab_size)):
@@ -322,57 +1217,166 @@ class SimpleMoEModel(nn.Module):
         if torch.isnan(embedded).any():
             raise ValueError("NaN detected in embedding output — check input token indices")
         
-        # Average pooling to get fixed-size representation
-        pooled_text = embedded.mean(dim=1)  # [batch, embedding_dim]
+        # Keep sequence-level representation (no pooling)
+        # embedded: [batch, seq_len, embedding_dim]
+        batch_size, seq_len, embedding_dim = embedded.shape
+        text_sequence = embedded  # [batch, seq_len, embedding_dim]
         
-        # Image input preparation
+        # Image input preparation (keep sequence dimension for consistency)
         if image_features is None:
-            pooled_image = pooled_text  # Fallback to text features
+            image_sequence = text_sequence  # Fallback to text features
         else:
-            if len(image_features.shape) > 2:
-                pooled_image = image_features.mean(dim=1)  # [batch, embedding_dim]
+            if len(image_features.shape) == 2:
+                # [batch, embedding_dim] -> [batch, 1, embedding_dim]
+                image_sequence = image_features.unsqueeze(1)
+            elif len(image_features.shape) == 3:
+                image_sequence = image_features  # [batch, seq_len, embedding_dim]
             else:
-                pooled_image = image_features  # [batch, embedding_dim]
+                # Flatten spatial dimensions if needed
+                image_sequence = image_features.view(batch_size, -1, embedding_dim)
         
-        # Compute gate logits using shared gate
-        gate_logits = self.gate(pooled_text)  # [batch, num_experts]
+        # Flatten batch and seq_len for routing: [batch, seq_len, embedding_dim] -> [batch*seq_len, embedding_dim]
+        text_flat = text_sequence.view(-1, embedding_dim)  # [batch*seq_len, embedding_dim]
+        
+        # Compute gate logits using shared gate (per token)
+        gate_logits = self.gate(text_flat)  # [batch*seq_len, num_routed_experts]
         
         # Check for NaN in gate logits
         if torch.isnan(gate_logits).any():
             raise ValueError("NaN detected in gate_logits")
         
+        # Add noise to router logits during training to improve expert exploration
+        gate_logits = self.add_gating_noise(gate_logits)
+        
         # Apply temperature scaling for better routing
         gate_logits = gate_logits / self.gate_temperature
         
-        # Sparse top-k routing
-        gate_probs, topk_idx = top_k_gating(gate_logits, k=2)
+        # Expert Choice routing: each expert selects top-k tokens to process
+        # gate_logits: [batch*seq_len, num_routed_experts]
+        # Returns token indices [num_experts, top_k] and expert probabilities [num_experts, top_k]
+        token_indices, expert_probs = expert_choice_routing(gate_logits, k=self.top_k)
+        # token_indices: [num_routed_experts, top_k] - each expert selects k flat indices (0 to batch*seq_len-1)
+        # expert_probs: [num_routed_experts, top_k] - soft probabilities for gradient flow
         
-        # Compute expert outputs and combine with top-k routing
-        # gate_probs: [batch, k], topk_idx: [batch, k]
-        outputs = []
-        for i in range(topk_idx.shape[1]):
-            idx = topk_idx[:, i]  # [batch] - expert indices for each sample
-            # Compute expert outputs for each sample
-            expert_out_list = []
-            for b in range(pooled_text.shape[0]):
-                expert_idx = idx[b].item()
-                expert_out_list.append(self.experts[expert_idx](pooled_text[b:b+1]))  # [1, embedding_dim]
-            expert_out = torch.cat(expert_out_list, dim=0)  # [batch, embedding_dim]
-            # Multiply by gate probabilities: [batch, 1] * [batch, embedding_dim] -> [batch, embedding_dim]
-            weighted_out = gate_probs[:, i:i+1] * expert_out  # [batch, embedding_dim]
-            outputs.append(weighted_out)
-        combined = sum(outputs)  # [batch, embedding_dim]
+        # Compute capacity constraints and handle overflow
+        total_tokens = batch_size * seq_len
+        capacity_mask, capacity_loss, expert_load, dropped_token_fraction, expert_utilization_rate = compute_capacity_loss_and_overflow_expert_choice(
+            token_indices=token_indices,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            num_experts=self.num_routed_experts,
+            capacity_factor=self.capacity_factor,
+            device=text_sequence.device
+        )
+        
+        # Store capacity metrics for later access
+        self._capacity_metrics = {
+            'capacity_loss': capacity_loss,  # Store as float scalar
+            'dropped_token_fraction': dropped_token_fraction,
+            'expert_utilization_rate': expert_utilization_rate,  # Tensor [num_experts]
+            'expert_load': expert_load,  # Tensor [num_experts]
+            'capacity_mask': capacity_mask,  # Tensor [num_experts, top_k] or None
+        }
+        
+        # Compute detailed routing metrics for monitoring
+        max_tokens_per_expert = self.capacity_factor * (total_tokens / self.num_routed_experts)
+        routing_metrics = self.compute_routing_metrics(
+            gate_logits=gate_logits,  # [batch*seq_len, num_routed_experts]
+            token_indices=token_indices,  # [num_routed_experts, top_k]
+            expert_load=expert_load,  # [num_routed_experts]
+            total_tokens=total_tokens,
+            max_tokens_per_expert=max_tokens_per_expert
+        )
+        # Store routing metrics for later access
+        self._routing_metrics = routing_metrics
+        
+        # Compute shared expert outputs (always activated) - process each token
+        # Process all tokens: [batch, seq_len, embedding_dim] -> [batch, seq_len, embedding_dim]
+        if len(self.shared_experts) > 0:
+            # Process each token through shared experts
+            # Flatten for processing: [batch, seq_len, embedding_dim] -> [batch*seq_len, embedding_dim]
+            text_flat_for_shared = text_sequence.view(-1, embedding_dim)  # [batch*seq_len, embedding_dim]
+            
+            # Compute all shared expert outputs in parallel
+            shared_outputs_flat = torch.stack([
+                shared_expert(text_flat_for_shared) for shared_expert in self.shared_experts
+            ], dim=1)  # [batch*seq_len, num_shared_experts, embedding_dim]
+            
+            # Average across shared experts dimension
+            shared_combined_flat = shared_outputs_flat.mean(dim=1)  # [batch*seq_len, embedding_dim]
+            
+            # Reshape back to sequence: [batch*seq_len, embedding_dim] -> [batch, seq_len, embedding_dim]
+            shared_combined = shared_combined_flat.view(batch_size, seq_len, embedding_dim)
+        else:
+            shared_combined = text_sequence  # Fallback if no shared experts
+        
+        # Expert Choice routing: iterate over experts and gather assigned tokens
+        # Process flattened tokens: [batch*seq_len, embedding_dim]
+        routed_combined_flat = batch_expert_forward_expert_choice(
+            expert_modules=self.routed_experts,
+            inputs=text_flat,  # [batch*seq_len, embedding_dim]
+            token_indices=token_indices,  # [num_experts, top_k] - indices into flattened batch*seq_len
+            expert_probs=expert_probs,
+            capacity_mask=capacity_mask  # Drop tokens exceeding capacity
+        )  # [batch*seq_len, embedding_dim]
+        
+        # Reshape back to sequence: [batch*seq_len, embedding_dim] -> [batch, seq_len, embedding_dim]
+        routed_combined = routed_combined_flat.view(batch_size, seq_len, embedding_dim)
+        
+        # Handle tokens that were not selected by any expert (fail-safe to shared experts)
+        # Track which tokens were processed by routed experts (in flattened space)
+        processed_tokens_flat = torch.zeros(batch_size * seq_len, dtype=torch.bool, device=text_sequence.device)
+        for expert_idx in range(token_indices.shape[0]):
+            selected_tokens = token_indices[expert_idx]  # [top_k] - indices into flattened batch*seq_len
+            if capacity_mask is not None:
+                selected_tokens = selected_tokens[capacity_mask[expert_idx]]
+            processed_tokens_flat[selected_tokens] = True
+        
+        # Route unprocessed tokens to shared experts (if available)
+        unprocessed_tokens_flat = ~processed_tokens_flat
+        if unprocessed_tokens_flat.any() and len(self.shared_experts) > 0:
+            # Reshape to sequence dimension for masking
+            unprocessed_mask = unprocessed_tokens_flat.view(batch_size, seq_len, 1).float()  # [batch, seq_len, 1]
+            # Blend: use shared experts for unprocessed tokens, routed for others
+            routed_combined = (1.0 - unprocessed_mask) * routed_combined + unprocessed_mask * shared_combined
+        
+        # Combine shared and routed expert outputs
+        combined = shared_combined + routed_combined  # [batch, seq_len, embedding_dim]
         
         # Joint fusion with normalization and residual connection
-        fused_output = self.joint_fusion(combined)  # [batch, embedding_dim]
+        # Process each token: [batch, seq_len, embedding_dim] -> [batch, seq_len, embedding_dim]
+        # Flatten for processing
+        combined_flat = combined.view(-1, embedding_dim)  # [batch*seq_len, embedding_dim]
+        fused_output_flat = self.joint_fusion(combined_flat)  # [batch*seq_len, embedding_dim]
         # Apply normalization and residual: x = x + dropout(norm(ffn(x)))
-        fused_output = self.joint_fusion_norm(fused_output)
-        fused_output = nn.functional.dropout(fused_output, p=0.1, training=self.training)
+        fused_output_flat = self.joint_fusion_norm(fused_output_flat)
+        fused_output_flat = nn.functional.dropout(fused_output_flat, p=0.1, training=self.training)
         # Add residual connection
-        fused_output = combined + fused_output  # Residual connection
+        fused_output_flat = combined_flat + fused_output_flat  # Residual connection
         
-        # Decode to vocabulary
-        output = self.decoder(fused_output)  # [batch, vocab_size]
+        # Reshape back to sequence
+        fused_output = fused_output_flat.view(batch_size, seq_len, embedding_dim)  # [batch, seq_len, embedding_dim]
+        
+        # Apply normalization and residual connection before output projection
+        # Formula: output = output_proj(norm(combined + residual_factor * dropout(embedded)))
+        # This helps with gradient flow and regularization
+        embedded_dropped = self.residual_dropout(text_sequence)  # Apply dropout before residual: [batch, seq_len, embedding_dim]
+        normalized_input = self.output_norm(
+            fused_output + self.residual_factor * embedded_dropped
+        )  # [batch, seq_len, embedding_dim]
+        
+        # Flatten for decoder: [batch, seq_len, embedding_dim] -> [batch*seq_len, embedding_dim]
+        normalized_input_flat = normalized_input.view(-1, embedding_dim)
+        
+        # Decode to vocabulary: [batch*seq_len, embedding_dim] -> [batch*seq_len, vocab_size]
+        output_flat = self.decoder(normalized_input_flat)  # [batch*seq_len, vocab_size]
+        
+        # Reshape back to sequence: [batch*seq_len, vocab_size] -> [batch, seq_len, vocab_size]
+        output = output_flat.view(batch_size, seq_len, -1)  # [batch, seq_len, vocab_size]
+        
+        # For compatibility with existing code, return [batch, vocab_size] by taking last token
+        # This maintains backward compatibility while enabling sequence-level processing
+        output = output[:, -1, :]  # [batch, vocab_size] - use last token for prediction
         
         # Debug: Check output shape (should be [batch, vocab_size])
         # Only print once to reduce noise
@@ -380,15 +1384,82 @@ class SimpleMoEModel(nn.Module):
             if not hasattr(self, '_debug_shape_warned') or not self._debug_shape_warned:
                 print(f"⚠️  Model decoder output shape is unexpected: {output.shape}")
                 print(f"   fused_output shape: {fused_output.shape}")
-                print(f"   pooled_text shape: {pooled_text.shape}")
+                print(f"   text_sequence shape: {text_sequence.shape}")
                 print(f"   text_tokens shape: {text_tokens.shape}")
                 print(f"   This should not happen - model should output [batch, vocab_size]")
                 self._debug_shape_warned = True
         
         if return_load_balance_loss or return_gate_logits:
             if return_gate_logits:
-                # Return gate_logits for entropy-based load balancing
-                return output, (gate_logits, None, None)  # Single gate for all experts
+                # Compute auxiliary losses for load balancing
+                # Use gate_logits before noise and temperature scaling for loss computation
+                # Flatten for gate computation: [batch, seq_len, embedding_dim] -> [batch*seq_len, embedding_dim]
+                text_flat_for_loss = text_sequence.view(-1, embedding_dim)
+                gate_logits_for_loss = self.gate(text_flat_for_loss)  # [batch*seq_len, num_routed_experts]
+                
+                # Add error handling for loss computation
+                try:
+                    # Compute load balance loss (entropy-based)
+                    load_bal_loss = load_balance_loss(gate_logits_for_loss)
+                    # Ensure it's a tensor on the correct device
+                    if not isinstance(load_bal_loss, torch.Tensor):
+                        load_bal_loss = torch.tensor(float(load_bal_loss), device=output.device)
+                    else:
+                        load_bal_loss = load_bal_loss.to(output.device)
+                    
+                    # Compute Z-loss (log-sum-exp to encourage balanced routing)
+                    # Pass z_loss_weight and target_z from model config
+                    target_z = getattr(self, 'target_z', 1.0)  # Default target_z = 1.0
+                    z_loss_val = z_loss(gate_logits_for_loss, z_loss_weight=1.0, target_z=target_z)
+                    # Ensure it's a tensor on the correct device
+                    if not isinstance(z_loss_val, torch.Tensor):
+                        z_loss_val = torch.tensor(float(z_loss_val), device=output.device)
+                    else:
+                        z_loss_val = z_loss_val.to(output.device)
+                    
+                    # Get capacity loss (computed during forward pass)
+                    # capacity_loss is returned as float scalar from compute_capacity_loss_and_overflow_expert_choice
+                    cap_loss = self._capacity_metrics.get('capacity_loss', 0.0)
+                    if isinstance(cap_loss, torch.Tensor):
+                        cap_loss = cap_loss.item()
+                    # Convert to tensor for loss computation on correct device
+                    cap_loss_tensor = torch.tensor(float(cap_loss), device=output.device, dtype=output.dtype)
+                    
+                    # Combined auxiliary loss: weighted sum of all losses
+                    aux_loss = load_bal_loss + self.z_loss_weight * z_loss_val + 0.1 * cap_loss_tensor
+                    
+                    # Ensure routing_metrics exists and convert all values to tensors on correct device
+                    if not hasattr(self, '_routing_metrics') or self._routing_metrics is None:
+                        # Create empty routing metrics if not computed
+                        routing_metrics = {
+                            'router_entropy': torch.tensor(0.0, device=output.device),
+                            'load_imbalance': torch.tensor(0.0, device=output.device),
+                            'top_expert_fraction': torch.tensor(0.0, device=output.device),
+                            'expert_utilization': torch.zeros(self.num_routed_experts, device=output.device),
+                            'token_concentration': torch.tensor(0.0, device=output.device),
+                        }
+                    else:
+                        # Convert all routing metrics to tensors on correct device
+                        routing_metrics = {}
+                        for key, value in self._routing_metrics.items():
+                            if isinstance(value, torch.Tensor):
+                                routing_metrics[key] = value.to(output.device)
+                            else:
+                                routing_metrics[key] = torch.tensor(float(value), device=output.device)
+                    
+                    # Ensure gate_logits is on the correct device
+                    gate_logits_for_return = gate_logits.to(output.device)
+                    
+                    # Return gate_logits, auxiliary loss components, and routing metrics
+                    # Include routing metrics if requested (return_load_balance_loss or return_gate_logits)
+                    return output, (gate_logits_for_return, load_bal_loss, z_loss_val, cap_loss_tensor, aux_loss, routing_metrics)
+                    
+                except Exception as e:
+                    print(f"⚠️  Error computing auxiliary losses: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Return output without losses on error
+                    return output
             else:
                 # Legacy: return zero load balance loss (now computed in training loop)
                 return output, torch.tensor(0.0, device=output.device)
@@ -764,6 +1835,9 @@ def train_real_model(
         # Training loop
         print(f"\n🔄 Starting training...")
         
+        # Initialize global step counter for temperature scheduling
+        global_step = 0
+        
         for epoch in range(start_epoch, epochs):
             print(f"\n{'='*60}")
             print(f"📚 Epoch {epoch + 1}/{epochs}" + (f" (resumed from {start_epoch})" if epoch == start_epoch and start_epoch > 0 else ""))
@@ -771,7 +1845,9 @@ def train_real_model(
             
             model.train()
             total_loss = 0.0
-            total_aux_loss = 0.0  # Track auxiliary load balance loss
+            total_aux_loss = 0.0  # Track combined auxiliary loss
+            total_load_bal_loss = 0.0  # Track load balance loss component
+            total_z_loss = 0.0  # Track Z-loss component
             batch_count = 0
             bert_scores = []
             diagnostics_run = False  # Flag to ensure diagnostics run once per first epoch
@@ -779,6 +1855,13 @@ def train_real_model(
             
             for batch_idx, batch in enumerate(train_dataloader):
                 batch_count += 1
+                
+                # Update router temperature based on schedule (before forward pass)
+                # Access model through model_engine if using DeepSpeed, otherwise use model directly
+                if use_deepspeed and model_engine is not None:
+                    model_engine.module.update_temperature(global_step)
+                elif model is not None:
+                    model.update_temperature(global_step)
                 
                 # Prepare inputs - tokenize text using vocabulary
                 texts = batch["text"]
@@ -827,7 +1910,29 @@ def train_real_model(
                 # Process sequence by averaging, then predict next token
                 # For simplicity, we'll use the full sequence and predict the last token
                 output, gate_logits_tuple = model_engine(input_tokens, return_gate_logits=True)  # [batch, vocab_size]
-                gate_logits, _, _ = gate_logits_tuple  # Single shared gate
+                # Unpack: (gate_logits, load_bal_loss, z_loss_val, cap_loss, aux_loss, routing_metrics)
+                if len(gate_logits_tuple) == 6:
+                    # New format with routing metrics
+                    gate_logits, load_bal_loss, z_loss_val, cap_loss, aux_loss, routing_metrics = gate_logits_tuple
+                elif len(gate_logits_tuple) == 5:
+                    # Backward compatibility: format without routing metrics
+                    gate_logits, load_bal_loss, z_loss_val, cap_loss, aux_loss = gate_logits_tuple
+                    routing_metrics = {}  # Empty metrics for backward compatibility
+                elif len(gate_logits_tuple) == 4:
+                    # Backward compatibility: old format without capacity loss
+                    gate_logits, load_bal_loss, z_loss_val, aux_loss = gate_logits_tuple
+                    cap_loss = torch.tensor(0.0, device=output.device)
+                    routing_metrics = {}  # Empty metrics for backward compatibility
+                else:
+                    # Legacy format: old format
+                    gate_logits, _, _ = gate_logits_tuple
+                    load_bal_loss = load_balance_loss(gate_logits)
+                    # Pass z_loss_weight and target_z from model config
+                    target_z = getattr(model, 'target_z', 1.0)  # Default target_z = 1.0
+                    z_loss_val = z_loss(gate_logits, z_loss_weight=1.0, target_z=target_z)
+                    cap_loss = torch.tensor(0.0, device=output.device)
+                    aux_loss = load_bal_loss + model.z_loss_weight * z_loss_val
+                    routing_metrics = {}  # Empty metrics for backward compatibility
                 
                 # Ensure output is 2D [batch, vocab_size] - handle any shape issues
                 original_output_shape = output.shape
@@ -922,25 +2027,40 @@ def train_real_model(
                 
                 main_loss = criterion(masked_output, masked_target)
                 
-                # Compute entropy-based load-balancing auxiliary loss
-                aux_loss = load_balance_loss(gate_logits)
+                # Auxiliary losses are already computed in forward() and returned
+                # aux_loss = load_bal_loss + z_loss_weight * z_loss_val
+                # where load_bal_loss is entropy-based and z_loss_val is log-sum-exp
                 
                 # Track expert usage (which experts were selected in top-k)
                 with torch.no_grad():
                     # Get top-k indices from gate logits (with temperature)
-                    gate_logits_scaled = gate_logits / model.gate_temperature
-                    _, topk_idx = top_k_gating(gate_logits_scaled, k=2)
+                    gate_logits_scaled = gate_logits / model_engine.gate_temperature if hasattr(model_engine, 'gate_temperature') else gate_logits
+                    _, topk_idx = top_k_gating(gate_logits_scaled, k=model_engine.top_k if hasattr(model_engine, 'top_k') else 2)
                     # Count unique expert indices used in this batch
                     unique_experts = torch.unique(topk_idx)
                     expert_usage[unique_experts] += 1
                 
-                # Combine main loss with load-balancing auxiliary loss
-                # Weight the load-balancing loss to not dominate (typically 0.01-0.1)
-                load_balance_weight = 0.01
-                loss = main_loss + load_balance_weight * aux_loss
+                # Combine main loss with auxiliary loss (already weighted in forward())
+                # Weight the auxiliary loss to not dominate (typically 0.01-0.1)
+                aux_loss_weight = 0.01
+                loss = main_loss + aux_loss_weight * aux_loss
                 
-                # Accumulate auxiliary loss
+                # Accumulate auxiliary loss components
                 total_aux_loss += aux_loss.item()
+                total_load_bal_loss += load_bal_loss.item()
+                total_z_loss += z_loss_val.item()
+                total_cap_loss += cap_loss.item() if isinstance(cap_loss, torch.Tensor) else cap_loss
+                
+                # Track capacity metrics if available
+                if hasattr(model_engine, '_capacity_metrics'):
+                    total_dropped_fraction += model_engine._capacity_metrics.get('dropped_token_fraction', 0.0)
+                    util_rate = model_engine._capacity_metrics.get('expert_utilization_rate', None)
+                    if util_rate is not None:
+                        # expert_utilization_rate is now a tensor [num_experts], compute mean
+                        if isinstance(util_rate, torch.Tensor):
+                            total_expert_utilization += util_rate.mean().item()
+                        else:
+                            total_expert_utilization += float(util_rate)
                 
                 # Check for NaN loss before backward pass
                 if torch.isnan(loss) or torch.isnan(main_loss) or torch.isnan(aux_loss):
@@ -959,7 +2079,24 @@ def train_real_model(
                     print(f"     Target range: [{target.min().item()}, {target.max().item()}]")
                     print(f"     Raw loss (before mask): {criterion(output, target).item():.4f}")
                     print(f"     Main loss: {main_loss.item():.4f}")
-                    print(f"     Aux loss (entropy-based): {aux_loss.item():.4f} (weighted: {load_balance_weight * aux_loss.item():.6f})")
+                    print(f"     Load balance loss: {load_bal_loss.item():.4f}")
+                    z_loss_w = model_engine.z_loss_weight if hasattr(model_engine, 'z_loss_weight') else (model.z_loss_weight if hasattr(model, 'z_loss_weight') else 0.001)
+                    print(f"     Z-loss: {z_loss_val.item():.4f} (weight: {z_loss_w})")
+                    cap_loss_val = cap_loss.item() if isinstance(cap_loss, torch.Tensor) else cap_loss
+                    print(f"     Capacity loss: {cap_loss_val:.4f} (weight: 0.1)")
+                    if hasattr(model_engine, '_capacity_metrics'):
+                        dropped = model_engine._capacity_metrics.get('dropped_token_fraction', 0.0) * 100
+                        util_rate = model_engine._capacity_metrics.get('expert_utilization_rate', None)
+                        if util_rate is not None:
+                            # expert_utilization_rate is now a tensor [num_experts], compute mean
+                            if isinstance(util_rate, torch.Tensor):
+                                util = util_rate.mean().item() * 100
+                            else:
+                                util = float(util_rate) * 100
+                        else:
+                            util = 0.0
+                        print(f"     Capacity: Dropped {dropped:.2f}%, Utilization {util:.2f}%")
+                    print(f"     Combined aux loss: {aux_loss.item():.4f} (weighted: {aux_loss_weight * aux_loss.item():.6f})")
                     print(f"     Total loss: {loss.item():.4f}")
                 
                 # Backward pass and optimizer step
@@ -973,6 +2110,9 @@ def train_real_model(
                     # Gradient clipping to prevent exploding gradients
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
+                
+                # Increment global step counter for temperature scheduling
+                global_step += 1
                 
                 # DIAGNOSTIC 1: Check if gradients are nonzero (first batch only)
                 if not diagnostics_run and epoch == start_epoch:
@@ -1097,6 +2237,11 @@ def train_real_model(
             
             avg_loss = total_loss / batch_count if batch_count > 0 else 0.0
             avg_aux_loss = total_aux_loss / batch_count if batch_count > 0 else 0.0
+            avg_load_bal_loss = total_load_bal_loss / batch_count if batch_count > 0 else 0.0
+            avg_z_loss = total_z_loss / batch_count if batch_count > 0 else 0.0
+            avg_cap_loss = total_cap_loss / batch_count if batch_count > 0 else 0.0
+            avg_dropped_fraction = total_dropped_fraction / batch_count if batch_count > 0 else 0.0
+            avg_expert_utilization = total_expert_utilization / batch_count if batch_count > 0 else 0.0
             avg_bert = sum(bert_scores) / len(bert_scores) if bert_scores else 0.0
             epoch_time = time.time() - start_time
             num_active_experts = (expert_usage > 0).sum().item()
@@ -1225,7 +2370,8 @@ def train_real_model(
             print(f"\n✅ Epoch {epoch + 1} complete:")
             print(f"   Train Loss: {avg_loss:.4f}")
             print(f"   Test Loss:  {test_avg_loss:.4f} (evaluated on {total_test_samples} test samples)")
-            print(f"🔍 Epoch {epoch + 1}: Aux loss = {avg_aux_loss:.4f}, Active experts = {num_active_experts}/{model.num_experts}")
+            print(f"🔍 Epoch {epoch + 1}: Aux loss = {avg_aux_loss:.4f} (LoadBal: {avg_load_bal_loss:.4f}, Z-loss: {avg_z_loss:.4f}, Cap: {avg_cap_loss:.4f})")
+            print(f"   Expert capacity: Dropped {avg_dropped_fraction*100:.2f}%, Utilization {avg_expert_utilization*100:.2f}%, Active experts = {num_active_experts}/{model.num_experts}")
             if bert_scores:
                 print(f"   Train BERTScore: {avg_bert:.4f} (from {len(bert_scores)} samples)")
             if test_bert_scores:

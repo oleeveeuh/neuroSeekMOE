@@ -2128,14 +2128,43 @@ def train_real_model(
                 # Backward pass and optimizer step
                 if use_deepspeed and DEEPSPEED_AVAILABLE and model_engine is not None:
                     # DeepSpeed handles backward and step, including gradient clipping
+                    # IMPORTANT: For DeepSpeed ZeRO Stage 3, gradients may be partitioned
+                    # and not directly accessible via p.grad. DeepSpeed handles this internally.
+                    
+                    # DIAGNOSTIC: Check loss before backward
+                    if not diagnostics_run and epoch == start_epoch:
+                        print(f"\n  🔍 DIAGNOSTIC: Pre-Backward Check")
+                        print(f"     Loss value: {loss.item():.4f}")
+                        print(f"     Loss requires_grad: {loss.requires_grad}")
+                        print(f"     Loss device: {loss.device}")
+                        print(f"     Loss dtype: {loss.dtype}")
+                        # Check if loss is a scalar
+                        if loss.numel() != 1:
+                            print(f"     ⚠️  WARNING: Loss is not a scalar! Shape: {loss.shape}")
+                    
                     model_engine.backward(loss)
                     
                     # DIAGNOSTIC 1: Check if gradients are nonzero (first batch only, BEFORE step)
                     # Check right after backward() but before step() which zeros gradients
+                    # NOTE: With DeepSpeed ZeRO Stage 3, gradients are partitioned and may not
+                    # be accessible via p.grad. DeepSpeed handles gradient accumulation internally.
                     if not diagnostics_run and epoch == start_epoch:
-                        print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check")
+                        print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check (after backward)")
                         # Access model through model_engine.module for DeepSpeed
                         model_for_grads = model_engine.module if hasattr(model_engine, 'module') else model
+                        
+                        # Check DeepSpeed ZeRO stage
+                        try:
+                            zero_stage = model_engine.zero_optimization_stage()
+                        except:
+                            # Fallback: check config
+                            zero_stage = ds_config.get('zero_optimization', {}).get('stage', 'unknown')
+                        print(f"     DeepSpeed ZeRO stage: {zero_stage}")
+                        if zero_stage == 3:
+                            print(f"     ℹ️  INFO: ZeRO Stage 3 partitions gradients across GPUs.")
+                            print(f"     Gradients are NOT stored in p.grad - DeepSpeed handles them internally.")
+                            print(f"     This is EXPECTED behavior - training should still work correctly.")
+                            print(f"     To verify training is working, check if loss decreases over epochs.")
                         
                         # First check: Verify loss requires_grad
                         print(f"     Loss requires_grad: {loss.requires_grad}")
@@ -2155,6 +2184,7 @@ def train_real_model(
                                 print(f"        - {n}")
                         
                         # Fourth check: Check for gradients
+                        # With ZeRO Stage 3, gradients are partitioned and may not be in p.grad
                         grad_found = False
                         grad_counts = {'with_grad': 0, 'without_grad': 0, 'none': 0}
                         for n, p in model_for_grads.named_parameters():
@@ -2171,9 +2201,15 @@ def train_real_model(
                                 grad_counts['none'] += 1
                         
                         if not grad_found:
-                            print(f"     ⚠️  WARNING: All gradients are None!")
-                            print(f"     Gradient summary: {grad_counts['with_grad']} with gradients, {grad_counts['without_grad']} zero gradients, {grad_counts['none']} None gradients")
-                            print(f"     This suggests the computational graph is broken or DeepSpeed is not computing gradients.")
+                            if zero_stage == 3:
+                                print(f"     ℹ️  INFO: With ZeRO Stage 3, gradients are partitioned and not in p.grad.")
+                                print(f"     This is normal - DeepSpeed handles gradients internally.")
+                                print(f"     Training should still work correctly.")
+                            else:
+                                print(f"     ⚠️  WARNING: All gradients are None!")
+                                print(f"     Gradient summary: {grad_counts['with_grad']} with gradients, {grad_counts['without_grad']} zero gradients, {grad_counts['none']} None gradients")
+                                print(f"     This suggests the computational graph is broken or DeepSpeed is not computing gradients.")
+                                print(f"     Try: 1) Check DeepSpeed config, 2) Try without DeepSpeed, 3) Check if loss is detached")
                     
                     model_engine.step()
                 else:

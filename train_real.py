@@ -673,10 +673,43 @@ def train_real_model(
                 output, gate_logits_tuple = model(input_tokens, return_gate_logits=True)  # [batch, vocab_size]
                 gate_logits, _, _ = gate_logits_tuple  # Single shared gate
                 
-                # Target is the last token in each sequence
-                # Note: This is a simplified objective - only predicting last token
-                # In a full language model, we'd predict all tokens in the sequence
-                target = target_tokens[:, -1]  # [batch]
+                # Debug: Print shapes if unexpected
+                if len(output.shape) != 2:
+                    print(f"⚠️  Unexpected output shape: {output.shape}, input_tokens shape: {input_tokens.shape}")
+                
+                # Ensure output is 2D [batch, vocab_size] - handle any shape issues
+                original_output_shape = output.shape
+                if len(output.shape) > 2:
+                    # If output is [batch, seq_len, vocab_size], we need to reshape
+                    # This shouldn't happen with current model, but handle it gracefully
+                    batch_size, seq_len, vocab_size = output.shape
+                    print(f"⚠️  Output is 3D, reshaping: {output.shape} -> [batch*seq_len, vocab_size]")
+                    output = output.contiguous().view(-1, vocab_size)  # [batch*seq_len, vocab_size]
+                    # Also need to flatten target accordingly
+                    target = target_tokens.contiguous().view(-1)  # [batch*seq_len]
+                elif len(output.shape) == 1:
+                    # If output is 1D [vocab_size], add batch dimension
+                    print(f"⚠️  Output is 1D, unsqueezing: {output.shape} -> [1, vocab_size]")
+                    output = output.unsqueeze(0)  # [1, vocab_size]
+                    target = target_tokens[:, -1:].squeeze(0) if target_tokens.shape[0] == 1 else target_tokens[:, -1]
+                else:
+                    # Normal case: output is [batch, vocab_size], target is last token
+                    target = target_tokens[:, -1]  # [batch]
+                    # Ensure output is contiguous for efficiency
+                    output = output.contiguous()
+                
+                # Final sanity check: output must be 2D [batch, vocab_size]
+                if len(output.shape) != 2:
+                    raise ValueError(f"Model output must be 2D [batch, vocab_size], got shape {output.shape} (original: {original_output_shape})")
+                
+                # Ensure batch dimensions match
+                if output.shape[0] != target.shape[0]:
+                    raise ValueError(f"Batch size mismatch: output {output.shape[0]} != target {target.shape[0]}")
+                
+                # Debug: Print shapes for first batch
+                if batch_idx == 0 and epoch == start_epoch:
+                    print(f"   Debug - output shape: {output.shape}, target shape: {target.shape}")
+                    print(f"   Debug - input_tokens shape: {input_tokens.shape}, target_tokens shape: {target_tokens.shape}")
                 
                 # Ignore padding tokens (0) in loss calculation
                 # Padding uses token ID 0, which is masked out
@@ -685,10 +718,31 @@ def train_real_model(
                     continue  # Skip batch if all targets are padding
                 
                 # Calculate loss only on non-padding tokens
-                # output shape: [batch, vocab_size], target shape: [batch]
+                # output shape: [batch, vocab_size] or [batch*seq_len, vocab_size], target shape: [batch] or [batch*seq_len]
                 # We need to select the masked rows from both
-                masked_output = output[mask]  # [num_non_padding, vocab_size]
+                # Use explicit indexing to ensure correct shapes
+                masked_output = output[mask, :]  # [num_non_padding, vocab_size]
                 masked_target = target[mask]  # [num_non_padding]
+                
+                # Ensure masked_output is 2D and masked_target is 1D
+                if len(masked_output.shape) == 1:
+                    # If only one non-padding token, add batch dimension
+                    masked_output = masked_output.unsqueeze(0)  # [1, vocab_size]
+                if len(masked_target.shape) > 1:
+                    # If target is somehow 2D, flatten it
+                    masked_target = masked_target.flatten()  # [num_non_padding]
+                
+                # Ensure shapes are correct for CrossEntropyLoss
+                # Input: [N, C], Target: [N] where N is batch size, C is num classes
+                if len(masked_output.shape) != 2:
+                    raise ValueError(f"Expected masked_output to be 2D [num_non_padding, vocab_size], got shape {masked_output.shape}")
+                if len(masked_target.shape) != 1:
+                    raise ValueError(f"Expected masked_target to be 1D [num_non_padding], got shape {masked_target.shape}")
+                if masked_output.shape[0] != masked_target.shape[0]:
+                    raise ValueError(f"Batch size mismatch: masked_output {masked_output.shape[0]} != masked_target {masked_target.shape[0]}")
+                if masked_output.shape[1] != model.vocab_size:
+                    raise ValueError(f"Vocab size mismatch: masked_output {masked_output.shape[1]} != vocab_size {model.vocab_size}")
+                
                 main_loss = criterion(masked_output, masked_target)
                 
                 # Compute entropy-based load-balancing auxiliary loss

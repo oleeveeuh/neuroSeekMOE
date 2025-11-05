@@ -359,6 +359,13 @@ class SimpleMoEModel(nn.Module):
         # Decode to vocabulary
         output = self.decoder(fused_output)  # [batch, vocab_size]
         
+        # Debug: Check output shape (should be [batch, vocab_size])
+        if len(output.shape) != 2:
+            print(f"⚠️  Model decoder output shape is unexpected: {output.shape}")
+            print(f"   fused_output shape: {fused_output.shape}")
+            print(f"   pooled_text shape: {pooled_text.shape}")
+            print(f"   text_tokens shape: {text_tokens.shape}")
+        
         if return_load_balance_loss or return_gate_logits:
             if return_gate_logits:
                 # Return gate_logits for entropy-based load balancing
@@ -682,11 +689,32 @@ def train_real_model(
                 if len(output.shape) > 2:
                     # If output is [batch, seq_len, vocab_size], we need to reshape
                     # This shouldn't happen with current model, but handle it gracefully
-                    batch_size, seq_len, vocab_size = output.shape
-                    print(f"⚠️  Output is 3D, reshaping: {output.shape} -> [batch*seq_len, vocab_size]")
-                    output = output.contiguous().view(-1, vocab_size)  # [batch*seq_len, vocab_size]
-                    # Also need to flatten target accordingly
-                    target = target_tokens.contiguous().view(-1)  # [batch*seq_len]
+                    batch_size, output_seq_len, vocab_size = output.shape
+                    input_seq_len = input_tokens.shape[1]  # Original input sequence length
+                    print(f"⚠️  Output is 3D {output.shape}, input_tokens shape: {input_tokens.shape}, target_tokens shape: {target_tokens.shape}")
+                    
+                    # Flatten output: [batch, output_seq_len, vocab_size] -> [batch*output_seq_len, vocab_size]
+                    output = output.contiguous().view(-1, vocab_size)  # [batch*output_seq_len, vocab_size]
+                    
+                    # Match target to output: we need [batch*output_seq_len]
+                    # Since target_tokens is [batch, input_seq_len-1], we need to align it
+                    # If output_seq_len matches input_seq_len-1, use all target tokens
+                    if output_seq_len == target_tokens.shape[1]:
+                        target = target_tokens.contiguous().view(-1)  # [batch*output_seq_len]
+                    elif output_seq_len < target_tokens.shape[1]:
+                        # Output is shorter, take last output_seq_len tokens
+                        target = target_tokens[:, -output_seq_len:].contiguous().view(-1)  # [batch*output_seq_len]
+                    else:
+                        # Output is longer, pad target with last token
+                        target = target_tokens.contiguous().view(-1)  # [batch*target_seq_len]
+                        # Pad with last token value to match output length
+                        padding_len = output.shape[0] - target.shape[0]
+                        if padding_len > 0:
+                            last_token = target[-1].item() if target.numel() > 0 else 0
+                            padding = torch.full((padding_len,), last_token, dtype=target.dtype, device=target.device)
+                            target = torch.cat([target, padding], dim=0)
+                    
+                    print(f"   Reshaped: output {output.shape}, target {target.shape}")
                 elif len(output.shape) == 1:
                     # If output is 1D [vocab_size], add batch dimension
                     print(f"⚠️  Output is 1D, unsqueezing: {output.shape} -> [1, vocab_size]")
@@ -698,13 +726,13 @@ def train_real_model(
                     # Ensure output is contiguous for efficiency
                     output = output.contiguous()
                 
-                # Final sanity check: output must be 2D [batch, vocab_size]
+                # Final sanity check: output must be 2D [batch, vocab_size] or [batch*seq_len, vocab_size]
                 if len(output.shape) != 2:
-                    raise ValueError(f"Model output must be 2D [batch, vocab_size], got shape {output.shape} (original: {original_output_shape})")
+                    raise ValueError(f"Model output must be 2D, got shape {output.shape} (original: {original_output_shape})")
                 
                 # Ensure batch dimensions match
                 if output.shape[0] != target.shape[0]:
-                    raise ValueError(f"Batch size mismatch: output {output.shape[0]} != target {target.shape[0]}")
+                    raise ValueError(f"Batch size mismatch: output {output.shape[0]} != target {target.shape[0]} (original output shape: {original_output_shape})")
                 
                 # Debug: Print shapes for first batch
                 if batch_idx == 0 and epoch == start_epoch:

@@ -153,15 +153,52 @@ def run_nemo_image_pipeline(tar_dir: str, out_manifest: str) -> None:
 
     This assumes `nemo_curator` is installed. For complete pipeline options (filters, embeddings,
     dedup), see NVIDIA docs: https://docs.nvidia.com/nemo/curator/latest/curate-images/load-data/index.html
+    
+    Note: NeMo Curator only supports Linux systems. On macOS/Windows, this will gracefully fall back
+    to direct image processing.
     """
     _require_nemo_curator()
     try:
         from nemo_curator.pipeline import Pipeline  # type: ignore
         from nemo_curator.stages.file_partitioning import FilePartitioningStage  # type: ignore
+    except ImportError as e:
+        raise ImportError(f"Failed to import NeMo Curator core components: {e}") from e
+    except ValueError as e:
+        # NeMo Curator raises ValueError if not on Linux (e.g., "only supports Linux systems")
+        if "linux" in str(e).lower() or "darwin" in str(e).lower() or "system" in str(e).lower():
+            error_msg = f"NeMo Curator only supports Linux systems: {e}"
+            error_msg += "\n\nThe pipeline will fall back to direct image processing."
+            raise ImportError(error_msg) from e
+        raise
+    
+    # Try importing image components (may not be available in all NeMo Curator versions)
+    try:
         from nemo_curator.stages.image.io import ImageReaderStage  # type: ignore
+    except ImportError:
+        # Try alternative import path or check if image processing is available
+        try:
+            # Some versions may have different paths
+            import nemo_curator.stages.image
+            ImageReaderStage = getattr(nemo_curator.stages.image.io, 'ImageReaderStage', None)
+            if ImageReaderStage is None:
+                raise ImportError("ImageReaderStage not found in nemo_curator.stages.image.io")
+        except (ImportError, AttributeError) as e:
+            error_msg = f"NeMo Curator image processing components not available: {e}"
+            error_msg += "\n\nPossible causes:"
+            error_msg += "\n  1. Image processing may require additional dependencies"
+            error_msg += "\n  2. NeMo Curator version may not include image processing modules"
+            error_msg += "\n  3. Try: pip install 'nemo-curator[all]' or check NeMo Curator documentation"
+            error_msg += "\n\nThe pipeline will fall back to direct image processing."
+            raise ImportError(error_msg) from e
+    
+    # Try importing JsonlWriter (may be in different locations)
+    try:
         from nemo_curator.utils.writer_utils import JsonlWriter  # type: ignore
-    except Exception as e:
-        raise RuntimeError("Failed to import NeMo Curator image pipeline components") from e
+    except ImportError:
+        try:
+            from nemo_curator.stages.text.io.writer import JsonlWriter  # type: ignore
+        except ImportError:
+            raise ImportError("JsonlWriter not found in nemo_curator.utils.writer_utils or nemo_curator.stages.text.io.writer")
 
     # Discover tar shards
     shards = sorted(glob.glob(os.path.join(tar_dir, "*.tar")))
@@ -1479,9 +1516,27 @@ def main() -> None:
             run_nemo_image_pipeline(args.tar_out, curated_manifest)
             print(f"✅ NeMo image curation completed -> {curated_manifest}")
         except ImportError as e:
-            print(f"⚠️  NeMo Curator not installed, using direct image processing: {e}")
+            # Check if it's a missing NeMo Curator or missing image components
+            error_str = str(e).lower()
+            if "linux" in error_str or "darwin" in error_str or "system" in error_str:
+                print(f"⚠️  NeMo Curator only supports Linux systems, using direct image processing")
+                print(f"   Error: {e}")
+                print(f"   This is expected on macOS/Windows - the pipeline will use direct image processing.")
+            elif "nemo_curator" in error_str or "Failed to import" in error_str:
+                print(f"⚠️  NeMo Curator image pipeline not available, using direct image processing")
+                print(f"   Error: {e}")
+                print(f"   Note: NeMo Curator may be installed but image components may be missing.")
+                print(f"   Try: pip install 'nemo-curator[all]' or check NeMo Curator documentation.")
+            else:
+                print(f"⚠️  NeMo Curator not installed, using direct image processing: {e}")
         except Exception as e:
-            print(f"⚠️  NeMo image curation failed, using direct image processing: {e}")
+            error_str = str(e).lower()
+            if "linux" in error_str or "darwin" in error_str or "system" in error_str:
+                print(f"⚠️  NeMo Curator only supports Linux systems, using direct image processing")
+                print(f"   This is expected on macOS/Windows - the pipeline will use direct image processing.")
+            else:
+                print(f"⚠️  NeMo image curation failed, using direct image processing: {e}")
+                print(f"   This is expected if NeMo Curator image modules are not available.")
 
         # Transform curated manifest OR directly process images to required JSONL format
         try:

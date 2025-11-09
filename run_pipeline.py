@@ -43,6 +43,7 @@ from data_pipeline import (
     collect_arxiv_papers,
     extract_pdf_texts,
     curate_with_nemo,
+    run_nemo_curator_pipeline,  # New NeMo Curator Pipeline API
     process_curated_dataset,
     train_healthcare_tokenizer
 )
@@ -344,6 +345,12 @@ class PipelineOrchestrator:
     def step3_nemo_curator(self) -> bool:
         """Step 3: NeMo Curator curation.
         
+        Uses the new NeMo Curator Pipeline API with custom healthcare stages:
+        - ArxivDownloadExtractStage: Downloads from S3
+        - HealthcareFilterStage: Text cleaning and domain classification
+        - HealthcareQualityFilterStage: Deduplication and quality checks
+        - HealthcareJsonlWriter: Formats and writes output
+        
         Returns:
             True if successful, False otherwise
         """
@@ -365,21 +372,48 @@ class PipelineOrchestrator:
                 logger.warning(f"⚠️  Curated file check passed but doesn't exist. Re-running curation...")
         
         try:
-            if not self.text_dir.exists() or not any(self.text_dir.iterdir()):
-                raise FileNotFoundError(f"Text directory not found or empty: {self.text_dir}")
-            if not self.metadata_jsonl.exists():
-                raise FileNotFoundError(f"Metadata file not found: {self.metadata_jsonl}")
+            nemo_config = self.config.get('nemo_curator', {})
             
-            nemo_config = self.config['nemo_curator']
+            # Check if we should use the new Pipeline API or legacy function
+            use_pipeline_api = nemo_config.get('use_pipeline_api', True)
             
-            curate_with_nemo(
-                text_dir=str(self.text_dir),
-                metadata_jsonl=str(self.metadata_jsonl),
-                output_jsonl=str(self.curated_jsonl),
-                use_gpu=nemo_config.get('use_gpu', False),
-                skip_dedup=nemo_config.get('skip_dedup', False),
-                min_relevance_score=nemo_config.get('min_relevance_score', 0.5)
-            )
+            if use_pipeline_api:
+                # Use new NeMo Curator Pipeline API
+                logger.info("🔬 Using NeMo Curator Pipeline API with custom healthcare stages")
+                
+                download_dir = nemo_config.get('download_dir', str(self.output_dir / "arxiv_downloads"))
+                url_limit = nemo_config.get('url_limit', 10)
+                record_limit = nemo_config.get('record_limit', 3000)
+                use_gpu = nemo_config.get('use_gpu', False)
+                
+                result = run_nemo_curator_pipeline(
+                    download_dir=download_dir,
+                    output_path=str(self.curated_jsonl),
+                    url_limit=url_limit,
+                    record_limit=record_limit,
+                    use_gpu=use_gpu
+                )
+                
+                if result is None:
+                    raise RuntimeError("NeMo Curator pipeline failed")
+                
+            else:
+                # Use legacy curate_with_nemo function (requires text_dir and metadata)
+                logger.info("🔬 Using legacy NeMo Curator curation function")
+                
+                if not self.text_dir.exists() or not any(self.text_dir.iterdir()):
+                    raise FileNotFoundError(f"Text directory not found or empty: {self.text_dir}")
+                if not self.metadata_jsonl.exists():
+                    raise FileNotFoundError(f"Metadata file not found: {self.metadata_jsonl}")
+                
+                curate_with_nemo(
+                    text_dir=str(self.text_dir),
+                    metadata_jsonl=str(self.metadata_jsonl),
+                    output_jsonl=str(self.curated_jsonl),
+                    use_gpu=nemo_config.get('use_gpu', False),
+                    skip_dedup=nemo_config.get('skip_dedup', False),
+                    min_relevance_score=nemo_config.get('min_relevance_score', 0.5)
+                )
             
             if not self.curated_jsonl.exists():
                 raise FileNotFoundError(f"Curated dataset not created: {self.curated_jsonl}")

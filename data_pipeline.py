@@ -2487,6 +2487,133 @@ class HealthcareJsonlWriter(Stage if (NEMO_CURATOR_AVAILABLE and Stage_AVAILABLE
         return self.output_path
 
 
+def run_nemo_curator_pipeline(
+    download_dir: str = "./arxiv_downloads",
+    output_path: str = "./curated_dataset.jsonl",
+    url_limit: int = 10,
+    record_limit: int = 3000,
+    use_gpu: bool = False
+):
+    """Run complete NeMo Curator pipeline with custom healthcare stages.
+    
+    This function uses NeMo Curator's Pipeline API with:
+    - ArxivDownloadExtractStage: Downloads and extracts ArXiv papers from S3
+    - HealthcareFilterStage: Text cleaning, quality filtering, domain classification
+    - HealthcareQualityFilterStage: Deduplication and quality verification
+    - HealthcareJsonlWriter: Formats and writes final curated dataset
+    
+    Args:
+        download_dir: Directory for ArXiv downloads
+        output_path: Path to output curated dataset JSONL file
+        url_limit: Number of URLs to process (test with small number first, increases AWS charges)
+        record_limit: Max papers per tar file
+        use_gpu: Whether to use GPU (for future GPU-accelerated stages)
+    
+    Returns:
+        Path to output file if successful, None otherwise
+    """
+    if not NEMO_CURATOR_AVAILABLE:
+        print("❌ Error: NeMo Curator not available.")
+        print("   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
+        print("   Also requires: pip install s5cmd (for S3 access)")
+        print("   Note: NeMo Curator only supports Linux systems")
+        return None
+    
+    if not Pipeline_AVAILABLE:
+        print("❌ Error: NeMo Curator Pipeline not available.")
+        print("   This requires a newer version of NeMo Curator")
+        return None
+    
+    if not ArxivDownloadExtractStage_AVAILABLE:
+        print("❌ Error: ArxivDownloadExtractStage not available.")
+        print("   This stage requires NeMo Curator with ArXiv support")
+        return None
+    
+    print("=" * 60)
+    print("🔬 NeMo Curator Healthcare Pipeline")
+    print("=" * 60)
+    print(f"📁 Download directory: {download_dir}")
+    print(f"📁 Output file: {output_path}")
+    print(f"🔢 URL limit: {url_limit} (⚠️  Monitor AWS charges!)")
+    print(f"🔢 Record limit: {record_limit} papers per tar")
+    print()
+    
+    # Check AWS credentials
+    print("🔍 Checking AWS credentials...")
+    aws_configured = False
+    
+    # Check for AWS credentials in environment
+    if os.environ.get('AWS_ACCESS_KEY_ID') or os.environ.get('AWS_PROFILE'):
+        aws_configured = True
+        print("   ✅ AWS credentials found in environment")
+    else:
+        # Check for AWS config file
+        aws_config_path = os.path.expanduser('~/.aws/config')
+        aws_creds_path = os.path.expanduser('~/.aws/credentials')
+        if os.path.exists(aws_config_path) or os.path.exists(aws_creds_path):
+            aws_configured = True
+            print("   ✅ AWS credentials found in config files")
+        else:
+            print("   ⚠️  AWS credentials not found")
+            print("   Configure with:")
+            print("     - AWS profile: aws configure --profile default")
+            print("     - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
+            print("     - Instance role (if on EC2)")
+            print("   Note: s3://arxiv/src/ is requester-pays (you incur charges)")
+    
+    if not aws_configured:
+        response = input("   Continue anyway? (y/n): ")
+        if response.lower() != 'y':
+            print("   ❌ Pipeline cancelled")
+            return None
+    
+    try:
+        # Create pipeline
+        pipeline = Pipeline(name="arxiv_healthcare_pipeline")
+        
+        # Stage 1: Download and extract ArXiv papers
+        print("\n📥 Stage 1: ArXiv Download & Extraction")
+        print("   Using ArxivDownloadExtractStage...")
+        pipeline.add_stage(ArxivDownloadExtractStage(
+            download_dir=download_dir,
+            url_limit=url_limit,
+            record_limit=record_limit,
+            add_filename_column=True,
+            verbose=True
+        ))
+        
+        # Stage 2: Healthcare filtering and classification
+        print("\n🔍 Stage 2: Healthcare Filtering & Classification")
+        print("   Using HealthcareFilterStage...")
+        pipeline.add_stage(HealthcareFilterStage())
+        
+        # Stage 3: Quality filtering and deduplication
+        print("\n✨ Stage 3: Quality Filtering & Deduplication")
+        print("   Using HealthcareQualityFilterStage...")
+        pipeline.add_stage(HealthcareQualityFilterStage())
+        
+        # Stage 4: Write curated dataset
+        print("\n💾 Stage 4: Writing Curated Dataset")
+        print("   Using HealthcareJsonlWriter...")
+        pipeline.add_stage(HealthcareJsonlWriter(output_path=output_path))
+        
+        # Run pipeline
+        print("\n🚀 Running pipeline...")
+        print("=" * 60)
+        result = pipeline.run()
+        
+        print("\n✅ Pipeline completed successfully!")
+        print(f"📁 Output file: {output_path}")
+        
+        return output_path
+        
+    except Exception as e:
+        print(f"\n❌ Pipeline failed: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return None
+
+
 def curate_with_nemo(
     text_dir: str,
     metadata_jsonl: str,

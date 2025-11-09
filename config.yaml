@@ -21,6 +21,13 @@ extraction:
 
 # Step 3: NeMo Curator Curation
 nemo_curator:
+  # New Pipeline API settings (recommended)
+  use_pipeline_api: true  # Use new NeMo Curator Pipeline API with custom stages
+  download_dir: "./data/arxiv/arxiv_downloads"  # Directory for ArXiv downloads
+  url_limit: 10  # Number of URLs to process (⚠️  Monitor AWS charges! Start small)
+  record_limit: 3000  # Max papers per tar file
+  
+  # Legacy settings (if use_pipeline_api: false)
   use_gpu: false  # Use GPU for deduplication (Linux only)
   skip_dedup: false  # Skip deduplication if memory-constrained
   min_relevance_score: 0.5  # Minimum domain relevance to keep paper

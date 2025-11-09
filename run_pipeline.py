@@ -378,19 +378,21 @@ class PipelineOrchestrator:
             use_pipeline_api = nemo_config.get('use_pipeline_api', True)
             
             if use_pipeline_api:
-                # Use new NeMo Curator Pipeline API
-                logger.info("🔬 Using NeMo Curator Pipeline API with custom healthcare stages")
+                # Use new NeMo Curator Pipeline API (FREE, no AWS needed)
+                logger.info("🔬 Using NeMo Curator Pipeline API with FREE download_arxiv()")
                 
-                download_dir = nemo_config.get('download_dir', str(self.output_dir / "arxiv_downloads"))
-                url_limit = nemo_config.get('url_limit', 10)
-                record_limit = nemo_config.get('record_limit', 3000)
+                raw_data_path = nemo_config.get('raw_data_path', str(self.output_dir / "arxiv_raw_data"))
+                raw_output_path = nemo_config.get('raw_output_path', str(self.output_dir / "arxiv_raw_output.jsonl"))
+                filter_query = nemo_config.get('filter_query', "cs.LG OR cs.AI OR q-bio.NC")
+                max_workers = nemo_config.get('max_workers', 1)  # Colab safe
                 use_gpu = nemo_config.get('use_gpu', False)
                 
                 result = run_nemo_curator_pipeline(
-                    download_dir=download_dir,
                     output_path=str(self.curated_jsonl),
-                    url_limit=url_limit,
-                    record_limit=record_limit,
+                    raw_data_path=raw_data_path,
+                    raw_output_path=raw_output_path,
+                    filter_query=filter_query,
+                    max_workers=max_workers,
                     use_gpu=use_gpu
                 )
                 

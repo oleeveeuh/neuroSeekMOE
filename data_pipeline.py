@@ -139,7 +139,15 @@ try:
                 Stage = None
                 Stage_AVAILABLE = False
         
-        # Try to import ArxivDownloadExtractStage and JsonlWriter
+        # Try to import download_arxiv function (FREE, no AWS needed)
+        try:
+            from nemo_curator.download import download_arxiv
+            download_arxiv_AVAILABLE = True
+        except ImportError:
+            download_arxiv = None
+            download_arxiv_AVAILABLE = False
+        
+        # Try to import ArxivDownloadExtractStage and JsonlWriter (S3-based, requires AWS)
         try:
             from nemo_curator.stages import ArxivDownloadExtractStage
             ArxivDownloadExtractStage_AVAILABLE = True
@@ -2488,25 +2496,27 @@ class HealthcareJsonlWriter(Stage if (NEMO_CURATOR_AVAILABLE and Stage_AVAILABLE
 
 
 def run_nemo_curator_pipeline(
-    download_dir: str = "./arxiv_downloads",
     output_path: str = "./curated_dataset.jsonl",
-    url_limit: int = 10,
-    record_limit: int = 3000,
+    raw_data_path: str = "./arxiv_raw_data",
+    raw_output_path: str = "./arxiv_raw_output",
+    filter_query: str = "cs.LG OR cs.AI OR q-bio.NC",
+    max_workers: int = 1,
     use_gpu: bool = False
 ):
     """Run complete NeMo Curator pipeline with custom healthcare stages.
     
-    This function uses NeMo Curator's Pipeline API with:
-    - ArxivDownloadExtractStage: Downloads and extracts ArXiv papers from S3
+    This function uses NeMo Curator's FREE download_arxiv() function (no AWS needed):
+    - download_arxiv(): Downloads papers directly from ArXiv (FREE, no AWS charges)
     - HealthcareFilterStage: Text cleaning, quality filtering, domain classification
     - HealthcareQualityFilterStage: Deduplication and quality verification
     - HealthcareJsonlWriter: Formats and writes final curated dataset
     
     Args:
-        download_dir: Directory for ArXiv downloads
-        output_path: Path to output curated dataset JSONL file
-        url_limit: Number of URLs to process (test with small number first, increases AWS charges)
-        record_limit: Max papers per tar file
+        output_path: Path to final curated dataset JSONL file
+        raw_data_path: Directory for raw ArXiv downloads
+        raw_output_path: Path to raw output JSONL (before filtering)
+        filter_query: ArXiv search query (default: healthcare+ML categories)
+        max_workers: Number of workers for download (default: 1, Colab safe)
         use_gpu: Whether to use GPU (for future GPU-accelerated stages)
     
     Returns:
@@ -2515,95 +2525,81 @@ def run_nemo_curator_pipeline(
     if not NEMO_CURATOR_AVAILABLE:
         print("❌ Error: NeMo Curator not available.")
         print("   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
-        print("   Also requires: pip install s5cmd (for S3 access)")
         print("   Note: NeMo Curator only supports Linux systems")
         return None
     
-    if not Pipeline_AVAILABLE:
-        print("❌ Error: NeMo Curator Pipeline not available.")
-        print("   This requires a newer version of NeMo Curator")
-        return None
-    
-    if not ArxivDownloadExtractStage_AVAILABLE:
-        print("❌ Error: ArxivDownloadExtractStage not available.")
-        print("   This stage requires NeMo Curator with ArXiv support")
+    if not download_arxiv_AVAILABLE:
+        print("❌ Error: download_arxiv() function not available.")
+        print("   This requires NeMo Curator with download support")
         return None
     
     print("=" * 60)
-    print("🔬 NeMo Curator Healthcare Pipeline")
+    print("🔬 NeMo Curator Healthcare Pipeline (FREE - No AWS Required)")
     print("=" * 60)
-    print(f"📁 Download directory: {download_dir}")
-    print(f"📁 Output file: {output_path}")
-    print(f"🔢 URL limit: {url_limit} (⚠️  Monitor AWS charges!)")
-    print(f"🔢 Record limit: {record_limit} papers per tar")
+    print(f"📁 Raw data directory: {raw_data_path}")
+    print(f"📁 Raw output file: {raw_output_path}")
+    print(f"📁 Final curated output: {output_path}")
+    print(f"🔍 Filter query: {filter_query}")
+    print(f"👷 Max workers: {max_workers}")
+    print(f"💰 Cost: FREE (direct ArXiv access, no AWS charges)")
     print()
     
-    # Check AWS credentials
-    print("🔍 Checking AWS credentials...")
-    aws_configured = False
-    
-    # Check for AWS credentials in environment
-    if os.environ.get('AWS_ACCESS_KEY_ID') or os.environ.get('AWS_PROFILE'):
-        aws_configured = True
-        print("   ✅ AWS credentials found in environment")
-    else:
-        # Check for AWS config file
-        aws_config_path = os.path.expanduser('~/.aws/config')
-        aws_creds_path = os.path.expanduser('~/.aws/credentials')
-        if os.path.exists(aws_config_path) or os.path.exists(aws_creds_path):
-            aws_configured = True
-            print("   ✅ AWS credentials found in config files")
-        else:
-            print("   ⚠️  AWS credentials not found")
-            print("   Configure with:")
-            print("     - AWS profile: aws configure --profile default")
-            print("     - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
-            print("     - Instance role (if on EC2)")
-            print("   Note: s3://arxiv/src/ is requester-pays (you incur charges)")
-    
-    if not aws_configured:
-        response = input("   Continue anyway? (y/n): ")
-        if response.lower() != 'y':
-            print("   ❌ Pipeline cancelled")
-            return None
-    
     try:
-        # Create pipeline
-        pipeline = Pipeline(name="arxiv_healthcare_pipeline")
+        # Initialize Dask client
+        print("🔧 Initializing Dask client...")
+        try:
+            client = get_client(cluster_type="cpu")
+            print(f"   ✅ Dask client initialized: {client}")
+        except:
+            # Fallback: create local client
+            from dask.distributed import Client
+            client = Client(processes=False, threads_per_worker=max_workers)
+            print(f"   ✅ Created local Dask client: {client}")
         
-        # Stage 1: Download and extract ArXiv papers
-        print("\n📥 Stage 1: ArXiv Download & Extraction")
-        print("   Using ArxivDownloadExtractStage...")
-        pipeline.add_stage(ArxivDownloadExtractStage(
-            download_dir=download_dir,
-            url_limit=url_limit,
-            record_limit=record_limit,
-            add_filename_column=True,
-            verbose=True
-        ))
+        # Stage 1: Download ArXiv papers (FREE, no AWS needed)
+        print("\n📥 Stage 1: Downloading ArXiv Papers (FREE)")
+        print("   Using download_arxiv() - direct ArXiv access...")
+        print("   This may take 4-8 hours depending on network speed...")
+        
+        dataset = download_arxiv(
+            output_path=raw_data_path,
+            max_workers=max_workers,
+            filter_query=filter_query
+        )
+        
+        print(f"   ✅ Downloaded dataset: {len(dataset) if hasattr(dataset, '__len__') else 'unknown'} papers")
+        
+        # Save raw output to JSONL
+        print(f"\n💾 Saving raw data to {raw_output_path}...")
+        if hasattr(dataset, 'to_json'):
+            dataset.to_json(output_path=raw_output_path, write_to_filename=True)
+        else:
+            # Fallback: manual JSONL writing
+            os.makedirs(os.path.dirname(raw_output_path) if os.path.dirname(raw_output_path) else '.', exist_ok=True)
+            with open(raw_output_path, 'w', encoding='utf-8') as f:
+                for doc in dataset:
+                    f.write(json.dumps(doc, ensure_ascii=False) + '\n')
+        
+        print(f"   ✅ Raw data saved to {raw_output_path}")
         
         # Stage 2: Healthcare filtering and classification
         print("\n🔍 Stage 2: Healthcare Filtering & Classification")
         print("   Using HealthcareFilterStage...")
-        pipeline.add_stage(HealthcareFilterStage())
+        filtered_dataset = HealthcareFilterStage()(dataset)
         
         # Stage 3: Quality filtering and deduplication
         print("\n✨ Stage 3: Quality Filtering & Deduplication")
         print("   Using HealthcareQualityFilterStage...")
-        pipeline.add_stage(HealthcareQualityFilterStage())
+        quality_filtered_dataset = HealthcareQualityFilterStage()(filtered_dataset)
         
         # Stage 4: Write curated dataset
         print("\n💾 Stage 4: Writing Curated Dataset")
         print("   Using HealthcareJsonlWriter...")
-        pipeline.add_stage(HealthcareJsonlWriter(output_path=output_path))
-        
-        # Run pipeline
-        print("\n🚀 Running pipeline...")
-        print("=" * 60)
-        result = pipeline.run()
+        final_output = HealthcareJsonlWriter(output_path=output_path)(quality_filtered_dataset)
         
         print("\n✅ Pipeline completed successfully!")
-        print(f"📁 Output file: {output_path}")
+        print(f"📁 Final curated dataset: {output_path}")
+        print(f"📁 Raw data (for reference): {raw_output_path}")
         
         return output_path
         

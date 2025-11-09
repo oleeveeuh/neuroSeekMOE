@@ -239,6 +239,7 @@ def load_config(config_path: str = "config.yaml") -> Dict:
             'resume': True
         },
         'collection': {
+            'max_papers': 30000,  # For backward compatibility
             'rate_limit': 0.33,  # requests per second
             'retry_max': 5
         },
@@ -278,6 +279,17 @@ def load_config(config_path: str = "config.yaml") -> Dict:
                     config[key].update(value)
                 else:
                     config[key] = value
+            
+            # Ensure max_papers is in both pipeline and collection for backward compatibility
+            if 'pipeline' in config and 'max_papers' in config['pipeline']:
+                if 'collection' not in config:
+                    config['collection'] = {}
+                config['collection']['max_papers'] = config['pipeline']['max_papers']
+            elif 'collection' in config and 'max_papers' in config['collection']:
+                if 'pipeline' not in config:
+                    config['pipeline'] = {}
+                config['pipeline']['max_papers'] = config['collection']['max_papers']
+            
             print(f"✅ Loaded config from {config_path}")
             return config
         except Exception as e:

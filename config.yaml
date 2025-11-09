@@ -10,6 +10,7 @@ pipeline:
 
 # Step 1: ArXiv Paper Collection
 collection:
+  max_papers: 30000  # Target number of papers (for backward compatibility, also in pipeline section)
   rate_limit: 0.33  # Requests per second (3 requests/sec = 0.33 delay)
   retry_max: 5  # Maximum retry attempts with exponential backoff
 

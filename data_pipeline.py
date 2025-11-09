@@ -377,6 +377,15 @@ def collect_arxiv_papers(
         print("   Collection complete!")
         return
     
+    # If cache file exists but is empty, reset it
+    if total_collected == 0 and os.path.exists(cache_file):
+        print(f"⚠️  Cache file exists but is empty. Starting fresh collection...")
+        # Open in write mode to clear it, then switch to append mode
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            pass  # Clear the file
+        existing_ids = set()
+        total_collected = 0
+    
     print(f"📊 Starting collection: {total_collected}/{max_papers} papers already cached")
     print()
     

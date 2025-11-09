@@ -131,23 +131,62 @@ class PipelineOrchestrator:
             config = yaml.safe_load(f)
         return config
     
-    def _check_step_complete(self, step_name: str, output_files: List[Path]) -> bool:
-        """Check if a step is complete by verifying output files exist.
+    def _check_step_complete(self, step_name: str, output_files: List[Path], check_non_empty: bool = True) -> bool:
+        """Check if a step is complete by verifying output files exist and are non-empty.
         
         Args:
             step_name: Name of the step
             output_files: List of output file paths to check
+            check_non_empty: If True, also verify files are non-empty (default: True)
             
         Returns:
-            True if all output files exist, False otherwise
+            True if all output files exist (and are non-empty if check_non_empty=True), False otherwise
         """
         if not self.config['pipeline']['resume']:
             return False
         
-        all_exist = all(f.exists() for f in output_files)
-        if all_exist:
-            logger.info(f"✅ Step '{step_name}' already complete (output files exist)")
-        return all_exist
+        all_valid = True
+        for f in output_files:
+            if not f.exists():
+                all_valid = False
+                break
+            
+            # Check if file is non-empty
+            if check_non_empty:
+                if f.is_file():
+                    # For files, check if they have content
+                    try:
+                        if f.stat().st_size == 0:
+                            logger.info(f"⚠️  Step '{step_name}' output file exists but is empty: {f}")
+                            all_valid = False
+                            break
+                        # For JSONL files, check if they have at least one valid line
+                        if f.suffix == '.jsonl':
+                            with open(f, 'r', encoding='utf-8') as file_handle:
+                                has_content = any(line.strip() for line in file_handle)
+                                if not has_content:
+                                    logger.info(f"⚠️  Step '{step_name}' JSONL file exists but has no valid lines: {f}")
+                                    all_valid = False
+                                    break
+                    except Exception as e:
+                        logger.warning(f"⚠️  Could not check file {f}: {e}")
+                        all_valid = False
+                        break
+                elif f.is_dir():
+                    # For directories, check if they have at least one file
+                    try:
+                        if not any(f.iterdir()):
+                            logger.info(f"⚠️  Step '{step_name}' output directory exists but is empty: {f}")
+                            all_valid = False
+                            break
+                    except Exception as e:
+                        logger.warning(f"⚠️  Could not check directory {f}: {e}")
+                        all_valid = False
+                        break
+        
+        if all_valid:
+            logger.info(f"✅ Step '{step_name}' already complete (output files exist and are valid)")
+        return all_valid
     
     def _log_step_start(self, step_name: str, step_num: int, total_steps: int):
         """Log step start.
@@ -188,14 +227,34 @@ class PipelineOrchestrator:
         step_name = "Collect Papers"
         self._log_step_start(step_name, 1, 8)
         
-        # Check if already complete
-        if self._check_step_complete(step_name, [self.metadata_jsonl]):
-            self._log_step_end(step_name, True)
-            return True
+        # Check if already complete (verify file is non-empty)
+        if self._check_step_complete(step_name, [self.metadata_jsonl], check_non_empty=True):
+            # Double-check: count papers to ensure it's actually valid
+            if self.metadata_jsonl.exists():
+                count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
+                if count > 0:
+                    logger.info(f"📊 Found {count} papers in existing metadata file")
+                    self._log_step_end(step_name, True)
+                    return True
+                else:
+                    logger.warning(f"⚠️  Metadata file exists but is empty. Re-running collection...")
+            else:
+                logger.warning(f"⚠️  Metadata file check passed but file doesn't exist. Re-running collection...")
         
         try:
+            # If file exists but is empty, delete it to force re-collection
+            if self.metadata_jsonl.exists():
+                count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
+                if count == 0:
+                    logger.warning(f"⚠️  Existing metadata file is empty. Deleting to force re-collection...")
+                    self.metadata_jsonl.unlink()
+            
             collection_config = self.config['collection']
             rate_limit_delay = 1.0 / collection_config['rate_limit']
+            
+            logger.info(f"🔍 Starting ArXiv paper collection...")
+            logger.info(f"   Target: {collection_config['max_papers']} papers")
+            logger.info(f"   Rate limit: {collection_config['rate_limit']} requests/sec")
             
             collect_arxiv_papers(
                 output_dir=str(self.output_dir),
@@ -208,19 +267,20 @@ class PipelineOrchestrator:
                 raise FileNotFoundError(f"Metadata file not created: {self.metadata_jsonl}")
             
             # Count collected papers
-            if self.metadata_jsonl.exists():
-                count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
-                logger.info(f"📊 Collected {count} papers")
-                
-                if count == 0:
-                    logger.warning("⚠️  Warning: 0 papers collected. This might indicate:")
-                    logger.warning("   1. ArXiv API issues or rate limiting")
-                    logger.warning("   2. Network connectivity problems")
-                    logger.warning("   3. Query parameters too restrictive")
-                    logger.warning("   4. Empty file created but collection didn't run")
-                    logger.warning("   Check the collection logs above for details")
-            else:
-                logger.warning("⚠️  Warning: Metadata file does not exist")
+            count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
+            logger.info(f"📊 Collected {count} papers")
+            
+            if count == 0:
+                error_msg = (
+                    "❌ Error: 0 papers collected. This indicates a problem:\n"
+                    "   1. ArXiv API issues or rate limiting\n"
+                    "   2. Network connectivity problems\n"
+                    "   3. Query parameters too restrictive\n"
+                    "   4. Collection function returned without collecting\n"
+                    "   Check the collection logs above for detailed error messages."
+                )
+                logger.error(error_msg)
+                raise RuntimeError("Paper collection failed: 0 papers collected")
             
             self._log_step_end(step_name, True)
             return True
@@ -239,11 +299,19 @@ class PipelineOrchestrator:
         step_name = "Extract PDFs"
         self._log_step_start(step_name, 2, 8)
         
-        # Check if already complete
-        if self._check_step_complete(step_name, [self.text_dir]):
-            if self.text_dir.exists() and any(self.text_dir.iterdir()):
-                self._log_step_end(step_name, True)
-                return True
+        # Check if already complete (verify directory has files)
+        if self._check_step_complete(step_name, [self.text_dir], check_non_empty=True):
+            # Double-check: count text files
+            if self.text_dir.exists():
+                text_files = list(self.text_dir.glob("*.txt"))
+                if len(text_files) > 0:
+                    logger.info(f"📊 Found {len(text_files)} text files in existing directory")
+                    self._log_step_end(step_name, True)
+                    return True
+                else:
+                    logger.warning(f"⚠️  Text directory exists but has no .txt files. Re-running extraction...")
+            else:
+                logger.warning(f"⚠️  Text directory check passed but doesn't exist. Re-running extraction...")
         
         try:
             if not self.metadata_jsonl.exists():
@@ -282,10 +350,19 @@ class PipelineOrchestrator:
         step_name = "NeMo Curator Curation"
         self._log_step_start(step_name, 3, 8)
         
-        # Check if already complete
-        if self._check_step_complete(step_name, [self.curated_jsonl]):
-            self._log_step_end(step_name, True)
-            return True
+        # Check if already complete (verify file is non-empty)
+        if self._check_step_complete(step_name, [self.curated_jsonl], check_non_empty=True):
+            # Double-check: count curated papers
+            if self.curated_jsonl.exists():
+                count = sum(1 for line in open(self.curated_jsonl) if line.strip())
+                if count > 0:
+                    logger.info(f"📊 Found {count} papers in existing curated dataset")
+                    self._log_step_end(step_name, True)
+                    return True
+                else:
+                    logger.warning(f"⚠️  Curated file exists but is empty. Re-running curation...")
+            else:
+                logger.warning(f"⚠️  Curated file check passed but doesn't exist. Re-running curation...")
         
         try:
             if not self.text_dir.exists() or not any(self.text_dir.iterdir()):
@@ -328,10 +405,19 @@ class PipelineOrchestrator:
         step_name = "Process Curated Dataset"
         self._log_step_start(step_name, 4, 8)
         
-        # Check if already complete
-        if self._check_step_complete(step_name, [self.processed_jsonl]):
-            self._log_step_end(step_name, True)
-            return True
+        # Check if already complete (verify file is non-empty)
+        if self._check_step_complete(step_name, [self.processed_jsonl], check_non_empty=True):
+            # Double-check: count processed papers
+            if self.processed_jsonl.exists():
+                count = sum(1 for line in open(self.processed_jsonl) if line.strip())
+                if count > 0:
+                    logger.info(f"📊 Found {count} papers in existing processed dataset")
+                    self._log_step_end(step_name, True)
+                    return True
+                else:
+                    logger.warning(f"⚠️  Processed file exists but is empty. Re-running processing...")
+            else:
+                logger.warning(f"⚠️  Processed file check passed but doesn't exist. Re-running processing...")
         
         try:
             if not self.curated_jsonl.exists():
@@ -376,10 +462,18 @@ class PipelineOrchestrator:
         step_name = "Train Tokenizer"
         self._log_step_start(step_name, 5, 8)
         
-        # Check if already complete
-        if self._check_step_complete(step_name, [self.tokenizer_model, self.tokenizer_vocab]):
-            self._log_step_end(step_name, True)
-            return True
+        # Check if already complete (verify files are non-empty)
+        if self._check_step_complete(step_name, [self.tokenizer_model, self.tokenizer_vocab], check_non_empty=True):
+            # Double-check: verify tokenizer files are valid
+            if self.tokenizer_model.exists() and self.tokenizer_vocab.exists():
+                if self.tokenizer_model.stat().st_size > 0 and self.tokenizer_vocab.stat().st_size > 0:
+                    logger.info(f"📊 Found existing tokenizer files")
+                    self._log_step_end(step_name, True)
+                    return True
+                else:
+                    logger.warning(f"⚠️  Tokenizer files exist but are empty. Re-running tokenizer training...")
+            else:
+                logger.warning(f"⚠️  Tokenizer file check passed but files don't exist. Re-running tokenizer training...")
         
         try:
             if not self.processed_jsonl.exists():

@@ -60,18 +60,73 @@ except ImportError:
     print("⚠️  sentencepiece package not available. Install with: pip install sentencepiece")
 
 # NeMo Curator imports (optional, Linux only)
+# Use CORRECT imports as specified:
+# - from nemo_curator.datasets import DocumentDataset
+# - from nemo_curator.modifiers import DocumentModifier
+# - from nemo_curator.filters import DocumentFilter
+# - from nemo_curator.utils.decorators import log_stage
 try:
     import platform
     if platform.system() == 'Linux':
-        from nemo_curator import (
-            DocumentModifier, ScoreFilter, FuzzyDedup, AddQualityScores,
-            WordCountFilter, AlphanumericFilter, LanguageFilter, RepeatedLineFilter,
-            DocumentFilter
-        )
-        from nemo_curator.utils.distributed_utils import get_client
+        # Core NeMo Curator imports (CORRECT paths)
         from nemo_curator.datasets import DocumentDataset
+        from nemo_curator.modifiers import DocumentModifier
+        from nemo_curator.filters import DocumentFilter
+        from nemo_curator.utils.decorators import log_stage
+        
+        # Additional components (try multiple import paths for compatibility)
+        ScoreFilter = None
+        WordCountFilter = None
+        AlphanumericFilter = None
+        LanguageFilter = None
+        RepeatedLineFilter = None
+        FuzzyDedup = None
+        get_client = None
+        
+        # Try to import additional filters
+        try:
+            from nemo_curator.filters import (
+                ScoreFilter, WordCountFilter, AlphanumericFilter,
+                LanguageFilter, RepeatedLineFilter
+            )
+        except ImportError:
+            try:
+                # Alternative import path
+                from nemo_curator import (
+                    ScoreFilter, WordCountFilter, AlphanumericFilter,
+                    LanguageFilter, RepeatedLineFilter
+                )
+            except ImportError:
+                pass  # Use None, will fall back to custom implementations
+        
+        # Try to import deduplication
+        try:
+            from nemo_curator.dedup import FuzzyDedup
+        except ImportError:
+            try:
+                from nemo_curator import FuzzyDedup
+            except ImportError:
+                pass  # Use None, will skip deduplication
+        
+        # Try to import Dask client utility
+        try:
+            from nemo_curator.utils.distributed_utils import get_client
+        except ImportError:
+            try:
+                from dask.distributed import Client
+                # Create a wrapper function
+                def get_client():
+                    try:
+                        from dask.distributed import get_client as dask_get_client
+                        return dask_get_client()
+                    except:
+                        return Client(processes=False, threads_per_worker=2)
+            except ImportError:
+                pass  # Will create client manually
+        
         import dask
         NEMO_CURATOR_AVAILABLE = True
+        print("✅ NeMo Curator imported successfully")
     else:
         NEMO_CURATOR_AVAILABLE = False
         print("⚠️  NeMo Curator only supports Linux systems (current: {})".format(platform.system()))
@@ -1236,9 +1291,11 @@ def create_healthcare_text_cleaner():
         return None
     
     # Custom modifier that preserves medical terminology
+    # Extends: nemo_curator.modifiers.DocumentModifier
     class HealthcareTextCleaner(DocumentModifier):
         def __init__(self):
-            super().__init__()
+            if NEMO_CURATOR_AVAILABLE:
+                super().__init__()
             # Medical terms to preserve (don't lowercase)
             self.medical_terms = {
                 'Alzheimer', 'Parkinson', 'ALS', 'Dementia', 'Huntington',
@@ -1510,11 +1567,13 @@ class HealthcareTextModifier:
         return document
 
 
-class HealthcareDomainFilter:
+class HealthcareDomainFilter(DocumentFilter if NEMO_CURATOR_AVAILABLE else object):
     """Custom domain classifier for healthcare papers extending NeMo Curator DocumentFilter interface.
     
     Scores documents based on healthcare+ML domain relevance and assigns domain tags.
     Compatible with NeMo Curator's ScoreFilter.
+    
+    Extends: nemo_curator.filters.DocumentFilter
     """
     
     def __init__(self):
@@ -1688,13 +1747,24 @@ def curate_with_nemo(
     
     # Initialize Dask client for parallelization
     try:
-        client = get_client()
-        print(f"✅ Dask client initialized: {client}")
-    except:
-        # Create local Dask client
-        from dask.distributed import Client
-        client = Client(processes=False, threads_per_worker=2)
-        print(f"✅ Created local Dask client: {client}")
+        if get_client is not None:
+            try:
+                client = get_client()
+                print(f"✅ Dask client initialized: {client}")
+            except:
+                # Create local Dask client
+                from dask.distributed import Client
+                client = Client(processes=False, threads_per_worker=2)
+                print(f"✅ Created local Dask client: {client}")
+        else:
+            # Create local Dask client manually
+            from dask.distributed import Client
+            client = Client(processes=False, threads_per_worker=2)
+            print(f"✅ Created local Dask client: {client}")
+    except Exception as e:
+        print(f"⚠️  Dask client creation failed: {e}")
+        print("   Continuing without Dask (will use sequential processing)")
+        client = None
     
     # Load metadata
     print("📚 Loading metadata...")
@@ -1933,17 +2003,47 @@ def curate_with_nemo(
         before_dedup = len(dataset)
         
         try:
-            if NEMO_CURATOR_AVAILABLE:
+            if NEMO_CURATOR_AVAILABLE and FuzzyDedup is not None:
                 if use_gpu:
                     deduplicator = FuzzyDedup(similarity_threshold=0.95, use_gpu=True)
                 else:
                     deduplicator = FuzzyDedup(similarity_threshold=0.95, use_gpu=False)
                 
-                dataset = deduplicator(dataset)
-                after_dedup = len(dataset)
+                # Apply deduplication
+                if hasattr(dataset, 'map'):
+                    # DocumentDataset
+                    dataset = deduplicator(dataset)
+                else:
+                    # List - convert to DocumentDataset for deduplication
+                    try:
+                        temp_dataset = DocumentDataset(dataset)
+                        temp_dataset = deduplicator(temp_dataset)
+                        dataset = list(temp_dataset)
+                    except:
+                        # Fallback: simple deduplication by text hash
+                        seen_texts = set()
+                        unique_docs = []
+                        for doc in dataset:
+                            text_hash = hash(doc.get('text', ''))
+                            if text_hash not in seen_texts:
+                                seen_texts.add(text_hash)
+                                unique_docs.append(doc)
+                        dataset = unique_docs
+                
+                after_dedup = len(dataset) if isinstance(dataset, list) else len(list(dataset))
                 print(f"   ✅ Deduplication: {after_dedup}/{before_dedup} documents")
             else:
-                print("   ⚠️  NeMo Curator not available, skipping deduplication")
+                print("   ⚠️  NeMo Curator deduplication not available, using simple hash-based dedup")
+                # Simple deduplication by text hash
+                seen_texts = set()
+                unique_docs = []
+                for doc in (dataset if isinstance(dataset, list) else list(dataset)):
+                    text_hash = hash(doc.get('text', ''))
+                    if text_hash not in seen_texts:
+                        seen_texts.add(text_hash)
+                        unique_docs.append(doc)
+                dataset = unique_docs
+                print(f"   ✅ Simple deduplication: {len(dataset)}/{before_dedup} documents")
         except Exception as e:
             print(f"   ⚠️  Deduplication failed: {e}")
             print("   Continuing without deduplication...")

@@ -3,19 +3,20 @@
 # Pipeline Settings
 pipeline:
   output_dir: "./data/arxiv"
+  max_papers: 30000  # Target number of papers
+  skip_stages: []  # List of stages to skip: [collect, extract, curate, preprocess, tokenize]
   resume: true  # Resume from last completed step
   cleanup_intermediate: true  # Delete intermediate files after processing
 
 # Step 1: ArXiv Paper Collection
 collection:
-  max_papers: 40000
-  rate_limit: 3.0  # Requests per second
-  cache_file: null  # Auto: output_dir/arxiv_papers.jsonl
+  rate_limit: 0.33  # Requests per second (3 requests/sec = 0.33 delay)
+  retry_max: 5  # Maximum retry attempts with exponential backoff
 
 # Step 2: PDF Text Extraction
 extraction:
-  num_workers: 4
-  rate_limit_delay: 0.4  # Seconds between requests
+  workers: 2  # Number of workers (2 is Colab safe)
+  rate_limit: 0.4  # Seconds between requests
   max_pages: 6
   max_chars: 12000
 
@@ -50,8 +51,8 @@ nemo_curator:
     use_gpu: false  # Use GPU for MinHash (if available)
 
 # Step 4: Healthcare-Specific Processing
-processing:
-  num_workers: 4
+preprocessing:
+  workers: 4  # Number of parallel workers
   preserve_sections: true  # Extract section boundaries
   preserve_abbreviations: true  # Preserve scientific abbreviations
   max_chars: 12000

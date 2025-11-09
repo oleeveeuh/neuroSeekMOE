@@ -17,12 +17,30 @@ import re
 import random
 import time
 import threading
+import shutil
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Set, Optional, List
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Configuration management
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+    print("⚠️  yaml package not available. Install with: pip install pyyaml")
+
+# Memory monitoring
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("⚠️  psutil package not available. Install with: pip install psutil")
 
 try:
     import arxiv
@@ -200,6 +218,310 @@ ARXIV_QUERIES = [
 # Output fields (minimal metadata)
 OUTPUT_FIELDS = ['id', 'title', 'abstract', 'year', 'categories', 'pdf_url']
 
+# ============================================================================
+# Configuration Management
+# ============================================================================
+
+def load_config(config_path: str = "config.yaml") -> Dict:
+    """Load configuration from YAML file.
+    
+    Args:
+        config_path: Path to config.yaml file
+        
+    Returns:
+        Configuration dictionary with defaults
+    """
+    defaults = {
+        'pipeline': {
+            'output_dir': './data/arxiv',
+            'max_papers': 30000,
+            'skip_stages': [],
+            'resume': True
+        },
+        'collection': {
+            'rate_limit': 0.33,  # requests per second
+            'retry_max': 5
+        },
+        'extraction': {
+            'workers': 2,  # Colab safe
+            'rate_limit': 0.4,
+            'max_pages': 6,
+            'max_chars': 12000
+        },
+        'curation': {
+            'use_nemo_curator': True,
+            'skip_deduplication': False,
+            'min_relevance_score': 0.5
+        },
+        'preprocessing': {
+            'workers': 4
+        },
+        'tokenizer': {
+            'vocab_size': 50000,
+            'model_type': 'bpe',
+            'character_coverage': 0.9995
+        }
+    }
+    
+    if not YAML_AVAILABLE:
+        print("⚠️  YAML not available, using defaults")
+        return defaults
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                user_config = yaml.safe_load(f) or {}
+            # Merge with defaults
+            config = defaults.copy()
+            for key, value in user_config.items():
+                if key in config and isinstance(config[key], dict) and isinstance(value, dict):
+                    config[key].update(value)
+                else:
+                    config[key] = value
+            print(f"✅ Loaded config from {config_path}")
+            return config
+        except Exception as e:
+            print(f"⚠️  Error loading config: {e}, using defaults")
+            return defaults
+    else:
+        # Create default config file
+        try:
+            with open(config_path, 'w') as f:
+                yaml.dump(defaults, f, default_flow_style=False, sort_keys=False)
+            print(f"📝 Created default config file: {config_path}")
+        except Exception as e:
+            print(f"⚠️  Could not create config file: {e}")
+        return defaults
+
+
+def save_config(config: Dict, config_path: str = "config.yaml"):
+    """Save configuration to YAML file.
+    
+    Args:
+        config: Configuration dictionary
+        config_path: Path to config.yaml file
+    """
+    if not YAML_AVAILABLE:
+        print("⚠️  YAML not available, cannot save config")
+        return
+    
+    try:
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        print(f"✅ Saved config to {config_path}")
+    except Exception as e:
+        print(f"⚠️  Error saving config: {e}")
+
+
+# ============================================================================
+# Memory Monitoring
+# ============================================================================
+
+def get_memory_usage() -> Dict:
+    """Get current memory usage statistics.
+    
+    Returns:
+        Dictionary with memory stats
+    """
+    if not PSUTIL_AVAILABLE:
+        return {'available': None, 'percent': None, 'total': None}
+    
+    try:
+        mem = psutil.virtual_memory()
+        return {
+            'available': mem.available,
+            'percent': mem.percent,
+            'total': mem.total,
+            'used': mem.used
+        }
+    except Exception:
+        return {'available': None, 'percent': None, 'total': None}
+
+
+def check_memory_usage(warning_threshold: float = 80.0) -> bool:
+    """Check if memory usage is below warning threshold.
+    
+    Args:
+        warning_threshold: Warning threshold percentage (default: 80%)
+        
+    Returns:
+        True if memory usage is safe, False if warning threshold exceeded
+    """
+    if not PSUTIL_AVAILABLE:
+        return True  # Assume safe if psutil not available
+    
+    mem_stats = get_memory_usage()
+    if mem_stats['percent'] is not None:
+        if mem_stats['percent'] > warning_threshold:
+            print(f"⚠️  Memory usage: {mem_stats['percent']:.1f}% (threshold: {warning_threshold}%)")
+            print(f"   Available: {mem_stats['available'] / (1024**3):.2f} GB")
+            return False
+    return True
+
+
+def log_memory_stats(interval: int = 1000):
+    """Log memory statistics periodically.
+    
+    Args:
+        interval: Log every N papers processed
+    """
+    if not PSUTIL_AVAILABLE:
+        return
+    
+    mem_stats = get_memory_usage()
+    if mem_stats['percent'] is not None:
+        print(f"   💾 Memory: {mem_stats['percent']:.1f}% used, {mem_stats['available'] / (1024**3):.2f} GB available")
+
+
+# ============================================================================
+# Validation & Diagnostics
+# ============================================================================
+
+def check_arxiv_connection() -> bool:
+    """Check if ArXiv API is accessible.
+    
+    Returns:
+        True if accessible, False otherwise
+    """
+    if not ARXIV_AVAILABLE:
+        print("❌ ArXiv package not available")
+        return False
+    
+    try:
+        client = arxiv.Client(page_size=1, delay_seconds=0.5, num_retries=1)
+        search = arxiv.Search(query="cat:cs.LG", max_results=1)
+        result = next(client.results(search), None)
+        if result:
+            print("✅ ArXiv API is accessible")
+            return True
+        else:
+            print("⚠️  ArXiv API returned no results (might be temporary)")
+            return False
+    except Exception as e:
+        print(f"❌ ArXiv API connection failed: {e}")
+        return False
+
+
+def check_disk_space(path: str, required_gb: float = 50.0) -> bool:
+    """Check if sufficient disk space is available.
+    
+    Args:
+        path: Path to check disk space for
+        required_gb: Required space in GB (default: 50GB)
+        
+    Returns:
+        True if sufficient space, False otherwise
+    """
+    try:
+        if PSUTIL_AVAILABLE:
+            stat = shutil.disk_usage(path)
+            available_gb = stat.free / (1024**3)
+            print(f"💾 Disk space: {available_gb:.2f} GB available (required: {required_gb:.2f} GB)")
+            if available_gb < required_gb:
+                print(f"⚠️  Warning: Insufficient disk space")
+                return False
+            return True
+        else:
+            print("⚠️  psutil not available, cannot check disk space")
+            return True  # Assume OK
+    except Exception as e:
+        print(f"⚠️  Could not check disk space: {e}")
+        return True  # Assume OK
+
+
+def check_output_directory(path: str) -> bool:
+    """Check if output directory is writable.
+    
+    Args:
+        path: Path to output directory
+        
+    Returns:
+        True if writable, False otherwise
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        test_file = os.path.join(path, '.write_test')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        print(f"✅ Output directory is writable: {path}")
+        return True
+    except Exception as e:
+        print(f"❌ Output directory not writable: {path} - {e}")
+        return False
+
+
+def count_existing_files(directory: str, pattern: str = "*.jsonl") -> int:
+    """Count existing files matching pattern.
+    
+    Args:
+        directory: Directory to search
+        pattern: File pattern (default: *.jsonl)
+        
+    Returns:
+        Number of matching files
+    """
+    if not os.path.exists(directory):
+        return 0
+    
+    count = 0
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if file.endswith(pattern.replace('*', '')):
+                count += 1
+    return count
+
+
+def print_diagnostics(config: Dict):
+    """Print diagnostic information at startup.
+    
+    Args:
+        config: Configuration dictionary
+    """
+    print("=" * 60)
+    print("🔍 Pipeline Diagnostics")
+    print("=" * 60)
+    
+    # Check ArXiv connection
+    print("\n1. ArXiv API Connection:")
+    arxiv_ok = check_arxiv_connection()
+    
+    # Check disk space
+    print("\n2. Disk Space:")
+    output_dir = config.get('pipeline', {}).get('output_dir', './data/arxiv')
+    check_disk_space(output_dir, required_gb=50.0)
+    
+    # Check output directory
+    print("\n3. Output Directory:")
+    check_output_directory(output_dir)
+    
+    # Check existing files
+    print("\n4. Existing Files:")
+    existing_count = count_existing_files(output_dir)
+    print(f"   Found {existing_count} existing files in {output_dir}")
+    
+    # Memory status
+    print("\n5. Memory Status:")
+    mem_stats = get_memory_usage()
+    if mem_stats['percent'] is not None:
+        print(f"   Memory usage: {mem_stats['percent']:.1f}%")
+        print(f"   Available: {mem_stats['available'] / (1024**3):.2f} GB")
+    else:
+        print("   Memory monitoring not available (install psutil)")
+    
+    # Package availability
+    print("\n6. Package Availability:")
+    print(f"   ArXiv: {'✅' if ARXIV_AVAILABLE else '❌'}")
+    print(f"   PDF: {'✅' if PDF_AVAILABLE else '❌'}")
+    print(f"   NeMo Curator: {'✅' if NEMO_CURATOR_AVAILABLE else '❌'}")
+    print(f"   SentencePiece: {'✅' if SENTENCEPIECE_AVAILABLE else '❌'}")
+    print(f"   YAML: {'✅' if YAML_AVAILABLE else '❌'}")
+    print(f"   psutil: {'✅' if PSUTIL_AVAILABLE else '❌'}")
+    
+    print("\n" + "=" * 60)
+    
+    return arxiv_ok
+
 
 def load_existing_ids(cache_file: str) -> Set[str]:
     """Load existing ArXiv IDs from cache file to avoid re-downloading.
@@ -311,18 +633,20 @@ def search_arxiv_query(
     query: str,
     max_results: int = 10000,
     existing_ids: Set[str] = None,
-    rate_limit_delay: float = RATE_LIMIT_DELAY
+    rate_limit_delay: float = RATE_LIMIT_DELAY,
+    max_retries: int = 5
 ) -> list[Dict]:
-    """Search ArXiv with a single query and return papers.
+    """Search ArXiv with retry logic and exponential backoff.
     
     Args:
         query: ArXiv search query
         max_results: Maximum number of results to fetch
         existing_ids: Set of IDs to skip (already in cache)
         rate_limit_delay: Delay between requests (seconds)
+        max_retries: Maximum number of retry attempts (default: 5)
         
     Returns:
-        List of paper dictionaries (streamed, not all in memory)
+        List of paper dictionaries
     """
     if existing_ids is None:
         existing_ids = set()
@@ -331,88 +655,124 @@ def search_arxiv_query(
     print(f"\n🔍 Searching ArXiv: {query}")
     print(f"   Max results: {max_results}")
     
-    try:
-        # Create ArXiv client with rate limiting
-        client = arxiv.Client(
-            page_size=100,  # Fetch 100 papers per request
-            delay_seconds=rate_limit_delay,
-            num_retries=3
-        )
-        
-        # Search
-        search = arxiv.Search(
-            query=query,
-            max_results=max_results,
-            sort_by=arxiv.SortCriterion.SubmittedDate,
-            sort_order=arxiv.SortOrder.Descending
-        )
-        
-        # Stream results (yield immediately, don't accumulate)
-        count = 0
-        skipped_no_abstract = 0
-        skipped_date_range = 0
-        skipped_duplicate = 0
-        
-        print(f"   🔄 Fetching results from ArXiv API...")
-        results_iter = client.results(search)
-        
-        result_idx = -1
-        for result_idx, result in enumerate(results_iter):
-            # Rate limiting (client handles this, but we add extra safety)
-            time.sleep(rate_limit_delay)
+    # Validate query syntax
+    if not query or not query.strip():
+        print(f"   ❌ Error: Empty query")
+        return papers
+    
+    # Retry logic with exponential backoff
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                # Exponential backoff with jitter
+                base_wait = 2 ** (attempt - 1)  # 1, 2, 4, 8, 16
+                jitter = random.uniform(0, base_wait)
+                wait_time = base_wait + jitter
+                print(f"   ⏳ Retry attempt {attempt}/{max_retries} after {wait_time:.1f}s...")
+                time.sleep(wait_time)
             
-            # Check if already in cache
-            paper_id = result.entry_id.split('/')[-1]
-            if paper_id in existing_ids:
-                skipped_duplicate += 1
-                continue
+            # Create ArXiv client with rate limiting
+            client = arxiv.Client(
+                page_size=100,  # Fetch 100 papers per request
+                delay_seconds=rate_limit_delay,
+                num_retries=3
+            )
             
-            # Convert to dict
-            paper_dict = paper_to_dict(result)
-            if paper_dict is None:
-                # Check why it was skipped
-                if not result.summary or not result.summary.strip():
-                    skipped_no_abstract += 1
+            # Search
+            search = arxiv.Search(
+                query=query,
+                max_results=max_results,
+                sort_by=arxiv.SortCriterion.SubmittedDate,
+                sort_order=arxiv.SortOrder.Descending
+            )
+            
+            # Stream results
+            count = 0
+            skipped_no_abstract = 0
+            skipped_date_range = 0
+            skipped_duplicate = 0
+            
+            print(f"   🔄 Fetching results from ArXiv API (attempt {attempt + 1}/{max_retries})...")
+            results_iter = client.results(search)
+            
+            result_idx = -1
+            for result_idx, result in enumerate(results_iter):
+                # Rate limiting
+                time.sleep(rate_limit_delay)
+                
+                # Check if already in cache
+                paper_id = result.entry_id.split('/')[-1]
+                if paper_id in existing_ids:
+                    skipped_duplicate += 1
+                    continue
+                
+                # Convert to dict
+                paper_dict = paper_to_dict(result)
+                if paper_dict is None:
+                    if not result.summary or not result.summary.strip():
+                        skipped_no_abstract += 1
+                    else:
+                        year = extract_year_from_date(result.published)
+                        if year is not None and (year < MIN_YEAR or year > MAX_YEAR):
+                            skipped_date_range += 1
+                    continue
+                
+                papers.append(paper_dict)
+                count += 1
+                
+                # Log progress every 500 papers
+                if count % LOG_INTERVAL == 0:
+                    print(f"   ✅ Collected {count} new papers from this query...")
+                
+                # Safety limit
+                if count >= max_results:
+                    break
+            
+            # Success - break out of retry loop
+            print(f"   ✅ Query complete: {count} new papers collected")
+            if skipped_duplicate > 0:
+                print(f"   ⏭️  Skipped {skipped_duplicate} duplicates")
+            if skipped_no_abstract > 0:
+                print(f"   ⏭️  Skipped {skipped_no_abstract} papers without abstracts")
+            if skipped_date_range > 0:
+                print(f"   ⏭️  Skipped {skipped_date_range} papers outside date range ({MIN_YEAR}-{MAX_YEAR})")
+            
+            if count == 0:
+                if result_idx == -1:
+                    print(f"   ⚠️  Warning: No results found for query")
+                    print(f"      - Query: {query}")
+                    print(f"      - This might indicate query syntax issue or API problem")
                 else:
-                    year = extract_year_from_date(result.published)
-                    if year is not None and (year < MIN_YEAR or year > MAX_YEAR):
-                        skipped_date_range += 1
+                    print(f"   ⚠️  Warning: Processed {result_idx + 1} results but none matched criteria")
+            
+            break  # Success, exit retry loop
+            
+        except arxiv.UnexpectedEmptyPageError as e:
+            print(f"   ⚠️  ArXiv returned empty page (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
                 continue
-            
-            papers.append(paper_dict)
-            count += 1
-            
-            # Log progress every 500 papers
-            if count % LOG_INTERVAL == 0:
-                print(f"   ✅ Collected {count} new papers from this query...")
-            
-            # Safety limit: don't process more than max_results
-            if count >= max_results:
-                break
-        
-        print(f"   ✅ Query complete: {count} new papers collected")
-        if skipped_duplicate > 0:
-            print(f"   ⏭️  Skipped {skipped_duplicate} duplicates")
-        if skipped_no_abstract > 0:
-            print(f"   ⏭️  Skipped {skipped_no_abstract} papers without abstracts")
-        if skipped_date_range > 0:
-            print(f"   ⏭️  Skipped {skipped_date_range} papers outside date range ({MIN_YEAR}-{MAX_YEAR})")
-        
-        if count == 0:
-            if result_idx == -1:
-                print(f"   ⚠️  Warning: No results found for query. This might indicate:")
-                print(f"      - Query syntax issue")
-                print(f"      - No papers match the criteria")
-                print(f"      - ArXiv API issue")
             else:
-                print(f"   ⚠️  Warning: Processed {result_idx + 1} results but none matched criteria")
-                print(f"      - All papers may have been filtered out (no abstract, wrong date range, duplicates)")
-        
-    except Exception as e:
-        print(f"   ❌ Error in query '{query}': {e}")
-        import traceback
-        print(f"   Traceback: {traceback.format_exc()}")
-        print(f"   Continuing with {len(papers)} papers collected so far...")
+                print(f"   ❌ Failed after {max_retries} attempts")
+                break
+                
+        except arxiv.HTTPError as e:
+            print(f"   ⚠️  HTTP error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            else:
+                print(f"   ❌ Failed after {max_retries} attempts")
+                break
+                
+        except Exception as e:
+            print(f"   ❌ Error in query '{query}' (attempt {attempt + 1}/{max_retries}): {e}")
+            import traceback
+            if attempt == max_retries - 1:
+                print(f"   Full traceback: {traceback.format_exc()}")
+            if attempt < max_retries - 1:
+                continue
+            else:
+                print(f"   ❌ Failed after {max_retries} attempts")
+                break
     
     return papers
 
@@ -3709,6 +4069,463 @@ def train_healthcare_tokenizer(
     #     print(f"\n🧹 Cleaned up temporary file: {temp_txt_file}")
 
 
+def run_full_pipeline(config_path: str = "config.yaml"):
+    """Run complete end-to-end pipeline with validation and error recovery.
+    
+    Args:
+        config_path: Path to config.yaml file
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    print("=" * 80)
+    print("🚀 Healthcare MoE Data Pipeline - Full Orchestration")
+    print("=" * 80)
+    print()
+    
+    # Load configuration
+    config = load_config(config_path)
+    pipeline_config = config.get('pipeline', {})
+    output_dir = pipeline_config.get('output_dir', './data/arxiv')
+    max_papers = pipeline_config.get('max_papers', 30000)
+    skip_stages = pipeline_config.get('skip_stages', [])
+    resume = pipeline_config.get('resume', True)
+    
+    # Run diagnostics
+    print("🔍 Running diagnostics...")
+    arxiv_ok = print_diagnostics(config)
+    
+    if not arxiv_ok:
+        print("\n⚠️  ArXiv connection check failed. Continuing anyway...")
+        print("   If collection fails, you can use local test data or retry later")
+    
+    # Pipeline stages
+    stages = {
+        'collect': 'Collect ArXiv Papers',
+        'extract': 'Extract PDF Texts',
+        'curate': 'NeMo Curator Curation',
+        'preprocess': 'Preprocess & Classify',
+        'tokenize': 'Train Tokenizer'
+    }
+    
+    stage_results = {}
+    start_time = time.time()
+    
+    try:
+        # Stage 1: Collect papers
+        if 'collect' not in skip_stages:
+            stage_name = 'collect'
+            print("\n" + "=" * 80)
+            print(f"📦 Stage 1: {stages[stage_name]}")
+            print("=" * 80)
+            
+            stage_start = time.time()
+            collection_config = config.get('collection', {})
+            rate_limit = collection_config.get('rate_limit', 0.33)
+            retry_max = collection_config.get('retry_max', 5)
+            
+            cache_file = os.path.join(output_dir, "arxiv_papers.jsonl")
+            
+            try:
+                collect_arxiv_papers(
+                    output_dir=output_dir,
+                    max_papers=max_papers,
+                    cache_file=cache_file,
+                    rate_limit_delay=1.0 / rate_limit
+                )
+                
+                # Validate collection
+                if os.path.exists(cache_file):
+                    count = sum(1 for line in open(cache_file) if line.strip())
+                    if count == 0:
+                        print("⚠️  Warning: 0 papers collected")
+                        print("   This might be due to:")
+                        print("   - ArXiv API rate limiting")
+                        print("   - Network issues")
+                        print("   - Query syntax problems")
+                        print("   - All papers filtered out")
+                        stage_results[stage_name] = {'success': False, 'papers': 0}
+                    else:
+                        stage_results[stage_name] = {'success': True, 'papers': count}
+                        print(f"✅ Collected {count} papers")
+                else:
+                    stage_results[stage_name] = {'success': False, 'papers': 0}
+                    
+            except Exception as e:
+                print(f"❌ Stage 1 failed: {e}")
+                import traceback
+                print(traceback.format_exc())
+                stage_results[stage_name] = {'success': False, 'error': str(e)}
+                if not resume:
+                    raise
+            
+            stage_elapsed = time.time() - stage_start
+            print(f"⏱️  Stage 1 completed in {stage_elapsed:.1f}s")
+        else:
+            print(f"\n⏭️  Skipping stage: {stages['collect']}")
+            stage_results['collect'] = {'success': True, 'skipped': True}
+        
+        # Stage 2: Extract PDFs
+        if 'extract' not in skip_stages:
+            stage_name = 'extract'
+            print("\n" + "=" * 80)
+            print(f"📦 Stage 2: {stages[stage_name]}")
+            print("=" * 80)
+            
+            stage_start = time.time()
+            extraction_config = config.get('extraction', {})
+            text_dir = os.path.join(output_dir, "texts")
+            cache_file = os.path.join(output_dir, "arxiv_papers.jsonl")
+            
+            if not os.path.exists(cache_file):
+                print(f"⚠️  Metadata file not found: {cache_file}")
+                print("   Skipping extraction stage")
+                stage_results[stage_name] = {'success': False, 'error': 'No metadata file'}
+            else:
+                try:
+                    extract_pdf_texts(
+                        input_jsonl=cache_file,
+                        output_dir=text_dir,
+                        num_workers=extraction_config.get('workers', 2),
+                        rate_limit_delay=extraction_config.get('rate_limit', 0.4)
+                    )
+                    
+                    # Count extracted files
+                    text_files = [f for f in os.listdir(text_dir) if f.endswith('.txt')] if os.path.exists(text_dir) else []
+                    stage_results[stage_name] = {'success': True, 'files': len(text_files)}
+                    print(f"✅ Extracted {len(text_files)} text files")
+                    
+                except Exception as e:
+                    print(f"❌ Stage 2 failed: {e}")
+                    import traceback
+                    print(traceback.format_exc())
+                    stage_results[stage_name] = {'success': False, 'error': str(e)}
+                    if not resume:
+                        raise
+            
+            stage_elapsed = time.time() - stage_start
+            print(f"⏱️  Stage 2 completed in {stage_elapsed:.1f}s")
+        else:
+            print(f"\n⏭️  Skipping stage: {stages['extract']}")
+            stage_results['extract'] = {'success': True, 'skipped': True}
+        
+        # Stage 3: NeMo Curator curation (optional)
+        if 'curate' not in skip_stages:
+            curation_config = config.get('curation', {})
+            use_nemo = curation_config.get('use_nemo_curator', True) and NEMO_CURATOR_AVAILABLE
+            
+            if use_nemo:
+                stage_name = 'curate'
+                print("\n" + "=" * 80)
+                print(f"📦 Stage 3: {stages[stage_name]}")
+                print("=" * 80)
+                
+                stage_start = time.time()
+                text_dir = os.path.join(output_dir, "texts")
+                cache_file = os.path.join(output_dir, "arxiv_papers.jsonl")
+                curated_file = os.path.join(output_dir, "curated_dataset.jsonl")
+                
+                if not os.path.exists(text_dir) or not os.listdir(text_dir):
+                    print(f"⚠️  Text directory empty or missing: {text_dir}")
+                    print("   Skipping curation stage")
+                    stage_results[stage_name] = {'success': False, 'error': 'No text files'}
+                else:
+                    try:
+                        curate_with_nemo(
+                            text_dir=text_dir,
+                            metadata_jsonl=cache_file,
+                            output_jsonl=curated_file,
+                            use_gpu=curation_config.get('use_gpu', False),
+                            skip_dedup=curation_config.get('skip_deduplication', False),
+                            min_relevance_score=curation_config.get('min_relevance_score', 0.5)
+                        )
+                        
+                        if os.path.exists(curated_file):
+                            count = sum(1 for _ in open(curated_file))
+                            stage_results[stage_name] = {'success': True, 'papers': count}
+                            print(f"✅ Curated {count} papers")
+                        else:
+                            stage_results[stage_name] = {'success': False, 'error': 'Output file not created'}
+                            
+                    except Exception as e:
+                        print(f"❌ Stage 3 failed: {e}")
+                        import traceback
+                        print(traceback.format_exc())
+                        stage_results[stage_name] = {'success': False, 'error': str(e)}
+                        if not resume:
+                            raise
+                
+                stage_elapsed = time.time() - stage_start
+                print(f"⏱️  Stage 3 completed in {stage_elapsed:.1f}s")
+            else:
+                print(f"\n⏭️  Skipping NeMo Curator curation (not available or disabled)")
+                stage_results['curate'] = {'success': True, 'skipped': True}
+        else:
+            print(f"\n⏭️  Skipping stage: {stages['curate']}")
+            stage_results['curate'] = {'success': True, 'skipped': True}
+        
+        # Stage 4: Preprocess and classify
+        if 'preprocess' not in skip_stages:
+            stage_name = 'preprocess'
+            print("\n" + "=" * 80)
+            print(f"📦 Stage 4: {stages[stage_name]}")
+            print("=" * 80)
+            
+            stage_start = time.time()
+            preprocessing_config = config.get('preprocessing', {})
+            
+            # Determine input file (curated if available, otherwise raw)
+            curated_file = os.path.join(output_dir, "curated_dataset.jsonl")
+            cache_file = os.path.join(output_dir, "arxiv_papers.jsonl")
+            text_dir = os.path.join(output_dir, "texts")
+            processed_file = os.path.join(output_dir, "processed_dataset.jsonl")
+            
+            if os.path.exists(curated_file):
+                input_file = curated_file
+                print(f"   Using curated dataset: {curated_file}")
+            elif os.path.exists(cache_file):
+                input_file = cache_file
+                print(f"   Using raw metadata: {cache_file}")
+            else:
+                print(f"⚠️  No input file found")
+                stage_results[stage_name] = {'success': False, 'error': 'No input file'}
+                input_file = None
+            
+            if input_file:
+                try:
+                    if os.path.exists(curated_file):
+                        # Process curated dataset
+                        process_curated_dataset(
+                            input_jsonl=curated_file,
+                            output_jsonl=processed_file,
+                            num_workers=preprocessing_config.get('workers', 4)
+                        )
+                    else:
+                        # Preprocess from text files
+                        preprocess_and_classify(
+                            metadata_jsonl=cache_file,
+                            text_dir=text_dir,
+                            output_jsonl=processed_file,
+                            num_workers=preprocessing_config.get('workers', 4)
+                        )
+                    
+                    if os.path.exists(processed_file):
+                        count = sum(1 for _ in open(processed_file))
+                        stage_results[stage_name] = {'success': True, 'papers': count}
+                        print(f"✅ Processed {count} papers")
+                    else:
+                        stage_results[stage_name] = {'success': False, 'error': 'Output file not created'}
+                        
+                except Exception as e:
+                    print(f"❌ Stage 4 failed: {e}")
+                    import traceback
+                    print(traceback.format_exc())
+                    stage_results[stage_name] = {'success': False, 'error': str(e)}
+                    if not resume:
+                        raise
+            
+            stage_elapsed = time.time() - stage_start
+            print(f"⏱️  Stage 4 completed in {stage_elapsed:.1f}s")
+        else:
+            print(f"\n⏭️  Skipping stage: {stages['preprocess']}")
+            stage_results['preprocess'] = {'success': True, 'skipped': True}
+        
+        # Stage 5: Train tokenizer
+        if 'tokenize' not in skip_stages:
+            stage_name = 'tokenize'
+            print("\n" + "=" * 80)
+            print(f"📦 Stage 5: {stages[stage_name]}")
+            print("=" * 80)
+            
+            stage_start = time.time()
+            tokenizer_config = config.get('tokenizer', {})
+            processed_file = os.path.join(output_dir, "processed_dataset.jsonl")
+            
+            if not os.path.exists(processed_file):
+                print(f"⚠️  Processed dataset not found: {processed_file}")
+                stage_results[stage_name] = {'success': False, 'error': 'No processed dataset'}
+            else:
+                try:
+                    train_healthcare_tokenizer(
+                        input_jsonl=processed_file,
+                        output_dir=output_dir,
+                        vocab_size=tokenizer_config.get('vocab_size', 50000),
+                        model_prefix=tokenizer_config.get('model_prefix', 'healthcare_tokenizer')
+                    )
+                    
+                    model_file = os.path.join(output_dir, f"{tokenizer_config.get('model_prefix', 'healthcare_tokenizer')}.model")
+                    if os.path.exists(model_file):
+                        stage_results[stage_name] = {'success': True}
+                        print(f"✅ Tokenizer trained: {model_file}")
+                    else:
+                        stage_results[stage_name] = {'success': False, 'error': 'Model file not created'}
+                        
+                except Exception as e:
+                    print(f"❌ Stage 5 failed: {e}")
+                    import traceback
+                    print(traceback.format_exc())
+                    stage_results[stage_name] = {'success': False, 'error': str(e)}
+                    if not resume:
+                        raise
+            
+            stage_elapsed = time.time() - stage_start
+            print(f"⏱️  Stage 5 completed in {stage_elapsed:.1f}s")
+        else:
+            print(f"\n⏭️  Skipping stage: {stages['tokenize']}")
+            stage_results['tokenize'] = {'success': True, 'skipped': True}
+        
+        # Generate final report
+        total_elapsed = time.time() - start_time
+        generate_final_report(stage_results, output_dir, total_elapsed)
+        
+        print("\n" + "=" * 80)
+        print("✅ Pipeline Complete!")
+        print("=" * 80)
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ Pipeline failed: {e}")
+        import traceback
+        print(traceback.format_exc())
+        generate_final_report(stage_results, output_dir, time.time() - start_time, error=str(e))
+        return False
+
+
+def generate_final_report(stage_results: Dict, output_dir: str, total_elapsed: float, error: str = None):
+    """Generate comprehensive validation report.
+    
+    Args:
+        stage_results: Dictionary with results from each stage
+        output_dir: Output directory
+        total_elapsed: Total time elapsed
+        error: Error message if pipeline failed
+    """
+    report = {
+        'timestamp': datetime.now().isoformat(),
+        'total_elapsed_seconds': total_elapsed,
+        'total_elapsed_hours': total_elapsed / 3600,
+        'stages': stage_results,
+        'error': error
+    }
+    
+    # Collect statistics
+    stats = {
+        'papers_collected': 0,
+        'papers_extracted': 0,
+        'papers_curated': 0,
+        'papers_processed': 0,
+        'domain_distribution': defaultdict(int),
+        'year_distribution': defaultdict(int),
+        'file_sizes': {}
+    }
+    
+    # Count papers from each stage
+    if 'collect' in stage_results and stage_results['collect'].get('success'):
+        stats['papers_collected'] = stage_results['collect'].get('papers', 0)
+    
+    if 'extract' in stage_results and stage_results['extract'].get('success'):
+        stats['papers_extracted'] = stage_results['extract'].get('files', 0)
+    
+    if 'curate' in stage_results and stage_results['curate'].get('success'):
+        stats['papers_curated'] = stage_results['curate'].get('papers', 0)
+    
+    if 'preprocess' in stage_results and stage_results['preprocess'].get('success'):
+        stats['papers_processed'] = stage_results['preprocess'].get('papers', 0)
+        
+        # Try to load domain/year distribution from processed file
+        processed_file = os.path.join(output_dir, "processed_dataset.jsonl")
+        if os.path.exists(processed_file):
+            try:
+                with open(processed_file, 'r') as f:
+                    for line in f:
+                        if line.strip():
+                            doc = json.loads(line)
+                            domains = doc.get('domains', [])
+                            for domain in domains:
+                                stats['domain_distribution'][domain] += 1
+                            year = doc.get('year')
+                            if year:
+                                stats['year_distribution'][year] += 1
+            except:
+                pass
+    
+    # Get file sizes
+    files_to_check = [
+        ('metadata', os.path.join(output_dir, "arxiv_papers.jsonl")),
+        ('curated', os.path.join(output_dir, "curated_dataset.jsonl")),
+        ('processed', os.path.join(output_dir, "processed_dataset.jsonl")),
+        ('tokenizer_model', os.path.join(output_dir, "healthcare_tokenizer.model")),
+        ('tokenizer_vocab', os.path.join(output_dir, "healthcare_tokenizer.vocab"))
+    ]
+    
+    for name, path in files_to_check:
+        if os.path.exists(path):
+            size_mb = os.path.getsize(path) / (1024**2)
+            stats['file_sizes'][name] = size_mb
+    
+    report['statistics'] = stats
+    
+    # Save report
+    report_file = os.path.join(output_dir, 'pipeline_report.json')
+    report_text_file = os.path.join(output_dir, 'pipeline_report.txt')
+    
+    try:
+        with open(report_file, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        # Human-readable report
+        with open(report_text_file, 'w') as f:
+            f.write("=" * 80 + "\n")
+            f.write("Healthcare MoE Data Pipeline - Final Report\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Timestamp: {report['timestamp']}\n")
+            f.write(f"Total Time: {report['total_elapsed_hours']:.2f} hours ({report['total_elapsed_seconds']:.1f} seconds)\n\n")
+            
+            f.write("Stage Results:\n")
+            f.write("-" * 80 + "\n")
+            for stage, result in stage_results.items():
+                status = "✅ Success" if result.get('success') else "❌ Failed"
+                f.write(f"{stage}: {status}\n")
+                if 'papers' in result:
+                    f.write(f"  Papers: {result['papers']}\n")
+                if 'files' in result:
+                    f.write(f"  Files: {result['files']}\n")
+                if 'error' in result:
+                    f.write(f"  Error: {result['error']}\n")
+                f.write("\n")
+            
+            f.write("Statistics:\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Papers Collected: {stats['papers_collected']}\n")
+            f.write(f"Papers Extracted: {stats['papers_extracted']}\n")
+            f.write(f"Papers Curated: {stats['papers_curated']}\n")
+            f.write(f"Papers Processed: {stats['papers_processed']}\n\n")
+            
+            if stats['domain_distribution']:
+                f.write("Domain Distribution:\n")
+                for domain, count in sorted(stats['domain_distribution'].items(), key=lambda x: x[1], reverse=True):
+                    f.write(f"  {domain}: {count}\n")
+                f.write("\n")
+            
+            if stats['year_distribution']:
+                f.write("Year Distribution:\n")
+                for year in sorted(stats['year_distribution'].keys()):
+                    f.write(f"  {year}: {stats['year_distribution'][year]}\n")
+                f.write("\n")
+            
+            if stats['file_sizes']:
+                f.write("File Sizes:\n")
+                for name, size_mb in stats['file_sizes'].items():
+                    f.write(f"  {name}: {size_mb:.2f} MB\n")
+        
+        print(f"\n📊 Final report saved:")
+        print(f"   JSON: {report_file}")
+        print(f"   Text: {report_text_file}")
+        
+    except Exception as e:
+        print(f"⚠️  Could not save report: {e}")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -3907,9 +4724,20 @@ Examples:
         help=f'Vocabulary size (default: {TOKENIZER_VOCAB_SIZE})'
     )
     
+    # Pipeline command (full orchestration)
+    pipeline_parser = subparsers.add_parser('pipeline', help='Run full end-to-end pipeline')
+    pipeline_parser.add_argument(
+        '--config',
+        type=str,
+        default='config.yaml',
+        help='Path to config.yaml file (default: config.yaml)'
+    )
+    
     args = parser.parse_args()
     
-    if args.command == 'collect':
+    if args.command == 'pipeline':
+        run_full_pipeline(config_path=args.config)
+    elif args.command == 'collect':
         rate_limit_delay = 1.0 / args.rate_limit
         collect_arxiv_papers(
             output_dir=args.output_dir,

@@ -208,8 +208,19 @@ class PipelineOrchestrator:
                 raise FileNotFoundError(f"Metadata file not created: {self.metadata_jsonl}")
             
             # Count collected papers
-            count = sum(1 for _ in open(self.metadata_jsonl))
-            logger.info(f"📊 Collected {count} papers")
+            if self.metadata_jsonl.exists():
+                count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
+                logger.info(f"📊 Collected {count} papers")
+                
+                if count == 0:
+                    logger.warning("⚠️  Warning: 0 papers collected. This might indicate:")
+                    logger.warning("   1. ArXiv API issues or rate limiting")
+                    logger.warning("   2. Network connectivity problems")
+                    logger.warning("   3. Query parameters too restrictive")
+                    logger.warning("   4. Empty file created but collection didn't run")
+                    logger.warning("   Check the collection logs above for details")
+            else:
+                logger.warning("⚠️  Warning: Metadata file does not exist")
             
             self._log_step_end(step_name, True)
             return True

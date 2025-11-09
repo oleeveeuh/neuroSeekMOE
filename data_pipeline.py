@@ -249,18 +249,34 @@ def search_arxiv_query(
         
         # Stream results (yield immediately, don't accumulate)
         count = 0
-        for result in client.results(search):
+        skipped_no_abstract = 0
+        skipped_date_range = 0
+        skipped_duplicate = 0
+        
+        print(f"   🔄 Fetching results from ArXiv API...")
+        results_iter = client.results(search)
+        
+        result_idx = -1
+        for result_idx, result in enumerate(results_iter):
             # Rate limiting (client handles this, but we add extra safety)
             time.sleep(rate_limit_delay)
             
             # Check if already in cache
             paper_id = result.entry_id.split('/')[-1]
             if paper_id in existing_ids:
+                skipped_duplicate += 1
                 continue
             
             # Convert to dict
             paper_dict = paper_to_dict(result)
             if paper_dict is None:
+                # Check why it was skipped
+                if not result.summary or not result.summary.strip():
+                    skipped_no_abstract += 1
+                else:
+                    year = extract_year_from_date(result.published)
+                    if year is not None and (year < MIN_YEAR or year > MAX_YEAR):
+                        skipped_date_range += 1
                 continue
             
             papers.append(paper_dict)
@@ -269,11 +285,33 @@ def search_arxiv_query(
             # Log progress every 500 papers
             if count % LOG_INTERVAL == 0:
                 print(f"   ✅ Collected {count} new papers from this query...")
+            
+            # Safety limit: don't process more than max_results
+            if count >= max_results:
+                break
         
         print(f"   ✅ Query complete: {count} new papers collected")
+        if skipped_duplicate > 0:
+            print(f"   ⏭️  Skipped {skipped_duplicate} duplicates")
+        if skipped_no_abstract > 0:
+            print(f"   ⏭️  Skipped {skipped_no_abstract} papers without abstracts")
+        if skipped_date_range > 0:
+            print(f"   ⏭️  Skipped {skipped_date_range} papers outside date range ({MIN_YEAR}-{MAX_YEAR})")
+        
+        if count == 0:
+            if result_idx == -1:
+                print(f"   ⚠️  Warning: No results found for query. This might indicate:")
+                print(f"      - Query syntax issue")
+                print(f"      - No papers match the criteria")
+                print(f"      - ArXiv API issue")
+            else:
+                print(f"   ⚠️  Warning: Processed {result_idx + 1} results but none matched criteria")
+                print(f"      - All papers may have been filtered out (no abstract, wrong date range, duplicates)")
         
     except Exception as e:
-        print(f"   ⚠️  Error in query '{query}': {e}")
+        print(f"   ❌ Error in query '{query}': {e}")
+        import traceback
+        print(f"   Traceback: {traceback.format_exc()}")
         print(f"   Continuing with {len(papers)} papers collected so far...")
     
     return papers
@@ -309,9 +347,9 @@ def collect_arxiv_papers(
         rate_limit_delay: Delay between API requests (seconds)
     """
     if not ARXIV_AVAILABLE:
-        print("❌ Error: arxiv package not available.")
-        print("   Install with: pip install arxiv")
-        return
+        error_msg = "❌ Error: arxiv package not available. Install with: pip install arxiv"
+        print(error_msg)
+        raise ImportError(error_msg)
     
     # Setup paths
     os.makedirs(output_dir, exist_ok=True)
@@ -361,12 +399,20 @@ def collect_arxiv_papers(
             query_max = min(remaining * 2, 15000)  # Fetch extra to account for deduplication
             
             # Search this query
+            print(f"\n🔍 Processing query {query_idx}/{len(ARXIV_QUERIES)}: {query}")
             query_papers = search_arxiv_query(
                 query=query,
                 max_results=query_max,
                 existing_ids=existing_ids,
                 rate_limit_delay=rate_limit_delay
             )
+            
+            if not query_papers:
+                print(f"   ⚠️  No papers returned from query. Skipping...")
+                papers_by_query[query] = 0
+                continue
+            
+            print(f"   📊 Received {len(query_papers)} papers from query")
             
             # Stream papers to disk immediately (deduplicate and write)
             seen_in_query = set()

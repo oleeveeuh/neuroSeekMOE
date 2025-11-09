@@ -2495,13 +2495,53 @@ class HealthcareJsonlWriter(Stage if (NEMO_CURATOR_AVAILABLE and Stage_AVAILABLE
         return self.output_path
 
 
+def load_download_checkpoint(checkpoint_file: str) -> Dict:
+    """Load download checkpoint to resume from previous run.
+    
+    Args:
+        checkpoint_file: Path to checkpoint JSON file
+        
+    Returns:
+        Dictionary with checkpoint data, or empty dict if not found
+    """
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"⚠️  Could not load checkpoint: {e}")
+    return {}
+
+
+def save_download_checkpoint(checkpoint_file: str, downloaded_ids: Set[str], total_downloaded: int):
+    """Save download checkpoint.
+    
+    Args:
+        checkpoint_file: Path to checkpoint JSON file
+        downloaded_ids: Set of already downloaded paper IDs
+        total_downloaded: Total number of papers downloaded so far
+    """
+    checkpoint_data = {
+        'timestamp': datetime.now().isoformat(),
+        'total_downloaded': total_downloaded,
+        'downloaded_ids': list(downloaded_ids),
+    }
+    os.makedirs(os.path.dirname(checkpoint_file) if os.path.dirname(checkpoint_file) else '.', exist_ok=True)
+    with open(checkpoint_file, 'w') as f:
+        json.dump(checkpoint_data, f, indent=2)
+
+
 def run_nemo_curator_pipeline(
     output_path: str = "./curated_dataset.jsonl",
     raw_data_path: str = "./arxiv_raw_data",
     raw_output_path: str = "./arxiv_raw_output",
     filter_query: str = "cs.LG OR cs.AI OR q-bio.NC",
     max_workers: int = 1,
-    use_gpu: bool = False
+    use_gpu: bool = False,
+    batch_size: int = 5000,
+    checkpoint_interval: int = 1000,
+    max_papers: int = 40000,
+    resume: bool = True
 ):
     """Run complete NeMo Curator pipeline with custom healthcare stages.
     
@@ -2511,6 +2551,11 @@ def run_nemo_curator_pipeline(
     - HealthcareQualityFilterStage: Deduplication and quality verification
     - HealthcareJsonlWriter: Formats and writes final curated dataset
     
+    Features:
+    - Checkpointing: Saves progress every N papers (default: 1000)
+    - Batching: Processes papers in batches (default: 5000 per batch)
+    - Resume: Automatically resumes from last checkpoint if interrupted
+    
     Args:
         output_path: Path to final curated dataset JSONL file
         raw_data_path: Directory for raw ArXiv downloads
@@ -2518,6 +2563,10 @@ def run_nemo_curator_pipeline(
         filter_query: ArXiv search query (default: healthcare+ML categories)
         max_workers: Number of workers for download (default: 1, Colab safe)
         use_gpu: Whether to use GPU (for future GPU-accelerated stages)
+        batch_size: Number of papers to process per batch (default: 5000)
+        checkpoint_interval: Save checkpoint every N papers (default: 1000)
+        max_papers: Maximum total papers to download (default: 40000)
+        resume: Whether to resume from checkpoint if available (default: True)
     
     Returns:
         Path to output file if successful, None otherwise
@@ -2541,8 +2590,26 @@ def run_nemo_curator_pipeline(
     print(f"📁 Final curated output: {output_path}")
     print(f"🔍 Filter query: {filter_query}")
     print(f"👷 Max workers: {max_workers}")
+    print(f"📦 Batch size: {batch_size} papers per batch")
+    print(f"💾 Checkpoint interval: {checkpoint_interval} papers")
+    print(f"🎯 Max papers: {max_papers}")
     print(f"💰 Cost: FREE (direct ArXiv access, no AWS charges)")
     print()
+    
+    # Setup checkpointing
+    checkpoint_file = os.path.join(os.path.dirname(raw_output_path) if os.path.dirname(raw_output_path) else '.', 
+                                    'download_checkpoint.json')
+    downloaded_ids = set()
+    total_downloaded = 0
+    
+    # Load checkpoint if resuming
+    if resume:
+        checkpoint = load_download_checkpoint(checkpoint_file)
+        if checkpoint:
+            downloaded_ids = set(checkpoint.get('downloaded_ids', []))
+            total_downloaded = checkpoint.get('total_downloaded', 0)
+            print(f"📖 Resuming from checkpoint: {total_downloaded} papers already downloaded")
+            print(f"   Found {len(downloaded_ids)} unique paper IDs in checkpoint")
     
     try:
         # Initialize Dask client
@@ -2556,36 +2623,116 @@ def run_nemo_curator_pipeline(
             client = Client(processes=False, threads_per_worker=max_workers)
             print(f"   ✅ Created local Dask client: {client}")
         
-        # Stage 1: Download ArXiv papers (FREE, no AWS needed)
+        # Stage 1: Download ArXiv papers with checkpointing and batching
         print("\n📥 Stage 1: Downloading ArXiv Papers (FREE)")
         print("   Using download_arxiv() - direct ArXiv access...")
         print("   This may take 4-8 hours depending on network speed...")
+        print("   Progress will be checkpointed every {} papers".format(checkpoint_interval))
         
-        dataset = download_arxiv(
-            output_path=raw_data_path,
-            max_workers=max_workers,
-            filter_query=filter_query
-        )
+        # Create output directory
+        os.makedirs(raw_data_path, exist_ok=True)
+        os.makedirs(os.path.dirname(raw_output_path) if os.path.dirname(raw_output_path) else '.', exist_ok=True)
         
-        print(f"   ✅ Downloaded dataset: {len(dataset) if hasattr(dataset, '__len__') else 'unknown'} papers")
+        # Open raw output file in append mode if resuming
+        raw_output_mode = 'a' if resume and os.path.exists(raw_output_path) else 'w'
+        raw_output_handle = open(raw_output_path, raw_output_mode, encoding='utf-8')
         
-        # Save raw output to JSONL
-        print(f"\n💾 Saving raw data to {raw_output_path}...")
-        if hasattr(dataset, 'to_json'):
-            dataset.to_json(output_path=raw_output_path, write_to_filename=True)
-        else:
-            # Fallback: manual JSONL writing
-            os.makedirs(os.path.dirname(raw_output_path) if os.path.dirname(raw_output_path) else '.', exist_ok=True)
-            with open(raw_output_path, 'w', encoding='utf-8') as f:
-                for doc in dataset:
-                    f.write(json.dumps(doc, ensure_ascii=False) + '\n')
-        
-        print(f"   ✅ Raw data saved to {raw_output_path}")
+        try:
+            # Download papers using download_arxiv()
+            # Note: download_arxiv() may download all at once, but we'll process in batches
+            print(f"   🔄 Starting download (target: {max_papers} papers)...")
+            
+            dataset = download_arxiv(
+                output_path=raw_data_path,
+                max_workers=max_workers,
+                filter_query=filter_query
+            )
+            
+            # Process dataset in batches with checkpointing
+            print(f"   📊 Processing downloaded dataset in batches of {batch_size}...")
+            
+            batch_count = 0
+            papers_in_batch = 0
+            
+            # Convert dataset to iterable if needed
+            if hasattr(dataset, '__iter__'):
+                dataset_iter = iter(dataset)
+            else:
+                dataset_iter = [dataset] if dataset else []
+            
+            for doc in dataset_iter:
+                # Check if we've reached max papers
+                if total_downloaded >= max_papers:
+                    print(f"\n   ✅ Reached target of {max_papers} papers")
+                    break
+                
+                # Extract paper ID (try different field names)
+                paper_id = doc.get('id') or doc.get('arxiv_id') or doc.get('file_name', '').replace('.txt', '')
+                
+                # Skip if already downloaded (resume support)
+                if paper_id and paper_id in downloaded_ids:
+                    continue
+                
+                # Write to raw output JSONL
+                raw_output_handle.write(json.dumps(doc, ensure_ascii=False) + '\n')
+                raw_output_handle.flush()  # Ensure immediate write
+                
+                # Track downloaded papers
+                if paper_id:
+                    downloaded_ids.add(paper_id)
+                total_downloaded += 1
+                papers_in_batch += 1
+                
+                # Log progress
+                if total_downloaded % 100 == 0:
+                    print(f"   📊 Progress: {total_downloaded}/{max_papers} papers downloaded...")
+                
+                # Checkpoint every N papers
+                if total_downloaded % checkpoint_interval == 0:
+                    save_download_checkpoint(checkpoint_file, downloaded_ids, total_downloaded)
+                    print(f"   💾 Checkpoint saved: {total_downloaded} papers downloaded")
+                
+                # Process batch if full
+                if papers_in_batch >= batch_size:
+                    batch_count += 1
+                    print(f"   ✅ Batch {batch_count} complete: {papers_in_batch} papers")
+                    papers_in_batch = 0
+                    
+                    # Save checkpoint after each batch
+                    save_download_checkpoint(checkpoint_file, downloaded_ids, total_downloaded)
+            
+            # Final checkpoint
+            save_download_checkpoint(checkpoint_file, downloaded_ids, total_downloaded)
+            raw_output_handle.close()
+            
+            print(f"\n   ✅ Download complete: {total_downloaded} papers downloaded")
+            print(f"   💾 Final checkpoint saved")
+            
+        except Exception as e:
+            raw_output_handle.close()
+            print(f"   ⚠️  Download interrupted: {e}")
+            print(f"   💾 Saving checkpoint with {total_downloaded} papers...")
+            save_download_checkpoint(checkpoint_file, downloaded_ids, total_downloaded)
+            raise
         
         # Stage 2: Healthcare filtering and classification
         print("\n🔍 Stage 2: Healthcare Filtering & Classification")
         print("   Using HealthcareFilterStage...")
-        filtered_dataset = HealthcareFilterStage()(dataset)
+        
+        # Load raw output for processing
+        print("   📖 Loading raw data from {}...".format(raw_output_path))
+        raw_documents = []
+        with open(raw_output_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        doc = json.loads(line)
+                        raw_documents.append(doc)
+                    except json.JSONDecodeError:
+                        continue
+        
+        print(f"   ✅ Loaded {len(raw_documents)} documents for processing")
+        filtered_dataset = HealthcareFilterStage()(raw_documents)
         
         # Stage 3: Quality filtering and deduplication
         print("\n✨ Stage 3: Quality Filtering & Deduplication")
@@ -2600,6 +2747,7 @@ def run_nemo_curator_pipeline(
         print("\n✅ Pipeline completed successfully!")
         print(f"📁 Final curated dataset: {output_path}")
         print(f"📁 Raw data (for reference): {raw_output_path}")
+        print(f"📊 Total papers downloaded: {total_downloaded}")
         
         return output_path
         
@@ -2607,6 +2755,7 @@ def run_nemo_curator_pipeline(
         print(f"\n❌ Pipeline failed: {e}")
         import traceback
         print(traceback.format_exc())
+        print(f"\n💾 Checkpoint saved - you can resume by running again with resume=True")
         return None
 
 

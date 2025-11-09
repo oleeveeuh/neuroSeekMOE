@@ -386,6 +386,10 @@ class PipelineOrchestrator:
                 filter_query = nemo_config.get('filter_query', "cs.LG OR cs.AI OR q-bio.NC")
                 max_workers = nemo_config.get('max_workers', 1)  # Colab safe
                 use_gpu = nemo_config.get('use_gpu', False)
+                max_papers = nemo_config.get('max_papers', 40000)
+                batch_size = nemo_config.get('batch_size', 5000)
+                checkpoint_interval = nemo_config.get('checkpoint_interval', 1000)
+                resume = nemo_config.get('resume', True)
                 
                 result = run_nemo_curator_pipeline(
                     output_path=str(self.curated_jsonl),
@@ -393,7 +397,11 @@ class PipelineOrchestrator:
                     raw_output_path=raw_output_path,
                     filter_query=filter_query,
                     max_workers=max_workers,
-                    use_gpu=use_gpu
+                    use_gpu=use_gpu,
+                    batch_size=batch_size,
+                    checkpoint_interval=checkpoint_interval,
+                    max_papers=max_papers,
+                    resume=resume
                 )
                 
                 if result is None:

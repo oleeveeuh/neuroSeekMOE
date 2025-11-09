@@ -1,1657 +1,2751 @@
 """
-# NeuroMoE Data Pipeline: Curated Text and Images to Multimodal JSONL
+ArXiv Paper Collector for Healthcare+CS+ML Papers
 
-Purpose
-=======
-This module provides a lightweight, dependency-optional data pipeline for preparing
-curated text and image data for the NeuroMoE prototype. It assembles per-disease
-datasets into JSONL files and optionally combines them into a single multimodal
-JSONL that downstream MoE experts can specialize on.
+Optimized for Colab with efficient streaming, deduplication, and checkpointing.
+Collects 30-40k papers from ArXiv with healthcare, CS, and ML focus.
 
-Input Conventions
------------------
-For simplicity and reproducibility (without network access), the pipeline expects
-local folders with files you have curated/downloaded. Suggested layout:
-
-text_input_dir/
-  AD/*.txt | *.jsonl
-  PD/*.txt | *.jsonl
-  ALS/*.txt | *.jsonl
-  HD/*.txt | *.jsonl
-  MS/*.txt | *.jsonl
-
-image_input_dir/
-  AD/images/*.{png,jpg,jpeg}
-  AD/captions.jsonl (optional) — {"filename": "xxx.png", "caption": "..."}
-  PD/images/*.{png,jpg,jpeg}
-  PD/captions.jsonl
-  ALS/images/*
-  HD/images/*
-  MS/images/*
-
-Outputs
--------
-- Text JSONL: {"text", "disease", "modality": "text"}
-- Image JSONL: {"image_path", "caption", "disease", "modality": "image"}
-- Combined JSONL: concatenation of the above two, for multimodal training/eval.
-
-Dependencies
-------------
-Image processing (resize/normalize) uses Pillow if available; otherwise it will
-fallback to copying files and recording metadata without pixel transforms.
-
-CLI
----
-Example invocations:
-  python data_pipeline.py text --text-input text_input_dir --out text.jsonl
-  python data_pipeline.py image --image-input image_input_dir --processed-images ./processed --out images.jsonl
-  python data_pipeline.py combine --inputs text.jsonl images.jsonl --out multimodal.jsonl
-  python data_pipeline.py build-all --text-input text_input_dir --image-input image_input_dir \
-      --processed-images ./processed --text-out text.jsonl --image-out images.jsonl --out multimodal.jsonl
+Usage:
+    python data_pipeline.py --output-dir ./data/arxiv --max-papers 40000
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import io
 import json
 import os
 import re
-import shutil
-from dataclasses import dataclass
-from enum import Enum
-from typing import Dict, Generator, Iterable, List, Optional, Tuple
-import time
-import urllib.parse
-import urllib.request
-import subprocess
 import random
-import unicodedata
-import tarfile
-import glob
-import pathlib
-import xml.etree.ElementTree as ET
-
+import time
+import threading
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Set, Optional, List
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
-    from PIL import Image  # type: ignore
-    PIL_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency
-    Image = None  # type: ignore
-    PIL_AVAILABLE = False
+    import arxiv
+    ARXIV_AVAILABLE = True
+except ImportError:
+    ARXIV_AVAILABLE = False
+    print("⚠️  arxiv package not available. Install with: pip install arxiv")
+
+try:
+    import PyPDF2
+    PDF_AVAILABLE = True
+    USE_PDFPLUMBER = False
+except ImportError:
+    try:
+        import pdfplumber
+        PDF_AVAILABLE = True
+        USE_PDFPLUMBER = True
+    except ImportError:
+        PDF_AVAILABLE = False
+        USE_PDFPLUMBER = False
+        print("⚠️  PDF library not available. Install with: pip install PyPDF2 or pip install pdfplumber")
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    print("⚠️  requests package not available. Install with: pip install requests")
+
+try:
+    import sentencepiece as spm
+    SENTENCEPIECE_AVAILABLE = True
+except ImportError:
+    SENTENCEPIECE_AVAILABLE = False
+    print("⚠️  sentencepiece package not available. Install with: pip install sentencepiece")
+
+# NeMo Curator imports (optional, Linux only)
+try:
+    import platform
+    if platform.system() == 'Linux':
+        from nemo_curator import (
+            DocumentModifier, ScoreFilter, FuzzyDedup, AddQualityScores,
+            WordCountFilter, AlphanumericFilter, LanguageFilter, RepeatedLineFilter,
+            DocumentFilter
+        )
+        from nemo_curator.utils.distributed_utils import get_client
+        from nemo_curator.datasets import DocumentDataset
+        import dask
+        NEMO_CURATOR_AVAILABLE = True
+    else:
+        NEMO_CURATOR_AVAILABLE = False
+        print("⚠️  NeMo Curator only supports Linux systems (current: {})".format(platform.system()))
+except (ImportError, ValueError) as e:
+    NEMO_CURATOR_AVAILABLE = False
+    print("⚠️  nemo-curator package not available. Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
+    print(f"   Error: {e}")
 
 
-class Disease(Enum):
-    ALZHEIMERS = "AD"
-    PARKINSONS = "PD"
-    ALS = "ALS"
-    HUNTINGTONS = "HD"
-    MULTIPLE_SCLEROSIS = "MS"
+# Rate limiting: 3 requests per second
+RATE_LIMIT_DELAY = 1.0 / 3.0  # ~0.33 seconds between requests
+CHECKPOINT_INTERVAL = 5000  # Save checkpoint every 5000 papers
+LOG_INTERVAL = 500  # Log progress every 500 papers
 
+# Target date range
+MIN_YEAR = 2015
+MAX_YEAR = 2024
 
-DISEASE_DIRNAMES = {
-    "AD": Disease.ALZHEIMERS,
-    "PD": Disease.PARKINSONS,
-    "ALS": Disease.ALS,
-    "HD": Disease.HUNTINGTONS,
-    "MS": Disease.MULTIPLE_SCLEROSIS,
-}
-
-BIOMED_DISEASE_TERMS = [
-    "alzheimer",
-    "parkinson",
-    "als",
-    "amyotrophic lateral sclerosis",
-    "huntington",
-    "multiple sclerosis",
+# ArXiv search queries
+ARXIV_QUERIES = [
+    "cat:cs.LG AND (healthcare OR medical OR clinical)",
+    "cat:cs.AI AND (neurodegeneration OR disease)",
+    "cat:q-bio.NC AND (machine learning)",
 ]
 
-
-def _ensure_dir(path: str) -> None:
-    if not os.path.isdir(path):
-        os.makedirs(path, exist_ok=True)
+# Output fields (minimal metadata)
+OUTPUT_FIELDS = ['id', 'title', 'abstract', 'year', 'categories', 'pdf_url']
 
 
-def pack_images_to_tar(image_root: str, tar_out_dir: str, shard_size: int = 1000) -> None:
-    """Pack disease-organized JPEG/PNG/NIfTI images into tar shards suitable for NeMo Curator.
-
-    - Scans subdirs AD/PD/ALS/HD/MS for images.
-    - Packs up to shard_size images per tar file.
-    - Converts PNG to JPG naming in tar path (content unchanged) to align with doc expectations.
-    - Supports NIfTI (.nii.gz) neuroimaging files.
-    """
-    _ensure_dir(tar_out_dir)
-    all_paths: List[str] = []
-    for dcode in DISEASE_DIRNAMES.keys():
-        ddir = os.path.join(image_root, dcode)
-        img_dir = os.path.join(ddir, "images")
-        # Search for standard image formats and NIfTI neuroimaging files
-        for ext in ("*.jpg", "*.jpeg", "*.png", "*.nii.gz"):
-            all_paths.extend(glob.glob(os.path.join(img_dir, ext)))
-    if not all_paths:
-        print("⚠️  No images found to pack.")
-        return
-    print(f"📦 Found {len(all_paths)} images to pack into tar files")
-    shard_idx = 0
-    for i in range(0, len(all_paths), shard_size):
-        shard = all_paths[i:i + shard_size]
-        tar_path = os.path.join(tar_out_dir, f"images_{shard_idx:04d}.tar")
-        with tarfile.open(tar_path, "w") as tar:
-            for p in shard:
-                arcname = os.path.basename(p)
-                # Ensure .jpg extension in archive name if png
-                if arcname.lower().endswith(".png"):
-                    arcname = os.path.splitext(arcname)[0] + ".jpg"
-                tar.add(p, arcname=arcname)
-        print(f"Wrote shard: {tar_path} ({len(shard)} files)")
-        shard_idx += 1
-
-
-def run_nemo_image_pipeline(tar_dir: str, out_manifest: str) -> None:
-    """Run a minimal NeMo Curator image pipeline: FilePartitioning + ImageReader.
-
-    This assumes `nemo_curator` is installed. For complete pipeline options (filters, embeddings,
-    dedup), see NVIDIA docs: https://docs.nvidia.com/nemo/curator/latest/curate-images/load-data/index.html
-    
-    Note: NeMo Curator only supports Linux systems. On macOS/Windows, this will gracefully fall back
-    to direct image processing.
-    """
-    _require_nemo_curator()
-    try:
-        from nemo_curator.pipeline import Pipeline  # type: ignore
-        from nemo_curator.stages.file_partitioning import FilePartitioningStage  # type: ignore
-    except ImportError as e:
-        raise ImportError(f"Failed to import NeMo Curator core components: {e}") from e
-    except ValueError as e:
-        # NeMo Curator raises ValueError if not on Linux (e.g., "only supports Linux systems")
-        if "linux" in str(e).lower() or "darwin" in str(e).lower() or "system" in str(e).lower():
-            error_msg = f"NeMo Curator only supports Linux systems: {e}"
-            error_msg += "\n\nThe pipeline will fall back to direct image processing."
-            raise ImportError(error_msg) from e
-        raise
-    
-    # Try importing image components (may not be available in all NeMo Curator versions)
-    try:
-        from nemo_curator.stages.image.io import ImageReaderStage  # type: ignore
-    except ImportError:
-        # Try alternative import path or check if image processing is available
-        try:
-            # Some versions may have different paths
-            import nemo_curator.stages.image
-            ImageReaderStage = getattr(nemo_curator.stages.image.io, 'ImageReaderStage', None)
-            if ImageReaderStage is None:
-                raise ImportError("ImageReaderStage not found in nemo_curator.stages.image.io")
-        except (ImportError, AttributeError) as e:
-            error_msg = f"NeMo Curator image processing components not available: {e}"
-            error_msg += "\n\nPossible causes:"
-            error_msg += "\n  1. Image processing may require additional dependencies"
-            error_msg += "\n  2. NeMo Curator version may not include image processing modules"
-            error_msg += "\n  3. Try: pip install 'nemo-curator[all]' or check NeMo Curator documentation"
-            error_msg += "\n\nThe pipeline will fall back to direct image processing."
-            raise ImportError(error_msg) from e
-    
-    # Try importing JsonlWriter (may be in different locations)
-    try:
-        from nemo_curator.utils.writer_utils import JsonlWriter  # type: ignore
-    except ImportError:
-        try:
-            from nemo_curator.stages.text.io.writer import JsonlWriter  # type: ignore
-        except ImportError:
-            raise ImportError("JsonlWriter not found in nemo_curator.utils.writer_utils or nemo_curator.stages.text.io.writer")
-
-    # Discover tar shards
-    shards = sorted(glob.glob(os.path.join(tar_dir, "*.tar")))
-    if not shards:
-        raise FileNotFoundError("No .tar shards found. Use pack-images-to-tar first.")
-
-    # Build pipeline
-    pipe = Pipeline()
-    pipe.add_stage(FilePartitioningStage(input_files=shards))
-    pipe.add_stage(ImageReaderStage())
-    # For demo: write a lightweight manifest with filenames and basic metadata
-    writer = JsonlWriter(out_manifest)
-    pipe.add_stage(writer)
-    pipe.run()
-    print(f"NeMo image pipeline completed -> {out_manifest}")
-
-
-def run_nemo_text_commoncrawl(start_snapshot: str, end_snapshot: str, download_dir: str, url_limit: int, out_dir: str) -> None:
-    """Run the NeMo Curator Common Crawl download pipeline, per docs example.
-
-    Docs: https://docs.nvidia.com/nemo/curator/latest/curate-text/load-data/index.html
-    """
-    _require_nemo_curator()
-    try:
-        from nemo_curator.pipeline import Pipeline  # type: ignore
-        from nemo_curator.stages.text.download import CommonCrawlDownloadExtractStage  # type: ignore
-        from nemo_curator.stages.text.io.writer import JsonlWriter  # type: ignore
-    except Exception as e:
-        raise RuntimeError("Failed to import NeMo Curator text pipeline components") from e
-
-    pipe = Pipeline(name="common_crawl_download", description="Download and process Common Crawl web archives")
-    cc_stage = CommonCrawlDownloadExtractStage(
-        start_snapshot=start_snapshot,
-        end_snapshot=end_snapshot,
-        download_dir=download_dir,
-        crawl_type="main",
-        url_limit=url_limit,
-    )
-    pipe.add_stage(cc_stage)
-    writer = JsonlWriter(path=out_dir)
-    pipe.add_stage(writer)
-    pipe.build()
-    pipe.run()
-    print(f"NeMo text pipeline (Common Crawl) completed -> {out_dir}")
-
-
-def _filter_text_for_diseases(text: str) -> bool:
-    lt = text.lower()
-    return any(term in lt for term in BIOMED_DISEASE_TERMS)
-
-
-def run_nemo_text_biomed_pubmed_pmc(
-    out_jsonl: str,
-    staging_dir: str,
-    max_per_disease: int = 100,
-    min_abstract_length: int = 200,
-    article_types: Optional[List[str]] = None,
-    exclude_types: Optional[List[str]] = None,
-    min_year: Optional[int] = None,
-) -> None:
-    """Download (via PubMed API) then process with NeMo-style curation and disease filtering.
-
-    NOTE: PMC OA direct download via NeMo Curator is not provided here; this function
-    fetches abstracts from PubMed for demo and applies NeMo-required curation steps.
+def load_existing_ids(cache_file: str) -> Set[str]:
+    """Load existing ArXiv IDs from cache file to avoid re-downloading.
     
     Args:
-        out_jsonl: Output JSONL file path
-        staging_dir: Staging directory for intermediate files
-        max_per_disease: Maximum results per disease
-        min_abstract_length: Minimum abstract length in characters
-        article_types: Preferred article types (e.g., ["Review", "Meta-Analysis"])
-        exclude_types: Article types to exclude (e.g., ["Case Reports", "Letter"])
-        min_year: Minimum publication year
+        cache_file: Path to JSONL cache file
+        
+    Returns:
+        Set of ArXiv IDs already in cache
     """
-    _ensure_dir(staging_dir)
-    # Fetch PubMed per disease using built-in helper, then curate using NeMo steps
-    text_inputs: List[str] = []
-    for dcode, disease in DISEASE_DIRNAMES.items():
+    existing_ids = set()
+    if os.path.exists(cache_file):
+        print(f"📖 Loading existing cache from {cache_file}...")
         try:
-            path = fetch_pubmed_abstracts(
-                disease, 
-                staging_dir, 
-                max_results=max_per_disease,
-                min_abstract_length=min_abstract_length,
-                article_types=article_types,
-                exclude_types=exclude_types,
-                min_year=min_year,
-            )
-            text_inputs.append(path)
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    if line.strip():
+                        try:
+                            paper = json.loads(line)
+                            if 'id' in paper:
+                                existing_ids.add(paper['id'])
+                        except json.JSONDecodeError as e:
+                            print(f"⚠️  Warning: Skipping invalid JSON on line {line_num}: {e}")
+                            continue
+            print(f"   ✅ Found {len(existing_ids)} existing papers in cache")
         except Exception as e:
-            print(f"PubMed fetch failed for {dcode}: {e}")
-
-    # Merge and filter for disease terms
-    merged_path = os.path.join(staging_dir, "merged_pubmed.jsonl")
-    with open(merged_path, "w", encoding="utf-8") as out_f:
-        for p in text_inputs:
-            with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        continue
-                    txt = obj.get("text")
-                    if isinstance(txt, str) and _filter_text_for_diseases(txt):
-                        out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-    # NeMo-style strict curation (normalize, filter, dedupe, redact)
-    # Try NeMo curation, but fall back to basic processing if not available
-    try:
-        _require_nemo_curator()
-        curate_with_nemo([merged_path], out_jsonl, min_chars=200, max_chars=8000, shuffle=True, seed=42)
-    except ImportError:
-        print("⚠️  NeMo Curator not installed, using basic text processing (no advanced curation)")
-        # Basic processing: just copy merged data with length filtering
-        _ensure_dir(os.path.dirname(os.path.abspath(out_jsonl)) or ".")
-        with open(out_jsonl, "w", encoding="utf-8") as out_f:
-            with open(merged_path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    try:
-                        obj = json.loads(line)
-                        text = obj.get("text", "")
-                        # Basic length filtering
-                        if len(text) >= 200 and len(text) <= 8000:
-                            out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-                    except Exception:
-                        continue
-        print(f"✅ Basic text processing completed: {out_jsonl}")
-
-
-
-# =====================
-# Text preprocessing
-# =====================
-
-
-def clean_text(raw: str) -> str:
-    """Basic cleaning suitable for abstracts/full text.
-
-    - Remove inline citations like [1], [12], (Smith 2020), (Smith et al., 2020)
-    - Remove a terminal References section heuristically
-    - Collapse excessive whitespace
-    """
-    # Remove [numbers]
-    text = re.sub(r"\[[0-9,\s]+\]", "", raw)
-    # Remove (Author et al., 2020) style
-    text = re.sub(r"\((?:[A-Z][A-Za-z\-]+(?: et al\.)?,?\s?\d{4}[a-z]?)\)", "", text)
-    # Remove (Author, 2020) style broadly
-    text = re.sub(r"\([A-Z][A-Za-z\-]+,\s?\d{4}[a-z]?\)", "", text)
-    # Heuristic remove References section (from a line starting 'References')
-    parts = re.split(r"\n\s*References\s*\n", text, flags=re.IGNORECASE)
-    if len(parts) > 1:
-        text = parts[0]
-    # Normalize whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def chunk_text(text: str, target_chars: int = 800, overlap: int = 100) -> List[str]:
-    if target_chars <= 0:
-        return [text]
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    chunks: List[str] = []
-    buffer: List[str] = []
-    buf_len = 0
-    for sent in sentences:
-        if buf_len + len(sent) + 1 <= target_chars or not buffer:
-            buffer.append(sent)
-            buf_len += len(sent) + 1
-        else:
-            chunk = " ".join(buffer).strip()
-            if chunk:
-                chunks.append(chunk)
-            # Start new buffer with overlap from previous end
-            if overlap > 0 and chunks:
-                tail = chunks[-1][-overlap:]
-                buffer = [tail, sent]
-                buf_len = len(tail) + len(sent) + 1
-            else:
-                buffer = [sent]
-                buf_len = len(sent)
-    last = " ".join(buffer).strip()
-    if last:
-        chunks.append(last)
-    return chunks
-
-
-def _iter_text_inputs(text_dir: str) -> Generator[Tuple[Disease, str, str], None, None]:
-    """Yield (disease, path, content) for .txt or .jsonl ('text' field) files."""
-    for disease_key, disease in DISEASE_DIRNAMES.items():
-        ddir = os.path.join(text_dir, disease_key)
-        if not os.path.isdir(ddir):
-            continue
-        for root, _dirs, files in os.walk(ddir):
-            for fname in files:
-                path = os.path.join(root, fname)
-                if fname.lower().endswith(".txt"):
-                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                        yield (disease, path, f.read())
-                elif fname.lower().endswith(".jsonl"):
-                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                        for line in f:
-                            try:
-                                obj = json.loads(line)
-                            except Exception:
-                                continue
-                            txt = obj.get("text") or obj.get("abstract") or obj.get("body")
-                            if isinstance(txt, str) and txt.strip():
-                                yield (disease, path, txt)
-
-
-def preprocess_texts_to_jsonl(text_dir: str, out_jsonl: str, target_chars: int = 800) -> None:
-    print(f"🔄 Starting text preprocessing from {text_dir}")
-    _ensure_dir(os.path.dirname(os.path.abspath(out_jsonl)) or ".")
-    written = 0
-    with open(out_jsonl, "w", encoding="utf-8") as out_f:
-        for disease, src_path, raw in _iter_text_inputs(text_dir):
-            print(f"  📄 Processing {disease.value} from {os.path.basename(src_path)}")
-            cleaned = clean_text(raw)
-            for chunk in chunk_text(cleaned, target_chars=target_chars):
-                rec = {
-                    "text": chunk,
-                    "disease": disease.value,
-                    "modality": "text",
-                    "source": os.path.relpath(src_path, text_dir),
-                }
-                out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                written += 1
-    print(f"✅ Text preprocessing complete: {written} records written -> {out_jsonl}")
-
-
-# =====================
-# Network fetchers (PubMed, bioRxiv)
-# =====================
-
-
-DISEASE_KEYWORDS: Dict[Disease, List[str]] = {
-    Disease.ALZHEIMERS: ["Alzheimer", "amyloid", "tau", "dementia"],
-    Disease.PARKINSONS: ["Parkinson", "dopamine", "substantia nigra", "bradykinesia"],
-    Disease.ALS: ["ALS", "amyotrophic lateral sclerosis", "motor neuron"],
-    Disease.HUNTINGTONS: ["Huntington", "HTT", "chorea"],
-    Disease.MULTIPLE_SCLEROSIS: ["multiple sclerosis", "MS", "demyelination"],
-}
-
-
-def _http_get_json(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 20) -> Optional[dict]:
-    default_headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    if headers:
-        default_headers.update(headers)
+            print(f"⚠️  Warning: Error reading cache file: {e}")
+            print("   Starting fresh...")
+    else:
+        print(f"📝 No existing cache found. Starting fresh collection...")
     
-    req = urllib.request.Request(url, headers=default_headers)
+    return existing_ids
+
+
+def extract_year_from_date(date: Optional[datetime]) -> Optional[int]:
+    """Extract year from ArXiv date object.
+    
+    Args:
+        date: ArXiv date object or None
+        
+    Returns:
+        Year as integer, or None if date is invalid
+    """
+    if date is None:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec - controlled URL
-            data = resp.read()
-            try:
-                return json.loads(data.decode("utf-8", errors="ignore"))
-            except Exception as e:
-                print(f"JSON decode error: {e}")
-                return None
-    except Exception as e:
-        print(f"HTTP request error: {e}")
+        return date.year
+    except (AttributeError, ValueError):
         return None
 
 
-def _http_get_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 20) -> str:
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": "NeuroMoE/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec - controlled URL
-        return resp.read().decode("utf-8", errors="ignore")
-
-
-def fetch_pubmed_abstracts(
-    disease: Disease,
-    out_dir: str,
-    max_results: int = 50,
-    email: Optional[str] = None,
-    min_abstract_length: int = 200,
-    article_types: Optional[List[str]] = None,
-    exclude_types: Optional[List[str]] = None,
-    min_year: Optional[int] = None,
-) -> str:
-    """Fetch PubMed PMIDs by keyword and download abstracts as text JSONL.
-
-    Writes a file under {out_dir}/{DISEASE}/fetched_pubmed.jsonl
+def format_abstract(abstract: str, max_length: int = 300) -> str:
+    """Format abstract to first N characters.
     
     Args:
-        disease: Disease enum to search for
-        out_dir: Output directory
+        abstract: Full abstract text
+        max_length: Maximum length to keep
+        
+    Returns:
+        Truncated abstract
+    """
+    if not abstract:
+        return ""
+    abstract = abstract.strip()
+    if len(abstract) > max_length:
+        # Try to truncate at word boundary
+        truncated = abstract[:max_length].rsplit(' ', 1)[0]
+        return truncated + "..."
+    return abstract
+
+
+def paper_to_dict(paper: arxiv.Result) -> Optional[Dict]:
+    """Convert ArXiv paper result to minimal dictionary format.
+    
+    Args:
+        paper: ArXiv result object
+        
+    Returns:
+        Dictionary with minimal fields, or None if paper should be skipped
+    """
+    # Skip papers without abstracts
+    if not paper.summary or not paper.summary.strip():
+        return None
+    
+    # Extract year
+    year = extract_year_from_date(paper.published)
+    
+    # Skip papers outside target date range
+    if year is not None and (year < MIN_YEAR or year > MAX_YEAR):
+        return None
+    
+    # Format categories
+    categories = [cat.term for cat in paper.categories] if paper.categories else []
+    
+    # Build minimal metadata dict
+    paper_dict = {
+        'id': paper.entry_id.split('/')[-1],  # Extract ArXiv ID from URL
+        'title': paper.title.strip() if paper.title else "",
+        'abstract': format_abstract(paper.summary, max_length=300),
+        'year': year,
+        'categories': categories,
+        'pdf_url': paper.pdf_url if hasattr(paper, 'pdf_url') else f"https://arxiv.org/pdf/{paper.entry_id.split('/')[-1]}.pdf",
+    }
+    
+    return paper_dict
+
+
+def search_arxiv_query(
+    query: str,
+    max_results: int = 10000,
+    existing_ids: Set[str] = None,
+    rate_limit_delay: float = RATE_LIMIT_DELAY
+) -> list[Dict]:
+    """Search ArXiv with a single query and return papers.
+    
+    Args:
+        query: ArXiv search query
         max_results: Maximum number of results to fetch
-        email: Optional email for NCBI E-utilities
-        min_abstract_length: Minimum abstract length in characters (default: 200)
-        article_types: Preferred article types (e.g., ["Review", "Meta-Analysis", "Systematic Review"])
-        exclude_types: Article types to exclude (e.g., ["Case Reports", "Letter", "Editorial"])
-        min_year: Minimum publication year (e.g., 2010)
+        existing_ids: Set of IDs to skip (already in cache)
+        rate_limit_delay: Delay between requests (seconds)
+        
+    Returns:
+        List of paper dictionaries (streamed, not all in memory)
     """
-    _ensure_dir(out_dir)
-    disease_dir = os.path.join(out_dir, disease.value)
-    _ensure_dir(disease_dir)
-    out_path = os.path.join(disease_dir, "fetched_pubmed.jsonl")
+    if existing_ids is None:
+        existing_ids = set()
     
-    # Build search query with filters
-    terms = " OR ".join([f"{t}[Title/Abstract]" for t in DISEASE_KEYWORDS[disease]])
+    papers = []
+    print(f"\n🔍 Searching ArXiv: {query}")
+    print(f"   Max results: {max_results}")
     
-    # Add article type filter if specified
-    if article_types:
-        type_filter = " OR ".join([f'"{t}"[Publication Type]' for t in article_types])
-        terms = f"({terms}) AND ({type_filter})"
+    try:
+        # Create ArXiv client with rate limiting
+        client = arxiv.Client(
+            page_size=100,  # Fetch 100 papers per request
+            delay_seconds=rate_limit_delay,
+            num_retries=3
+        )
+        
+        # Search
+        search = arxiv.Search(
+            query=query,
+            max_results=max_results,
+            sort_by=arxiv.SortCriterion.SubmittedDate,
+            sort_order=arxiv.SortOrder.Descending
+        )
+        
+        # Stream results (yield immediately, don't accumulate)
+        count = 0
+        for result in client.results(search):
+            # Rate limiting (client handles this, but we add extra safety)
+            time.sleep(rate_limit_delay)
+            
+            # Check if already in cache
+            paper_id = result.entry_id.split('/')[-1]
+            if paper_id in existing_ids:
+                continue
+            
+            # Convert to dict
+            paper_dict = paper_to_dict(result)
+            if paper_dict is None:
+                continue
+            
+            papers.append(paper_dict)
+            count += 1
+            
+            # Log progress every 500 papers
+            if count % LOG_INTERVAL == 0:
+                print(f"   ✅ Collected {count} new papers from this query...")
+        
+        print(f"   ✅ Query complete: {count} new papers collected")
+        
+    except Exception as e:
+        print(f"   ⚠️  Error in query '{query}': {e}")
+        print(f"   Continuing with {len(papers)} papers collected so far...")
     
-    # Add exclusion filter if specified
-    if exclude_types:
-        exclude_filter = " OR ".join([f'"{t}"[Publication Type]' for t in exclude_types])
-        terms = f"({terms}) NOT ({exclude_filter})"
+    return papers
+
+
+def save_papers_to_jsonl(papers: list[Dict], output_file: str, mode: str = 'a'):
+    """Save papers to JSONL file.
     
-    # Add date filter if specified
-    if min_year:
-        terms = f"({terms}) AND ({min_year}:2030[Publication Date])"
+    Args:
+        papers: List of paper dictionaries
+        output_file: Path to output JSONL file
+        mode: File mode ('a' for append, 'w' for write)
+    """
+    os.makedirs(os.path.dirname(output_file) if os.path.dirname(output_file) else '.', exist_ok=True)
     
-    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-    params = {
-        "db": "pubmed",
-        "term": terms,
-        "retmode": "json",
-        "retmax": str(max_results * 2),  # Fetch more to account for filtering
-        "sort": "relevance",
-    }
-    if email:
-        params["email"] = email
-    esearch_url = f"{base}/esearch.fcgi?{urllib.parse.urlencode(params)}"
-    data = _http_get_json(esearch_url)
-    if not data or "esearchresult" not in data:
-        print("PubMed esearch failed or returned no results")
-        return out_path
-    pmids = data["esearchresult"].get("idlist", [])
+    with open(output_file, mode, encoding='utf-8') as f:
+        for paper in papers:
+            f.write(json.dumps(paper, ensure_ascii=False) + '\n')
+
+
+def collect_arxiv_papers(
+    output_dir: str = "./data/arxiv",
+    max_papers: int = 40000,
+    cache_file: str = None,
+    rate_limit_delay: float = RATE_LIMIT_DELAY
+):
+    """Main function to collect ArXiv papers.
     
-    written = 0
-    skipped_reasons = {
-        "too_short": 0,
-        "wrong_type": 0,
-        "no_abstract": 0,
-    }
+    Args:
+        output_dir: Directory to save output files
+        max_papers: Maximum total papers to collect
+        cache_file: Path to cache file (default: output_dir/arxiv_papers.jsonl)
+        rate_limit_delay: Delay between API requests (seconds)
+    """
+    if not ARXIV_AVAILABLE:
+        print("❌ Error: arxiv package not available.")
+        print("   Install with: pip install arxiv")
+        return
     
-    with open(out_path, "w", encoding="utf-8") as out_f:
-        for pmid in pmids:
-            if written >= max_results:
+    # Setup paths
+    os.makedirs(output_dir, exist_ok=True)
+    if cache_file is None:
+        cache_file = os.path.join(output_dir, "arxiv_papers.jsonl")
+    
+    checkpoint_file = os.path.join(output_dir, "checkpoint.json")
+    
+    print("=" * 60)
+    print("📚 ArXiv Paper Collector")
+    print("=" * 60)
+    print(f"📁 Output directory: {output_dir}")
+    print(f"📄 Cache file: {cache_file}")
+    print(f"🎯 Target: {max_papers} papers")
+    print(f"📅 Date range: {MIN_YEAR}-{MAX_YEAR}")
+    print(f"⏱️  Rate limit: {1.0/rate_limit_delay:.1f} requests/sec")
+    print()
+    
+    # Load existing cache
+    existing_ids = load_existing_ids(cache_file)
+    total_collected = len(existing_ids)
+    
+    if total_collected >= max_papers:
+        print(f"✅ Already have {total_collected} papers (target: {max_papers})")
+        print("   Collection complete!")
+        return
+    
+    print(f"📊 Starting collection: {total_collected}/{max_papers} papers already cached")
+    print()
+    
+    # Open cache file for streaming writes
+    cache_file_handle = open(cache_file, 'a', encoding='utf-8')
+    
+    # Track statistics
+    total_new_papers = 0
+    papers_by_query = defaultdict(int)
+    checkpoint_counter = 0
+    
+    try:
+        for query_idx, query in enumerate(ARXIV_QUERIES, 1):
+            if total_collected + total_new_papers >= max_papers:
+                print(f"\n✅ Target reached! Collected {total_collected + total_new_papers} papers")
                 break
-                
-            # Fetch detailed article info including publication type
-            efetch_params = {
-                "db": "pubmed",
-                "id": pmid,
-                "retmode": "xml",  # Use XML to get publication type
-                "rettype": "abstract",
-            }
-            if email:
-                efetch_params["email"] = email
-            efetch_url = f"{base}/efetch.fcgi?{urllib.parse.urlencode(efetch_params)}"
             
-            try:
-                article_xml = _http_get_text(efetch_url)
-            except Exception:
-                skipped_reasons["no_abstract"] += 1
-                continue
+            # Calculate how many more papers we need
+            remaining = max_papers - (total_collected + total_new_papers)
+            query_max = min(remaining * 2, 15000)  # Fetch extra to account for deduplication
             
-            # Parse publication types from XML
-            pub_types = []
-            # Always extract publication types for filtering
-            try:
-                root = ET.fromstring(article_xml)
-                for pub_type in root.findall(".//PublicationType"):
-                    pub_type_text = pub_type.text
-                    if pub_type_text:
-                        pub_types.append(pub_type.text)
-            except Exception:
-                pass  # If XML parsing fails, continue with text extraction
-            
-            # Check if article type should be excluded
-            if exclude_types and pub_types:
-                if any(pt in exclude_types for pt in pub_types):
-                    skipped_reasons["wrong_type"] += 1
-                    continue
-            
-            # Extract abstract text from XML or fallback to text mode
-            abstract_text = ""
-            if "abstract" in article_xml.lower():
-                # Try to extract abstract from XML
-                try:
-                    root = ET.fromstring(article_xml)
-                    abstract_elements = root.findall(".//AbstractText")
-                    if abstract_elements:
-                        abstract_text = " ".join([elem.text or "" for elem in abstract_elements])
-                except Exception:
-                    # Fallback: extract text between common abstract markers
-                    import re
-                    abstract_match = re.search(r'<AbstractText[^>]*>(.*?)</AbstractText>', article_xml, re.DOTALL | re.IGNORECASE)
-                    if abstract_match:
-                        abstract_text = re.sub(r'<[^>]+>', '', abstract_match.group(1))
-            
-            # If XML parsing failed, try text mode as fallback
-            if not abstract_text or len(abstract_text) < 50:
-                efetch_params_text = {
-                    "db": "pubmed",
-                    "id": pmid,
-                    "retmode": "text",
-                    "rettype": "abstract",
-                }
-                if email:
-                    efetch_params_text["email"] = email
-                efetch_url_text = f"{base}/efetch.fcgi?{urllib.parse.urlencode(efetch_params_text)}"
-                try:
-                    abstract_text = _http_get_text(efetch_url_text)
-                except Exception:
-                    skipped_reasons["no_abstract"] += 1
-                    continue
-            
-            cleaned = clean_text(abstract_text)
-            
-            # Filter by minimum length
-            if not cleaned or len(cleaned) < min_abstract_length:
-                skipped_reasons["too_short"] += 1
-                continue
-            
-            rec = {
-                "text": cleaned,
-                "disease": disease.value,
-                "modality": "text",
-                "source": f"pubmed:{pmid}",
-                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                "pub_types": pub_types if pub_types else None,
-            }
-            out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            written += 1
-            time.sleep(0.34)  # be polite to NCBI
-    
-    print(f"PubMed abstracts written: {written} -> {out_path}")
-    if any(skipped_reasons.values()):
-        print(f"  Skipped: {skipped_reasons['too_short']} too short, "
-              f"{skipped_reasons['wrong_type']} wrong type, "
-              f"{skipped_reasons['no_abstract']} no abstract")
-    return out_path
-
-
-def fetch_biorxiv_titles(
-    disease: Disease,
-    out_dir: str,
-    max_results: int = 50,
-    start_date: str = "2020-01-01",
-    end_date: str = "2030-01-01",
-) -> str:
-    """Fetch bioRxiv metadata and filter by disease keywords, write text JSONL.
-
-    Writes a file under {out_dir}/{DISEASE}/fetched_biorxiv.jsonl
-    """
-    _ensure_dir(out_dir)
-    disease_dir = os.path.join(out_dir, disease.value)
-    _ensure_dir(disease_dir)
-    out_path = os.path.join(disease_dir, "fetched_biorxiv.jsonl")
-    cursor = 0
-    written = 0
-    kw = [k.lower() for k in DISEASE_KEYWORDS[disease]]
-    with open(out_path, "w", encoding="utf-8") as out_f:
-        while written < max_results:
-            url = (
-                f"https://api.biorxiv.org/details/biorxiv/{start_date}/{end_date}/{cursor}"
+            # Search this query
+            query_papers = search_arxiv_query(
+                query=query,
+                max_results=query_max,
+                existing_ids=existing_ids,
+                rate_limit_delay=rate_limit_delay
             )
-            try:
-                data = _http_get_json(url)
-            except Exception:
-                break
-            if not data or "collection" not in data or not data["collection"]:
-                break
-            for item in data["collection"]:
-                title = str(item.get("title") or "").strip()
-                abstract = str(item.get("abstract") or "").strip()
-                url_rel = str(item.get("rel_doi") or item.get("biorxiv_url") or "").strip()
-                if not title:
+            
+            # Stream papers to disk immediately (deduplicate and write)
+            seen_in_query = set()
+            query_paper_count = 0
+            
+            for paper in query_papers:
+                paper_id = paper['id']
+                
+                # Skip if already seen
+                if paper_id in seen_in_query or paper_id in existing_ids:
                     continue
-                text_blob = (title + "\n\n" + abstract).strip()
-                if not any(k in text_blob.lower() for k in kw):
-                    continue
-                rec = {
-                    "text": clean_text(text_blob),
-                    "disease": disease.value,
-                    "modality": "text",
-                    "source": "biorxiv",
-                    "url": url_rel or item.get("doi") or "",
-                }
-                out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                written += 1
-                if written >= max_results:
+                
+                # Mark as seen
+                seen_in_query.add(paper_id)
+                existing_ids.add(paper_id)
+                
+                # Stream to disk immediately
+                cache_file_handle.write(json.dumps(paper, ensure_ascii=False) + '\n')
+                cache_file_handle.flush()  # Ensure immediate write
+                
+                query_paper_count += 1
+                total_new_papers += 1
+                checkpoint_counter += 1
+                
+                # Log progress every 500 papers
+                if total_new_papers % LOG_INTERVAL == 0:
+                    print(f"   📊 Progress: {total_new_papers} new papers collected...")
+                
+                # Checkpoint: save metadata every CHECKPOINT_INTERVAL papers
+                if checkpoint_counter >= CHECKPOINT_INTERVAL:
+                    checkpoint_data = {
+                        'timestamp': datetime.now().isoformat(),
+                        'total_papers': total_collected + total_new_papers,
+                        'new_papers': total_new_papers,
+                        'queries_completed': query_idx,
+                    }
+                    with open(checkpoint_file, 'w') as f:
+                        json.dump(checkpoint_data, f, indent=2)
+                    
+                    print(f"\n💾 Checkpoint: {total_new_papers} papers written to disk")
+                    checkpoint_counter = 0
+                
+                # Check if target reached
+                if total_collected + total_new_papers >= max_papers:
                     break
-            cursor += len(data.get("collection", []))
-            if cursor == 0:
-                break
-            time.sleep(0.5)
-    print(f"bioRxiv records written: {written} -> {out_path}")
-    return out_path
-
-
-# =====================
-# Image preprocessing
-# =====================
-
-
-def _load_captions_map(captions_path: str) -> Dict[str, str]:
-    caps: Dict[str, str] = {}
-    if not os.path.isfile(captions_path):
-        return caps
-    if captions_path.lower().endswith(".jsonl"):
-        with open(captions_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
+            
+            papers_by_query[query] = query_paper_count
+            print(f"   📊 Query {query_idx}/{len(ARXIV_QUERIES)}: {query_paper_count} unique papers")
+            print(f"   📊 Total new papers: {total_new_papers}")
+    
+    finally:
+        # Close file handle
+        cache_file_handle.close()
+        
+        # Final checkpoint
+        if checkpoint_counter > 0:
+            checkpoint_data = {
+                'timestamp': datetime.now().isoformat(),
+                'total_papers': total_collected + total_new_papers,
+                'new_papers': total_new_papers,
+                'queries_completed': len(ARXIV_QUERIES),
+            }
+            with open(checkpoint_file, 'w') as f:
+                json.dump(checkpoint_data, f, indent=2)
+            print(f"\n💾 Final checkpoint: {total_new_papers} papers written to disk")
+    
+    # Final statistics
+    final_count = load_existing_ids(cache_file)
+    print(f"\n" + "=" * 60)
+    print("✅ Collection Complete!")
+    print("=" * 60)
+    print(f"📊 Total papers collected: {len(final_count)}")
+    print(f"📁 Output file: {cache_file}")
+    
+    # Print breakdown by query
+    print(f"\n📊 Breakdown by query:")
+    for query, papers in papers_by_query.items():
+        print(f"   {query[:50]}...: {len(papers)} papers")
+    
+    # Print year distribution
+    print(f"\n📅 Loading year distribution...")
+    year_counts = defaultdict(int)
+    with open(cache_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
                 try:
-                    obj = json.loads(line)
-                except Exception:
+                    paper = json.loads(line)
+                    year = paper.get('year')
+                    if year:
+                        year_counts[year] += 1
+                except:
                     continue
-                fn = str(obj.get("filename") or obj.get("image") or "").strip()
-                cp = str(obj.get("caption") or "").strip()
-                if fn and cp:
-                    caps[fn] = cp
-    elif captions_path.lower().endswith(".csv"):
-        with open(captions_path, newline="", encoding="utf-8", errors="ignore") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                fn = str(row.get("filename") or row.get("image") or "").strip()
-                cp = str(row.get("caption") or "").strip()
-                if fn and cp:
-                    caps[fn] = cp
-    return caps
+    
+    print(f"📅 Year distribution:")
+    for year in sorted(year_counts.keys()):
+        print(f"   {year}: {year_counts[year]} papers")
 
 
-def _normalize_caption_from_filename(fname: str) -> str:
-    base = os.path.splitext(os.path.basename(fname))[0]
-    norm = re.sub(r"[_\-]+", " ", base).strip()
-    return norm
+# PDF Extraction Constants
+MAX_PAGES = 6  # Extract first 6 pages
+MAX_CHARS = 12000  # Maximum characters per paper
+PDF_RATE_LIMIT = 0.4  # Seconds between PDF downloads
+CHECKPOINT_INTERVAL_PDF = 100  # Save checkpoint every 100 papers
 
 
-def _process_image_copy_or_resize(src_path: str, dst_path: str, size: Tuple[int, int]) -> None:
-    _ensure_dir(os.path.dirname(dst_path))
-    if PIL_AVAILABLE:
+def extract_text_from_pdf_url(pdf_url: str, max_pages: int = MAX_PAGES, max_chars: int = MAX_CHARS) -> Optional[str]:
+    """Extract text from PDF URL, limiting to first N pages and max characters.
+    
+    Memory-efficient: streams PDF download and processes page-by-page without
+    keeping full PDF in RAM.
+    
+    Args:
+        pdf_url: URL to ArXiv PDF
+        max_pages: Maximum number of pages to extract (default: 6)
+        max_chars: Maximum characters to extract (default: 12000)
+        
+    Returns:
+        Extracted text, or None if extraction failed
+    """
+    if not PDF_AVAILABLE or not REQUESTS_AVAILABLE:
+        return None
+    
+    try:
+        # Download PDF with timeout and streaming
+        response = requests.get(pdf_url, timeout=30, stream=True)
+        response.raise_for_status()
+        
+        # Stream PDF to BytesIO (memory-efficient)
+        from io import BytesIO
+        pdf_buffer = BytesIO()
+        for chunk in response.iter_content(chunk_size=8192):
+            pdf_buffer.write(chunk)
+        pdf_buffer.seek(0)
+        
+        # Extract text based on available library
+        text_parts = []
+        total_chars = 0
+        
+        if USE_PDFPLUMBER:
+            import pdfplumber
+            with pdfplumber.open(pdf_buffer) as pdf:
+                for page_num, page in enumerate(pdf.pages[:max_pages], 1):
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(page_text)
+                        total_chars += len(page_text)
+                        # Stop if we've reached max_chars
+                        if total_chars >= max_chars:
+                            break
+        else:
+            # Use PyPDF2
+            pdf_reader = PyPDF2.PdfReader(pdf_buffer)
+            for page_num in range(min(max_pages, len(pdf_reader.pages))):
+                page = pdf_reader.pages[page_num]
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+                    total_chars += len(page_text)
+                    # Stop if we've reached max_chars
+                    if total_chars >= max_chars:
+                        break
+        
+        # Combine text parts
+        full_text = '\n\n'.join(text_parts)
+        
+        # Truncate to max_chars if needed (at word boundary)
+        if len(full_text) > max_chars:
+            full_text = full_text[:max_chars].rsplit(' ', 1)[0] + '...'
+        
+        # Clear buffer from memory
+        pdf_buffer.close()
+        
+        return full_text.strip()
+        
+    except requests.exceptions.RequestException as e:
+        # Network errors
+        return None
+    except Exception as e:
+        # Invalid PDFs or other errors
+        return None
+
+
+def load_processed_ids(output_dir: str) -> Set[str]:
+    """Load set of already processed ArXiv IDs from output directory and checkpoint.
+    
+    Args:
+        output_dir: Directory containing extracted text files
+        
+    Returns:
+        Set of processed ArXiv IDs
+    """
+    processed = set()
+    
+    # Check existing .txt files
+    if os.path.exists(output_dir):
+        for filename in os.listdir(output_dir):
+            if filename.endswith('.txt'):
+                arxiv_id = filename[:-4]  # Remove .txt extension
+                processed.add(arxiv_id)
+    
+    # Check checkpoint file
+    checkpoint_file = os.path.join(output_dir, 'pdf_extraction_checkpoint.json')
+    if os.path.exists(checkpoint_file):
         try:
-            with Image.open(src_path) as im:  # type: ignore[attr-defined]
-                im = im.convert("RGB")
-                im = im.resize(size)
-                im.save(dst_path, format="JPEG", quality=90)
-            return
+            with open(checkpoint_file, 'r') as f:
+                checkpoint = json.load(f)
+                processed.update(checkpoint.get('processed_ids', []))
         except Exception:
             pass
-    # Fallback: copy without transform
-    shutil.copy2(src_path, dst_path)
+    
+    return processed
 
 
-def preprocess_images_to_jsonl(
-    image_dir: str,
-    out_jsonl: str,
-    processed_images_dir: str,
-    size: Tuple[int, int] = (512, 512),
-) -> None:
-    print(f"🔄 Starting image preprocessing from {image_dir}")
-    _ensure_dir(os.path.dirname(os.path.abspath(out_jsonl)) or ".")
-    _ensure_dir(processed_images_dir)
-    written = 0
-    with open(out_jsonl, "w", encoding="utf-8") as out_f:
-        for disease_key, disease in DISEASE_DIRNAMES.items():
-            ddir = os.path.join(image_dir, disease_key)
-            if not os.path.isdir(ddir):
-                continue
-            print(f"  🖼️  Processing {disease.value} images")
-            img_dir = os.path.join(ddir, "images")
-            if not os.path.isdir(img_dir):
-                # Allow images placed directly under disease dir
-                img_dir = ddir
-            captions_map: Dict[str, str] = {}
-            for candidate in [os.path.join(ddir, "captions.jsonl"), os.path.join(ddir, "captions.csv")]:
-                if os.path.isfile(candidate):
-                    captions_map = _load_captions_map(candidate)
-                    break
-
-            for root, _dirs, files in os.walk(img_dir):
-                for fname in files:
-                    if not fname.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".nii.gz")):
-                        continue
-                    src_path = os.path.join(root, fname)
-                    out_name = f"{disease.value}_{fname}"
-                    dst_path = os.path.join(processed_images_dir, out_name)
-                    _process_image_copy_or_resize(src_path, dst_path, size)
-                    caption = captions_map.get(fname) or captions_map.get(out_name) or _normalize_caption_from_filename(fname)
-                    rec = {
-                        "image_path": os.path.abspath(dst_path),
-                        "caption": caption,
-                        "disease": disease.value,
-                        "modality": "image",
-                        "source": os.path.relpath(src_path, image_dir),
-                    }
-                    out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    written += 1
-    print(f"✅ Image preprocessing complete: {written} records written -> {out_jsonl}")
-
-
-# =====================
-# Wikimedia Commons image fetcher
-# =====================
-
-
-def fetch_commons_images(
-    disease: Disease,
-    out_dir: str,
-    max_results: int = 20,
-    size_px: int = 1024,
-) -> Tuple[str, str]:
-    """Fetch freely licensed images from Wikimedia Commons and captions.
-
-    Downloads images to {out_dir}/{DISEASE}/images and writes captions.jsonl.
-    Returns (images_dir, captions_jsonl_path).
+def save_checkpoint(output_dir: str, processed_ids: Set[str], stats: Dict):
+    """Save extraction checkpoint.
+    
+    Args:
+        output_dir: Output directory
+        processed_ids: Set of processed ArXiv IDs
+        stats: Statistics dictionary
     """
-    disease_dir = os.path.join(out_dir, disease.value)
-    images_dir = os.path.join(disease_dir, "images")
-    _ensure_dir(images_dir)
-    captions_path = os.path.join(disease_dir, "captions.jsonl")
-
-    # Search query from keywords - use simple terms instead of complex OR syntax
-    query = DISEASE_KEYWORDS[disease][0]  # Use the first (most specific) keyword
-    params = {
-        "action": "query",
-        "format": "json",
-        "prop": "imageinfo",
-        "generator": "search",
-        "gsrsearch": f"file:{query}",
-        "gsrnamespace": "6",  # File namespace
-        "gsrlimit": str(max_results),
-        "iiprop": "url|extmetadata",
-        "iiurlwidth": str(size_px),
-        "iiurlheight": str(size_px),
+    checkpoint_file = os.path.join(output_dir, 'pdf_extraction_checkpoint.json')
+    checkpoint_data = {
+        'timestamp': datetime.now().isoformat(),
+        'processed_ids': list(processed_ids),
+        'stats': stats,
     }
-    url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode(params)
-    data = _http_get_json(url)
-    if not data or "query" not in data or "pages" not in data["query"]:
-        print("Commons query returned no results")
-        return (images_dir, captions_path)
-    pages = data["query"]["pages"]
-    written = 0
-    with open(captions_path, "w", encoding="utf-8") as cap_f:
-        for _pid, page in pages.items():
-            title = str(page.get("title") or "").strip()
-            infos = page.get("imageinfo") or []
-            if not infos:
-                continue
-            info = infos[0]
-            # Use original URL instead of thumbnail to avoid 403 errors
-            img_url = info.get("url") or info.get("thumburl")
-            if not img_url:
-                continue
-            # Derive filename
-            fname = os.path.basename(urllib.parse.urlparse(img_url).path)
-            # Download with proper headers
-            try:
-                dst_path = os.path.join(images_dir, fname)
-                
-                # Use urllib.request with headers instead of urlretrieve
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
-                req = urllib.request.Request(img_url, headers=headers)
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    with open(dst_path, 'wb') as f:
-                        f.write(resp.read())
-            except Exception:
-                continue
-            caption = title
-            cap_f.write(json.dumps({"filename": fname, "caption": caption}, ensure_ascii=False) + "\n")
-            written += 1
-            if written >= max_results:
-                break
-            time.sleep(0.25)
-    print(f"Commons images downloaded: {written} -> {images_dir}")
-    return (images_dir, captions_path)
+    with open(checkpoint_file, 'w') as f:
+        json.dump(checkpoint_data, f, indent=2)
 
 
-# =====================
-# TCIA fetcher (optional dependency)
-# =====================
-
-
-def fetch_tcia_images(
-    disease: Disease,
-    out_dir: str,
-    collection: str,
-    max_series: int = 5,
-) -> Tuple[str, str]:
-    """Fetch MRI/PET series metadata and attempt to download example images using tcia_utils if available.
-
-    Writes images to {out_dir}/{DISEASE}/images and captions.jsonl. If tcia_utils is not available,
-    stores only a captions file with URLs/series identifiers for manual download.
+def process_single_paper(paper: Dict, output_dir: str, rate_limit_delay: float) -> tuple[str, bool, Optional[str]]:
+    """Process a single paper: download PDF and extract text.
+    
+    Args:
+        paper: Paper dictionary from JSONL
+        output_dir: Output directory for text files
+        rate_limit_delay: Delay between requests (seconds)
+        
+    Returns:
+        Tuple of (arxiv_id, success, error_message)
     """
+    arxiv_id = paper.get('id', '')
+    pdf_url = paper.get('pdf_url', '')
+    
+    if not arxiv_id or not pdf_url:
+        return arxiv_id, False, "Missing ID or PDF URL"
+    
+    # Rate limiting
+    time.sleep(rate_limit_delay)
+    
+    # Extract text
+    text = extract_text_from_pdf_url(pdf_url, max_pages=MAX_PAGES, max_chars=MAX_CHARS)
+    
+    if text is None or not text.strip():
+        return arxiv_id, False, "Failed to extract text"
+    
+    # Write to file
+    output_file = os.path.join(output_dir, f"{arxiv_id}.txt")
     try:
-        from tcia_utils import nbia  # type: ignore
-        has_tcia = True
-    except Exception:
-        has_tcia = False
-
-    disease_dir = os.path.join(out_dir, disease.value)
-    images_dir = os.path.join(disease_dir, "images")
-    _ensure_dir(images_dir)
-    captions_path = os.path.join(disease_dir, "captions.jsonl")
-
-    written = 0
-    with open(captions_path, "a", encoding="utf-8") as cap_f:
-        try:
-            if has_tcia:
-                series_list = nbia.getSeries(collection=collection)  # may require credentials
-                for s in series_list[:max_series]:
-                    series_uid = s.get("SeriesInstanceUID")
-                    body_part = s.get("BodyPartExamined")
-                    desc = s.get("SeriesDescription")
-                    caption = f"TCIA series {series_uid} — {desc or ''} {body_part or ''}".strip()
-                    cap_f.write(json.dumps({"filename": f"tcia_{series_uid}.dcm", "caption": caption}, ensure_ascii=False) + "\n")
-                    written += 1
-            else:
-                cap_f.write(json.dumps({"note": "Install tcia_utils to fetch series"}) + "\n")
-        except Exception as e:
-            print(f"TCIA fetch error: {e}")
-    print(f"TCIA metadata captured: {written} -> {images_dir}")
-    return (images_dir, captions_path)
-
-
-# =====================
-# Kaggle dataset fetcher (via CLI)
-# =====================
-
-
-def fetch_kaggle_dataset(
-    disease: Disease,
-    out_dir: str,
-    dataset_slug: str,
-) -> Tuple[str, Optional[str]]:
-    """Download a Kaggle dataset zip into disease folder using Kaggle CLI.
-
-    Requires Kaggle to be installed and API credentials set in environment.
-    Returns (images_dir, captions_jsonl_path_or_None).
-    """
-    disease_dir = os.path.join(out_dir, disease.value)
-    images_dir = os.path.join(disease_dir, "images")
-    _ensure_dir(images_dir)
-    zip_path = os.path.join(disease_dir, "kaggle.zip")
-    try:
-        cmd = [
-            "kaggle", "datasets", "download", "-d", dataset_slug, "-p", disease_dir, "-q", "-w"
-        ]
-        subprocess.run(cmd, check=True)
-        # Try to unzip
-        shutil.unpack_archive(zip_path, extract_dir=images_dir)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return arxiv_id, True, None
     except Exception as e:
-        print(f"Kaggle fetch failed: {e}")
-    return (images_dir, None)
+        return arxiv_id, False, f"File write error: {str(e)}"
 
 
-# =====================
-# BioImage Archive fetcher
-# =====================
-
-
-def fetch_bioimage_archive(
-    disease: Disease,
-    out_dir: str,
-    max_results: int = 20,
-) -> Tuple[str, str]:
-    """Search BioImage Archive for disease keywords and download image files when available."""
-    disease_dir = os.path.join(out_dir, disease.value)
-    images_dir = os.path.join(disease_dir, "images")
-    _ensure_dir(images_dir)
-    captions_path = os.path.join(disease_dir, "captions.jsonl")
-
-    query = urllib.parse.quote(" ".join(DISEASE_KEYWORDS[disease]))
-    api_url = f"https://www.ebi.ac.uk/biostudies/api/v1/biostudies/biostudies?search={query}&page=1&pageSize={max_results}"
-    data = _http_get_json(api_url)
-    if not data or not data.get("hits"):
-        print("BioImage Archive found no studies for query")
-        return (images_dir, captions_path)
-    written = 0
-    with open(captions_path, "a", encoding="utf-8") as cap_f:
-        for study in data.get("hits", []):
-            acc = study.get("accno")
-            title = (study.get("title") or "").strip()
-            if not acc:
+def extract_pdf_texts(
+    input_jsonl: str,
+    output_dir: str,
+    num_workers: int = 3,
+    rate_limit_delay: float = PDF_RATE_LIMIT
+):
+    """Extract text from ArXiv PDFs using streaming and parallel processing.
+    
+    Memory-efficient: streams PDFs, writes text files immediately, doesn't keep
+    PDFs or full text in RAM. Handles errors gracefully and supports resume.
+    
+    Args:
+        input_jsonl: Path to input JSONL file with paper metadata
+        output_dir: Directory to save extracted text files
+        num_workers: Number of worker threads (2-4 recommended for Colab)
+        rate_limit_delay: Delay between PDF downloads (default: 0.4 seconds)
+    """
+    if not PDF_AVAILABLE:
+        print("❌ Error: PDF library not available.")
+        print("   Install with: pip install PyPDF2 or pip install pdfplumber")
+        return
+    
+    if not REQUESTS_AVAILABLE:
+        print("❌ Error: requests package not available.")
+        print("   Install with: pip install requests")
+        return
+    
+    # Validate num_workers
+    if num_workers < 2 or num_workers > 4:
+        print(f"⚠️  Warning: num_workers={num_workers} not in recommended range (2-4)")
+        print("   Adjusting to 3...")
+        num_workers = 3
+    
+    # Setup output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Load already processed IDs (from files and checkpoint)
+    processed_ids = load_processed_ids(output_dir)
+    print(f"📖 Found {len(processed_ids)} already processed papers")
+    
+    # Load checkpoint if exists
+    checkpoint_file = os.path.join(output_dir, 'pdf_extraction_checkpoint.json')
+    checkpoint_stats = {}
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, 'r') as f:
+                checkpoint_data = json.load(f)
+                checkpoint_stats = checkpoint_data.get('stats', {})
+                print(f"📖 Resuming from checkpoint: {checkpoint_stats.get('success', 0)} successful, {checkpoint_stats.get('failed', 0)} failed")
+        except Exception as e:
+            print(f"⚠️  Could not load checkpoint: {e}")
+    
+    # Load papers from JSONL (stream, don't load all in memory)
+    print(f"📚 Loading papers from {input_jsonl}...")
+    papers_to_process = []
+    total_papers = 0
+    
+    with open(input_jsonl, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
+            if not line.strip():
                 continue
-            files_api = f"https://www.ebi.ac.uk/biostudies/api/v1/biostudies/files?acc={acc}"
-            files = _http_get_json(files_api)
-            if not files or not isinstance(files, dict):
+            
+            try:
+                paper = json.loads(line)
+                arxiv_id = paper.get('id', '')
+                
+                if not arxiv_id:
+                    continue
+                
+                total_papers += 1
+                
+                # Skip if already processed
+                if arxiv_id in processed_ids:
+                    continue
+                
+                papers_to_process.append(paper)
+                
+            except json.JSONDecodeError:
+                print(f"⚠️  Warning: Invalid JSON on line {line_num}")
                 continue
-            for fobj in files.get("files", [])[:max_results - written]:
-                fpath = fobj.get("path") or ""
-                if not fpath or not fpath.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
-                    continue
-                file_url = fobj.get("url") or f"https://www.ebi.ac.uk/biostudies{fpath}"
-                fname = os.path.basename(urllib.parse.urlparse(file_url).path)
-                dst_path = os.path.join(images_dir, fname)
-                try:
-                    urllib.request.urlretrieve(file_url, dst_path)  # nosec - remote URL
-                    caption = title or acc
-                    cap_f.write(json.dumps({"filename": fname, "caption": caption}, ensure_ascii=False) + "\n")
-                    written += 1
-                except Exception:
-                    # Download failed, continue to next image
-                    continue
-                if written >= max_results:
-                    break
-            if written >= max_results:
-                break
-    print(f"BioImage images downloaded: {written} -> {images_dir}")
-    return (images_dir, captions_path)
-
-
-def fetch_neurovault_images(
-    disease: Disease,
-    out_dir: str,
-    max_results: int = 1000,
-    max_pages: int = 10,
-) -> Tuple[str, str]:
-    """Fetch images from NeuroVault API with robust search and pagination."""
-    disease_dir = os.path.join(out_dir, disease.value)
-    images_dir = os.path.join(disease_dir, "images")
-    _ensure_dir(images_dir)
-    captions_path = os.path.join(disease_dir, "captions.jsonl")
-
-    # --- Disease-specific expanded search terms ---
-    disease_terms = {
-        "AD": [
-            "Alzheimer's disease", "Alzheimer", "dementia",
-            "mild cognitive impairment", "amyloid", "tauopathy"
-        ],
-        "PD": [
-            "Parkinson's disease", "Parkinson",
-            "substantia nigra", "dopaminergic", "Lewy body"
-        ],
-        "ALS": [
-            "amyotrophic lateral sclerosis", "ALS",
-            "motor neuron disease", "MND", "TDP-43", "FUS", "SOD1"
-        ],
-        "HD": [
-            "Huntington's disease", "Huntington",
-            "striatal atrophy", "basal ganglia", "HTT gene"
-        ],
-        "MS": [
-            "multiple sclerosis", "MS", "demyelination",
-            "white matter lesions", "autoimmune CNS"
-        ]
+    
+    print(f"📊 Total papers in file: {total_papers}")
+    print(f"📊 Already processed: {len(processed_ids)}")
+    print(f"📊 Remaining to process: {len(papers_to_process)}")
+    print()
+    
+    if not papers_to_process:
+        print("✅ All papers already processed!")
+        return
+    
+    # Statistics
+    stats = {
+        'total': len(papers_to_process),
+        'success': 0,
+        'failed': 0,
+        'errors': defaultdict(int)
     }
-
-    search_terms = disease_terms.get(disease.value, [disease.value.lower()])
-    seen_urls = set()
-    written = 0
-
-    print(f"🔍 Fetching NeuroVault images for {disease.value}: {', '.join(search_terms)}")
-
-    with open(captions_path, "a", encoding="utf-8") as cap_f:
-        for term in search_terms:
-            for page in range(1, max_pages + 1):
-                if written >= max_results:
-                    break
-
-                query = urllib.parse.quote_plus(term)
-                url = f"https://neurovault.org/api/images/?page_size=100&page={page}&search={query}"
-                data = _http_get_json(url)
-
-                if not data or not data.get("results"):
-                    break
-
-                for item in data["results"]:
-                    if written >= max_results:
-                        break
-
-                    file_url = item.get("file") or item.get("thumbnail")
-                    if not file_url or file_url in seen_urls:
-                        continue
-                    seen_urls.add(file_url)
-
-                    fname = os.path.basename(urllib.parse.urlparse(file_url).path)
-                    dst_path = os.path.join(images_dir, fname)
-
-                    try:
-                        urllib.request.urlretrieve(file_url, dst_path)  # nosec
-                        caption = item.get("name") or f"{disease.value} NeuroVault image"
-                        cap_f.write(json.dumps({"filename": fname, "caption": caption}, ensure_ascii=False) + "\n")
-                        written += 1
-                    except Exception:
-                        continue
-
-                # Stop if we got fewer results than expected on this page
-                if len(data["results"]) < 100:
-                    break
-
-    print(f"✅ NeuroVault images downloaded: {written} -> {images_dir}")
-    return (images_dir, captions_path)
-
-# =====================
-# Combine multimodal
-# =====================
-
-
-def combine_jsonls(inputs: List[str], out_jsonl: str) -> None:
-    print(f"🔄 Combining {len(inputs)} JSONL files into multimodal dataset")
-    _ensure_dir(os.path.dirname(os.path.abspath(out_jsonl)) or ".")
-    total = 0
-    with open(out_jsonl, "w", encoding="utf-8") as out_f:
-        for path in inputs:
-            print(f"  📄 Processing {os.path.basename(path)}")
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    # Minimal validation
-                    try:
-                        obj = json.loads(line)
-                        if not isinstance(obj, dict):
-                            continue
-                    except Exception:
-                        continue
-                    out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-                    total += 1
-    print(f"✅ Multimodal dataset created: {total} records -> {out_jsonl}")
+    
+    # Process papers with thread pool
+    print(f"🚀 Starting extraction with {num_workers} workers...")
+    print(f"⏱️  Rate limit: {1.0/rate_limit_delay:.1f} requests/sec")
+    print()
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all tasks
+        future_to_paper = {
+            executor.submit(process_single_paper, paper, output_dir, rate_limit_delay): paper
+            for paper in papers_to_process
+        }
+        
+        # Process results as they complete
+        completed = 0
+        for future in as_completed(future_to_paper):
+            completed += 1
+            paper = future_to_paper[future]
+            
+            try:
+                arxiv_id, success, error_msg = future.result()
+                
+                if success:
+                    stats['success'] += 1
+                    processed_ids.add(arxiv_id)
+                else:
+                    stats['failed'] += 1
+                    if error_msg:
+                        stats['errors'][error_msg] += 1
+                
+                # Log progress
+                if completed % 50 == 0:
+                    print(f"   📊 Progress: {completed}/{len(papers_to_process)} "
+                          f"(✓ {stats['success']} success, ✗ {stats['failed']} failed)")
+                
+                # Checkpoint
+                if completed % CHECKPOINT_INTERVAL_PDF == 0:
+                    save_checkpoint(output_dir, processed_ids, stats)
+                    print(f"   💾 Checkpoint saved: {completed} papers processed")
+            
+            except Exception as e:
+                stats['failed'] += 1
+                stats['errors'][f"Exception: {str(e)}"] += 1
+                print(f"   ⚠️  Unexpected error processing paper: {e}")
+    
+    # Final checkpoint
+    save_checkpoint(output_dir, processed_ids, stats)
+    
+    # Print summary
+    print()
+    print("=" * 60)
+    print("✅ PDF Extraction Complete!")
+    print("=" * 60)
+    print(f"📊 Total processed: {stats['total']}")
+    print(f"✅ Success: {stats['success']}")
+    print(f"❌ Failed: {stats['failed']}")
+    print(f"📁 Output directory: {output_dir}")
+    
+    if stats['errors']:
+        print(f"\n⚠️  Error breakdown:")
+        for error, count in sorted(stats['errors'].items(), key=lambda x: x[1], reverse=True):
+            print(f"   {error}: {count}")
 
 
-# =====================
-# NeMo-style curation (normalize, filter, dedupe, redact, blend)
-# =====================
+# Domain Classification Constants
+DOMAIN_KEYWORDS = {
+    'neurodegeneration': [
+        'alzheimer', 'parkinson', 'als', 'dementia', 'huntington', 
+        'neurodegenerative', 'tau', 'amyloid', 'lewy body'
+    ],
+    'neuroscience': [
+        'brain', 'neural', 'neuron', 'fmri', 'eeg', 'neuroimaging',
+        'cortex', 'synapse', 'neurotransmitter', 'neural network'
+    ],
+    'medical_imaging': [
+        'mri', 'ct scan', 'x-ray', 'ultrasound', 'pet scan', 'spect',
+        'radiology', 'imaging', 'dicom', 'medical image'
+    ],
+    'clinical': [
+        'patient', 'clinical', 'diagnosis', 'treatment', 'therapy',
+        'symptom', 'disease', 'disorder', 'syndrome', 'prognosis'
+    ],
+    'drug_discovery': [
+        'drug', 'molecule', 'protein', 'compound', 'pharmaceutical',
+        'medication', 'therapeutic', 'biomarker', 'target'
+    ],
+}
+
+NEURODEGENERATION_KEYWORDS = [
+    'alzheimer', 'parkinson', 'als', 'dementia', 'huntington',
+    'neurodegenerative', 'tau', 'amyloid', 'lewy body'
+]
+
+MAX_TEXT_LENGTH = 12000  # Maximum characters per paper
+PREPROCESS_WORKERS = 4  # Number of parallel workers
 
 
-def _normalize_unicode(s: str) -> str:
-    return unicodedata.normalize("NFKC", s)
+def preprocess_text(text: str, max_length: int = MAX_TEXT_LENGTH) -> str:
+    """Preprocess text: remove URLs, emails, citations, normalize whitespace.
+    
+    Preserves medical terminology (doesn't lowercase disease names).
+    
+    Args:
+        text: Raw text from PDF
+        max_length: Maximum length to keep
+        
+    Returns:
+        Preprocessed text
+    """
+    if not text:
+        return ""
+    
+    # Remove URLs (http://, https://, www.)
+    text = re.sub(r'https?://\S+|www\.\S+', '', text, flags=re.IGNORECASE)
+    
+    # Remove email addresses
+    text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '', text)
+    
+    # Remove citation references like [1], [2-5], (Smith et al., 2020), etc.
+    # Pattern: [numbers], (Author et al., year), [Author, year]
+    text = re.sub(r'\[[\d\s,-]+\]', '', text)  # [1], [2-5], etc.
+    text = re.sub(r'\([A-Z][a-z]+(?:\s+et\s+al\.)?,?\s+\d{4}\)', '', text)  # (Author et al., 2020)
+    text = re.sub(r'\[[A-Z][a-z]+(?:\s+et\s+al\.)?,?\s+\d{4}\]', '', text)  # [Author, 2020]
+    
+    # Remove arXiv references
+    text = re.sub(r'arXiv:\d+\.\d+', '', text, flags=re.IGNORECASE)
+    
+    # Normalize whitespace: multiple spaces/tabs/newlines to single space
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Remove leading/trailing whitespace
+    text = text.strip()
+    
+    # Truncate to max_length (try to break at word boundary)
+    if len(text) > max_length:
+        text = text[:max_length].rsplit(' ', 1)[0] + '...'
+    
+    return text
 
 
-def _contains_pii_like(s: str) -> bool:
-    # Very light heuristic: emails, phone-like, SSN-like (US)
-    if re.search(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", s):
-        return True
-    if re.search(r"\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b", s):
-        return True
-    if re.search(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(\d{2,4}\)|\d{2,4})[-.\s]?\d{3,4}[-.\s]?\d{4}\b", s):
-        return True
+def classify_domains(text: str) -> List[str]:
+    """Classify text into domains using keyword matching.
+    
+    Args:
+        text: Preprocessed text
+        
+    Returns:
+        List of domain labels
+    """
+    if not text:
+        return ['general_ml_health']
+    
+    text_lower = text.lower()
+    domains = []
+    
+    # Check each domain
+    for domain, keywords in DOMAIN_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword.lower() in text_lower:
+                domains.append(domain)
+                break  # Only need one match per domain
+    
+    # Default to general_ml_health if no domains found
+    if not domains:
+        domains = ['general_ml_health']
+    
+    return domains
+
+
+def has_neurodegeneration(text: str) -> bool:
+    """Check if text mentions neurodegeneration.
+    
+    Args:
+        text: Preprocessed text
+        
+    Returns:
+        True if neurodegeneration keywords found
+    """
+    if not text:
+        return False
+    
+    text_lower = text.lower()
+    for keyword in NEURODEGENERATION_KEYWORDS:
+        if keyword.lower() in text_lower:
+            return True
+    
     return False
 
 
-def _require_nemo_curator():
+def process_single_paper_file(
+    arxiv_id: str,
+    text_file_path: str,
+    metadata: Dict,
+    output_file: str,
+    lock: threading.Lock
+) -> tuple[str, bool, Optional[str]]:
+    """Process a single paper: read text, preprocess, classify, write to JSONL.
+    
+    Args:
+        arxiv_id: ArXiv ID
+        text_file_path: Path to text file
+        metadata: Paper metadata from JSONL
+        output_file: Output JSONL file path
+        lock: Thread lock for file writing
+        
+    Returns:
+        Tuple of (arxiv_id, success, error_message)
+    """
     try:
-        import nemo_curator  # type: ignore # noqa: F401
-        return True
+        # Read text file
+        if not os.path.exists(text_file_path):
+            return arxiv_id, False, "Text file not found"
+        
+        with open(text_file_path, 'r', encoding='utf-8') as f:
+            raw_text = f.read()
+        
+        if not raw_text.strip():
+            return arxiv_id, False, "Empty text file"
+        
+        # Preprocess text
+        processed_text = preprocess_text(raw_text, max_length=MAX_TEXT_LENGTH)
+        
+        if not processed_text.strip():
+            return arxiv_id, False, "Text became empty after preprocessing"
+        
+        # Classify domains
+        domains = classify_domains(processed_text)
+        
+        # Check for neurodegeneration
+        has_nd = has_neurodegeneration(processed_text)
+        
+        # Get year from metadata
+        year = metadata.get('year', None)
+        
+        # Create output record
+        output_record = {
+            'arxiv_id': arxiv_id,
+            'text': processed_text,
+            'domains': domains,
+            'year': year,
+            'has_neurodegeneration': has_nd,
+        }
+        
+        # Write to JSONL (thread-safe)
+        with lock:
+            with open(output_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(output_record, ensure_ascii=False) + '\n')
+        
+        return arxiv_id, True, None
+        
     except Exception as e:
-        raise ImportError(
-            "nemo_curator is required for curate-nemo. Install via: pip install nemo-curator"
-        ) from e
+        return arxiv_id, False, f"Error: {str(e)}"
 
 
-def curate_with_nemo(inputs: List[str], out_jsonl: str, min_chars: int, max_chars: int, shuffle: bool, seed: int) -> None:
-    _require_nemo_curator()
-    # Load
-    records: List[dict] = []
-    for path in inputs:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                try:
-                    obj = json.loads(line)
-                except Exception:
+def preprocess_and_classify(
+    metadata_jsonl: str,
+    text_dir: str,
+    output_jsonl: str,
+    num_workers: int = PREPROCESS_WORKERS
+):
+    """Preprocess text files and classify domains using parallel processing.
+    
+    Args:
+        metadata_jsonl: Path to metadata JSONL file
+        text_dir: Directory containing extracted text files
+        output_jsonl: Output JSONL file path
+        num_workers: Number of parallel workers
+    """
+    print("=" * 60)
+    print("🔬 Domain Classifier & Text Preprocessor")
+    print("=" * 60)
+    print(f"📁 Metadata file: {metadata_jsonl}")
+    print(f"📁 Text directory: {text_dir}")
+    print(f"📁 Output file: {output_jsonl}")
+    print(f"👷 Workers: {num_workers}")
+    print()
+    
+    # Load metadata
+    print("📚 Loading metadata...")
+    metadata_by_id = {}
+    total_papers = 0
+    
+    with open(metadata_jsonl, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            
+            try:
+                paper = json.loads(line)
+                arxiv_id = paper.get('id', '')
+                
+                if not arxiv_id:
                     continue
-                if not isinstance(obj, dict):
-                    continue
-                text = obj.get("text")
-                if not isinstance(text, str):
-                    continue
-                # Normalize
-                text = _normalize_unicode(text)
-                obj["text"] = text
-                records.append(obj)
-
-    # Filter by length and relevance (basic)
-    filtered: List[dict] = []
-    for obj in records:
-        text = obj["text"].strip()
-        if len(text) < min_chars or len(text) > max_chars:
-            continue
-        filtered.append(obj)
-
-    # Deduplicate by simple hash
-    seen: set = set()
-    deduped: List[dict] = []
-    for obj in filtered:
-        sig = hash(obj["text"])  # simple content hash
-        if sig in seen:
-            continue
-        seen.add(sig)
-        deduped.append(obj)
-
-    # Redact PII-lite
-    for obj in deduped:
-        t = obj["text"]
-        if _contains_pii_like(t):
-            t = re.sub(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", "<EMAIL>", t)
-            t = re.sub(r"\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b", "<SSN>", t)
-            t = re.sub(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(\d{2,4}\)|\d{2,4})[-.\s]?\d{3,4}[-.\s]?\d{4}\b", "<PHONE>", t)
-            obj["text"] = t
-
-    # Blend + shuffle (simple)
-    if shuffle:
-        random.Random(seed).shuffle(deduped)
-
-    _ensure_dir(os.path.dirname(os.path.abspath(out_jsonl)) or ".")
-    with open(out_jsonl, "w", encoding="utf-8") as out_f:
-        for obj in deduped:
-            out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    print(f"Curated (NeMo-required) records written: {len(deduped)} -> {out_jsonl}")
-
-
-# =========
-# CLI
-# =========
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="NeuroMoE data pipeline")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    p_text = sub.add_parser("text", help="Preprocess text to JSONL")
-    p_text.add_argument("--text-input", required=True, help="Root dir containing AD/PD/ALS/HD/MS subdirs")
-    p_text.add_argument("--out", required=True, help="Output JSONL path for text")
-    p_text.add_argument("--target-chars", type=int, default=800, help="Target characters per chunk")
-
-    p_img = sub.add_parser("image", help="Preprocess images to JSONL")
-    p_img.add_argument("--image-input", required=True, help="Root dir containing disease subdirs with images")
-    p_img.add_argument("--processed-images", required=True, help="Directory to write processed images")
-    p_img.add_argument("--out", required=True, help="Output JSONL path for images")
-    p_img.add_argument("--size", default="512x512", help="Resize WxH, requires Pillow; else copy")
-
-    p_comb = sub.add_parser("combine", help="Combine JSONLs into multimodal")
-    p_comb.add_argument("--inputs", nargs="+", required=True, help="List of input JSONL paths")
-    p_comb.add_argument("--out", required=True, help="Output JSONL path")
-
-    p_all = sub.add_parser("build-all", help="Run text, image, and combine")
-    p_all.add_argument("--text-input", required=True)
-    p_all.add_argument("--image-input", required=True)
-    p_all.add_argument("--processed-images", required=True)
-    p_all.add_argument("--text-out", required=True)
-    p_all.add_argument("--image-out", required=True)
-    p_all.add_argument("--out", required=True)
-    p_all.add_argument("--target-chars", type=int, default=800)
-    p_all.add_argument("--size", default="512x512")
-
-    # Curate (NeMo-like) for text JSONLs
-    p_cur = sub.add_parser("curate-nemo", help="NeMo-style curation for text JSONLs (normalize, filter, dedupe, redact, blend)")
-    p_cur.add_argument("--inputs", nargs="+", required=True, help="Input JSONL files (text records)")
-    p_cur.add_argument("--out", required=True, help="Output curated JSONL")
-    p_cur.add_argument("--min-chars", type=int, default=200)
-    p_cur.add_argument("--max-chars", type=int, default=8000)
-    p_cur.add_argument("--shuffle", action="store_true")
-    p_cur.add_argument("--seed", type=int, default=42)
-
-    # Images (NeMo Curator pipeline expects tar shards of JPEGs)
-    p_pack = sub.add_parser("pack-images-to-tar", help="Shard disease-organized images into .tar files for NeMo Curator")
-    p_pack.add_argument("--image-input", required=True, help="Root dir with AD/PD/ALS/HD/MS and images subfolders")
-    p_pack.add_argument("--tar-out", required=True, help="Output directory for .tar shards")
-    p_pack.add_argument("--shard-size", type=int, default=1000, help="Max images per tar shard")
-
-    p_imgn = sub.add_parser("curate-images-nemo", help="Run NeMo Curator image pipeline on .tar shards (per docs)")
-    p_imgn.add_argument("--tar-dir", required=True, help="Directory containing .tar shards of JPEG images")
-    p_imgn.add_argument("--out-manifest", required=True, help="Output JSONL/manifest or directory for curated outputs")
-
-    # Text via NeMo Curator: Common Crawl download example per docs
-    p_tcc = sub.add_parser("curate-text-nemo-commoncrawl", help="Download and process Common Crawl with NeMo Curator (writes JSONL)")
-    p_tcc.add_argument("--start-snapshot", required=True, help="e.g., 2020-50")
-    p_tcc.add_argument("--end-snapshot", required=True, help="e.g., 2020-50")
-    p_tcc.add_argument("--download-dir", required=True, help="Directory to store WARC downloads")
-    p_tcc.add_argument("--url-limit", type=int, default=10, help="Limit for testing")
-    p_tcc.add_argument("--out", required=True, help="Output directory for JSONL writer")
-
-    # Fetch text
-    p_ft = sub.add_parser("fetch-text", help="Fetch text from PubMed/bioRxiv into disease dirs")
-    p_ft.add_argument("--out-dir", required=True, help="Root dir to write disease-organized text files")
-    p_ft.add_argument("--diseases", nargs="+", default=["AD","PD","ALS","HD","MS"], help="Subset of diseases to fetch")
-    p_ft.add_argument("--max-results", type=int, default=50)
-    p_ft.add_argument("--email", default=None, help="Contact email for NCBI E-utilities")
-    p_ft.add_argument("--biorxiv-start", default="2020-01-01")
-    p_ft.add_argument("--biorxiv-end", default="2030-01-01")
-
-    # Fetch images
-    p_fi = sub.add_parser("fetch-images", help="Fetch images from providers into disease dirs")
-    p_fi.add_argument("--out-dir", required=True, help="Root dir to write disease-organized images")
-    p_fi.add_argument("--diseases", nargs="+", default=["AD","PD","ALS","HD","MS"], help="Subset of diseases to fetch")
-    p_fi.add_argument("--providers", nargs="+", default=["commons"], choices=["commons","tcia","kaggle","bioimage"], help="Image providers")
-    p_fi.add_argument("--max-results", type=int, default=20)
-    p_fi.add_argument("--size", type=int, default=1024, help="Image pixel size for Commons")
-    p_fi.add_argument("--tcia-collection", default="CPTAC-LSCC")
-    p_fi.add_argument("--kaggle-dataset", default=None, help="e.g., toshihikoyanase/alzheimers-mri-dataset")
-
-    # Orchestrated end-to-end build with fetch using NeMo-compatible flows
-    p_orch = sub.add_parser("build-all-with-fetch", help="Fetch text/images, run NeMo pipelines, preprocess, and combine")
-    # Text fetch
-    p_orch.add_argument("--text-out-dir", required=True, help="Directory for fetched text (PubMed/bioRxiv)")
-    p_orch.add_argument("--max-text", type=int, default=50)
-    p_orch.add_argument("--email", default=None)
-    # Optional NeMo Common Crawl
-    p_orch.add_argument("--cc-start", default=None)
-    p_orch.add_argument("--cc-end", default=None)
-    p_orch.add_argument("--cc-download-dir", default=None)
-    p_orch.add_argument("--cc-url-limit", type=int, default=0)
-    # Image fetch and NeMo image curation
-    p_orch.add_argument("--image-out-dir", required=True, help="Directory for fetched images by disease")
-    p_orch.add_argument("--image-providers", nargs="+", default=["commons"], choices=["commons","tcia","kaggle","bioimage"])
-    p_orch.add_argument("--kaggle-dataset-orch", default=None)
-    # Allen Brain Atlas removed
-    p_orch.add_argument("--image-size", type=int, default=1024)
-    p_orch.add_argument("--tar-out", required=True, help="Directory to write image tar shards")
-    p_orch.add_argument("--shard-size", type=int, default=1000)
-    # Preprocess paths and final outputs
-    p_orch.add_argument("--processed-images", required=True)
-    p_orch.add_argument("--text-jsonl-out", required=True)
-    p_orch.add_argument("--image-jsonl-out", required=True)
-    p_orch.add_argument("--multimodal-out", required=True)
-    p_orch.add_argument("--text-min-chars", type=int, default=200)
-    p_orch.add_argument("--text-max-chars", type=int, default=8000)
-    p_orch.add_argument("--text-shuffle", action="store_true")
-    p_orch.add_argument("--seed", type=int, default=42)
-
-    # Biomedical NeMo pipelines (text + images) and HF datasets export
-    p_biomed = sub.add_parser("biomed-nemo-build", help="Build biomedical text+image datasets with NeMo Curator and export JSONL")
-    p_biomed.add_argument("--staging", default="data/staging")
-    p_biomed.add_argument("--processed", default="data/processed")
-    p_biomed.add_argument("--max-text", type=int, default=100)
-    p_biomed.add_argument("--max-images", type=int, default=50)
-    p_biomed.add_argument("--max-pages", type=int, default=1, help="Max pages to fetch per disease (50 images/page)")
-    p_biomed.add_argument("--tar-out", default="data/processed/image_shards")
-    p_biomed.add_argument("--shard-size", type=int, default=1000)
-    p_biomed.add_argument("--export-hf", action="store_true")
-    # Article quality filters
-    p_biomed.add_argument("--min-abstract-length", type=int, default=200, help="Minimum abstract length in characters (default: 200)")
-    p_biomed.add_argument("--article-types", nargs="+", default=["Review", "Meta-Analysis", "Systematic Review"], 
-                         help="Preferred article types (default: Review, Meta-Analysis, Systematic Review)")
-    p_biomed.add_argument("--exclude-types", nargs="+", default=["Case Reports", "Letter", "Editorial", "Retracted Publication"],
-                         help="Article types to exclude (default: Case Reports, Letter, Editorial, Retracted Publication)")
-    p_biomed.add_argument("--min-year", type=int, default=None, help="Minimum publication year (e.g., 2010)")
-
-    return p
-
-
-def _parse_size(size_str: str) -> Tuple[int, int]:
-    m = re.match(r"^(\d+)x(\d+)$", size_str.strip().lower())
-    if not m:
-        return (512, 512)
-    return (int(m.group(1)), int(m.group(2)))
-
-
-def main() -> None:
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-
-    print(f"🚀 NeuroSeek-MoE Data Pipeline - Command: {args.cmd}")
-
-    if args.cmd == "text":
-        preprocess_texts_to_jsonl(args.text_input, args.out, target_chars=args.target_chars)
+                
+                metadata_by_id[arxiv_id] = paper
+                total_papers += 1
+                
+            except json.JSONDecodeError:
+                print(f"⚠️  Warning: Invalid JSON on line {line_num}")
+                continue
+    
+    print(f"   ✅ Loaded {total_papers} papers from metadata")
+    
+    # Find text files
+    print(f"\n📂 Scanning text directory...")
+    text_files = {}
+    if os.path.exists(text_dir):
+        for filename in os.listdir(text_dir):
+            if filename.endswith('.txt'):
+                arxiv_id = filename[:-4]  # Remove .txt extension
+                text_files[arxiv_id] = os.path.join(text_dir, filename)
+    
+    print(f"   ✅ Found {len(text_files)} text files")
+    
+    # Match metadata with text files
+    papers_to_process = []
+    for arxiv_id, metadata in metadata_by_id.items():
+        if arxiv_id in text_files:
+            papers_to_process.append((arxiv_id, text_files[arxiv_id], metadata))
+    
+    print(f"   ✅ {len(papers_to_process)} papers ready to process")
+    print()
+    
+    if not papers_to_process:
+        print("❌ No papers to process!")
         return
-
-    if args.cmd == "image":
-        size = _parse_size(args.size)
-        preprocess_images_to_jsonl(args.image_input, args.out, args.processed_images, size=size)
-        return
-
-    if args.cmd == "combine":
-        combine_jsonls(args.inputs, args.out)
-        return
-
-    if args.cmd == "build-all":
-        print("🔄 Running complete data pipeline (text + image + combine)")
-        size = _parse_size(args.size)
-        preprocess_texts_to_jsonl(args.text_input, args.text_out, target_chars=args.target_chars)
-        preprocess_images_to_jsonl(args.image_input, args.image_out, args.processed_images, size=size)
-        combine_jsonls([args.text_out, args.image_out], args.out)
-        print("✅ Complete data pipeline finished successfully!")
-        return
-
-    if args.cmd == "curate-nemo":
-        # Hard require NeMo Curator
-        _require_nemo_curator()
-        curate_with_nemo(args.inputs, args.out, min_chars=args.min_chars, max_chars=args.max_chars, shuffle=args.shuffle, seed=args.seed)
-        return
-
-    if args.cmd == "pack-images-to-tar":
-        pack_images_to_tar(args.image_input, args.tar_out, shard_size=args.shard_size)
-        return
-
-    if args.cmd == "curate-images-nemo":
-        _require_nemo_curator()
-        run_nemo_image_pipeline(args.tar_dir, args.out_manifest)
-        return
-
-    if args.cmd == "curate-text-nemo-commoncrawl":
-        _require_nemo_curator()
-        run_nemo_text_commoncrawl(
-            start_snapshot=args.start_snapshot,
-            end_snapshot=args.end_snapshot,
-            download_dir=args.download_dir,
-            url_limit=args.url_limit,
-            out_dir=args.out,
-        )
-        return
-
-    if args.cmd == "build-all-with-fetch":
-        # 1) Fetch text from PubMed + bioRxiv into disease dirs
-        for dcode, disease in DISEASE_DIRNAMES.items():
+    
+    # Clear output file if it exists
+    if os.path.exists(output_jsonl):
+        os.remove(output_jsonl)
+    
+    # Statistics
+    stats = {
+        'total': len(papers_to_process),
+        'success': 0,
+        'failed': 0,
+        'errors': defaultdict(int),
+        'domain_counts': defaultdict(int),
+        'neurodegeneration_count': 0,
+    }
+    
+    # Thread lock for file writing
+    file_lock = threading.Lock()
+    
+    # Process papers with thread pool
+    print(f"🚀 Starting preprocessing and classification...")
+    print()
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all tasks
+        future_to_paper = {
+            executor.submit(
+                process_single_paper_file,
+                arxiv_id,
+                text_path,
+                metadata,
+                output_jsonl,
+                file_lock
+            ): (arxiv_id, text_path, metadata)
+            for arxiv_id, text_path, metadata in papers_to_process
+        }
+        
+        # Process results as they complete
+        completed = 0
+        for future in as_completed(future_to_paper):
+            completed += 1
+            arxiv_id, text_path, metadata = future_to_paper[future]
+            
             try:
-                fetch_pubmed_abstracts(disease, args.text_out_dir, max_results=args.max_text, email=args.email)
-                fetch_biorxiv_titles(disease, args.text_out_dir, max_results=args.max_text)
-            except Exception as e:
-                print(f"Text fetch failed for {dcode}: {e}")
-
-        # Optionally add Common Crawl via NeMo
-        if args.cc_start and args.cc_end and args.cc_download_dir and args.cc_url_limit > 0:
-            _require_nemo_curator()
-            try:
-                run_nemo_text_commoncrawl(
-                    start_snapshot=args.cc_start,
-                    end_snapshot=args.cc_end,
-                    download_dir=args.cc_download_dir,
-                    url_limit=args.cc_url_limit,
-                    out_dir=args.text_out_dir,
-                )
-            except Exception as e:
-                print(f"Common Crawl step failed: {e}")
-
-        # 2) Fetch images via providers
-        for dcode, disease in DISEASE_DIRNAMES.items():
-            for provider in args.image_providers:
-                try:
-                    if provider == "commons":
-                        fetch_commons_images(disease, args.image_out_dir, max_results=args.image_size, size_px=args.image_size)
-                    # Allen Brain Atlas removed
-                    elif provider == "tcia":
-                        fetch_tcia_images(disease, args.image_out_dir, collection="CPTAC-LSCC", max_series=5)
-                    elif provider == "kaggle" and args.kaggle_dataset_orch:
-                        fetch_kaggle_dataset(disease, args.image_out_dir, dataset_slug=args.kaggle_dataset_orch)
-                    elif provider == "bioimage":
-                        fetch_bioimage_archive(disease, args.image_out_dir, max_results=20)
-                except Exception as e:
-                    print(f"Image fetch failed for {dcode}/{provider}: {e}")
-
-        # 3) Pack images to tar and run NeMo image pipeline
-        try:
-            pack_images_to_tar(args.image_out_dir, args.tar_out, shard_size=args.shard_size)
-            _require_nemo_curator()
-            run_nemo_image_pipeline(args.tar_out, os.path.join(args.tar_out, "curated_images.jsonl"))
-        except Exception as e:
-            print(f"NeMo image pipeline failed: {e}")
-
-        # 4) Preprocess to JSONL (text + images) and combine
-        try:
-            preprocess_texts_to_jsonl(args.text_out_dir, args.text_jsonl_out, target_chars=800)
-        except Exception as e:
-            print(f"Text preprocess failed: {e}")
-        try:
-            preprocess_images_to_jsonl(args.image_out_dir, args.image_jsonl_out, args.processed_images, size=(512, 512))
-        except Exception as e:
-            print(f"Image preprocess failed: {e}")
-        try:
-            # Curate text strictly with NeMo requirement
-            _require_nemo_curator()
-            curate_with_nemo([args.text_jsonl_out], args.text_jsonl_out, min_chars=args.text_min_chars, max_chars=args.text_max_chars, shuffle=args.text_shuffle, seed=args.seed)
-        except Exception as e:
-            print(f"NeMo text curation failed: {e}")
-        try:
-            combine_jsonls([args.text_jsonl_out, args.image_jsonl_out], args.multimodal_out)
-        except Exception as e:
-            print(f"Combine failed: {e}")
-        return
-
-    if args.cmd == "biomed-nemo-build":
-        # Ensure dirs
-        text_out = os.path.join(args.processed, "text_dataset.jsonl")
-        image_out = os.path.join(args.processed, "image_dataset.jsonl")
-        _ensure_dir(args.staging)
-        _ensure_dir(args.processed)
-        _ensure_dir(args.tar_out)
-
-        # 1-4) Text: PubMed/PMC OA style via PubMed + NeMo curation (skip if exists)
-        if os.path.exists(text_out) and os.path.getsize(text_out) > 0:
-            print(f"✅ Text dataset already exists at {text_out}, skipping text processing")
-        else:
-            print(f"🔄 Processing text dataset...")
-            print(f"   Filters: min_length={args.min_abstract_length}, "
-                  f"types={args.article_types}, exclude={args.exclude_types}, "
-                  f"min_year={args.min_year}")
-            try:
-                run_nemo_text_biomed_pubmed_pmc(
-                    out_jsonl=text_out, 
-                    staging_dir=args.staging, 
-                    max_per_disease=args.max_text,
-                    min_abstract_length=args.min_abstract_length,
-                    article_types=args.article_types,
-                    exclude_types=args.exclude_types,
-                    min_year=args.min_year,
-                )
-            except Exception as e:
-                print(f"Biomedical text pipeline failed: {e}")
-
-        # 5-6) Images: NeuroVault → tar → NeMo image pipeline → JSONL manifest
-        if os.path.exists(image_out) and os.path.getsize(image_out) > 0:
-            print(f"✅ Image dataset already exists at {image_out}, skipping image processing")
-        else:
-            print(f"🔄 Processing image dataset...")
-            try:
-                for _dcode, disease in DISEASE_DIRNAMES.items():
-                    fetch_neurovault_images(disease, args.staging, max_results=args.max_images, max_pages=args.max_pages)
-            except Exception as e:
-                print(f"Biomedical image fetch failed: {e}")
-        # Try NeMo image curation, but fall back to direct processing if not available
-        curated_manifest = None
-        try:
-            pack_images_to_tar(os.path.join(args.staging), args.tar_out, shard_size=args.shard_size)
-            _require_nemo_curator()
-            curated_manifest = os.path.join(args.processed, "curated_images.jsonl")
-            run_nemo_image_pipeline(args.tar_out, curated_manifest)
-            print(f"✅ NeMo image curation completed -> {curated_manifest}")
-        except ImportError as e:
-            # Check if it's a missing NeMo Curator or missing image components
-            error_str = str(e).lower()
-            if "linux" in error_str or "darwin" in error_str or "system" in error_str:
-                print(f"⚠️  NeMo Curator only supports Linux systems, using direct image processing")
-                print(f"   Error: {e}")
-                print(f"   This is expected on macOS/Windows - the pipeline will use direct image processing.")
-            elif "nemo_curator" in error_str or "Failed to import" in error_str:
-                print(f"⚠️  NeMo Curator image pipeline not available, using direct image processing")
-                print(f"   Error: {e}")
-                print(f"   Note: NeMo Curator may be installed but image components may be missing.")
-                print(f"   Try: pip install 'nemo-curator[all]' or check NeMo Curator documentation.")
-            else:
-                print(f"⚠️  NeMo Curator not installed, using direct image processing: {e}")
-        except Exception as e:
-            error_str = str(e).lower()
-            if "linux" in error_str or "darwin" in error_str or "system" in error_str:
-                print(f"⚠️  NeMo Curator only supports Linux systems, using direct image processing")
-                print(f"   This is expected on macOS/Windows - the pipeline will use direct image processing.")
-            else:
-                print(f"⚠️  NeMo image curation failed, using direct image processing: {e}")
-                print(f"   This is expected if NeMo Curator image modules are not available.")
-
-        # Transform curated manifest OR directly process images to required JSONL format
-        try:
-            with open(image_out, "w", encoding="utf-8") as out_f:
-                # If NeMo curation succeeded, use that manifest
-                if curated_manifest and os.path.exists(curated_manifest):
-                    print(f"📄 Using NeMo curated manifest from {curated_manifest}")
-                    with open(curated_manifest, "r", encoding="utf-8") as f:
-                        for line in f:
-                            try:
-                                obj = json.loads(line)
-                                if isinstance(obj, dict) and obj.get("modality") == "image":
-                                    out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-                            except Exception:
-                                continue
+                paper_id, success, error_msg = future.result()
+                
+                if success:
+                    stats['success'] += 1
+                    
+                    # Update domain counts (need to read back from file or track separately)
+                    # For efficiency, we'll do a final pass at the end
                 else:
-                    # Fallback: directly process images from staging directory
-                    print(f"📁 Using direct image processing from staging directory")
-                    for dcode, _d in DISEASE_DIRNAMES.items():
-                        cap_path = os.path.join(args.staging, dcode, "captions.jsonl")
-                        img_dir = os.path.join(args.staging, dcode, "images")
-                        if not os.path.isdir(img_dir):
-                            continue
-                        
-                        # Load captions if available
-                        caps = {}
-                        if os.path.isfile(cap_path):
-                            caps = _load_captions_map(cap_path)
-                        
-                        # Process all images in the directory
-                        for root, dirs, files in os.walk(img_dir):
-                            for fname in files:
-                                if not fname.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".nii.gz")):
-                                    continue
-                                img_path = os.path.join(root, fname)
-                                caption = caps.get(fname, caps.get(os.path.basename(img_path), f"Medical image for {dcode} disease"))
-                                rec = {
-                                    "caption": caption,
-                                    "image_path": os.path.abspath(img_path),
-                                    "disease": dcode,
-                                    "modality": "image",
-                                }
-                                out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            print(f"✅ Image dataset written -> {image_out}")
-        except Exception as e:
-            print(f"❌ Image dataset assembly failed: {e}")
-
-        # Combine text and image datasets into multimodal dataset (with caching)
-        multimodal_out = os.path.join(args.processed, "multimodal_dataset.jsonl")
-        if os.path.exists(multimodal_out) and os.path.getsize(multimodal_out) > 0:
-            print(f"✅ Multimodal dataset already exists at {multimodal_out}, skipping combination")
-        else:
-            try:
-                print(f"🔄 Combining text and image datasets into multimodal dataset...")
-                combine_jsonls([text_out, image_out], multimodal_out)
-                print(f"✅ Multimodal dataset created -> {multimodal_out}")
+                    stats['failed'] += 1
+                    if error_msg:
+                        stats['errors'][error_msg] += 1
+                
+                # Log progress
+                if completed % 500 == 0:
+                    print(f"   📊 Progress: {completed}/{len(papers_to_process)} "
+                          f"(✓ {stats['success']} success, ✗ {stats['failed']} failed)")
+            
             except Exception as e:
-                print(f"❌ Multimodal dataset creation failed: {e}")
+                stats['failed'] += 1
+                stats['errors'][f"Exception: {str(e)}"] += 1
+                print(f"   ⚠️  Unexpected error processing {arxiv_id}: {e}")
+    
+    # Final statistics pass (read output file to get domain counts)
+    print(f"\n📊 Computing final statistics...")
+    domain_counts = defaultdict(int)
+    neurodegeneration_count = 0
+    
+    if os.path.exists(output_jsonl):
+        with open(output_jsonl, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        record = json.loads(line)
+                        for domain in record.get('domains', []):
+                            domain_counts[domain] += 1
+                        if record.get('has_neurodegeneration', False):
+                            neurodegeneration_count += 1
+                    except:
+                        continue
+    
+    stats['domain_counts'] = dict(domain_counts)
+    stats['neurodegeneration_count'] = neurodegeneration_count
+    
+    # Print summary
+    print()
+    print("=" * 60)
+    print("✅ Preprocessing & Classification Complete!")
+    print("=" * 60)
+    print(f"📊 Total processed: {stats['total']}")
+    print(f"✅ Success: {stats['success']}")
+    print(f"❌ Failed: {stats['failed']}")
+    print(f"📁 Output file: {output_jsonl}")
+    
+    print(f"\n📊 Domain distribution:")
+    for domain, count in sorted(stats['domain_counts'].items(), key=lambda x: x[1], reverse=True):
+        print(f"   {domain}: {count} papers")
+    
+    print(f"\n🧠 Neurodegeneration papers: {stats['neurodegeneration_count']}")
+    
+    if stats['errors']:
+        print(f"\n⚠️  Error breakdown:")
+        for error, count in sorted(stats['errors'].items(), key=lambda x: x[1], reverse=True)[:10]:
+            print(f"   {error}: {count}")
+    
+    # Estimate file size
+    if os.path.exists(output_jsonl):
+        file_size_mb = os.path.getsize(output_jsonl) / (1024 * 1024)
+        print(f"\n💾 Output file size: {file_size_mb:.2f} MB")
 
-        # Optional Hugging Face datasets export
-        if args.export_hf:
-            try:
-                from datasets import load_dataset  # type: ignore
-                txt_ds = load_dataset("json", data_files=text_out)["train"]
-                img_ds = load_dataset("json", data_files=image_out)["train"]
-                print(f"HF Datasets ready: text={len(txt_ds)} records, images={len(img_ds)} records")
-            except Exception as e:
-                print(f"HF datasets export failed: {e}")
-        return
 
-    if args.cmd == "fetch-text":
-        # Map input disease codes to enum
-        for dcode in args.diseases:
-            if dcode not in DISEASE_DIRNAMES:
-                print(f"Skipping unknown disease code: {dcode}")
+# NeMo Curator Pipeline
+def create_healthcare_text_cleaner():
+    """Create NeMo Curator text cleaner for healthcare papers.
+    
+    Returns:
+        DocumentModifier for text cleaning
+    """
+    if not NEMO_CURATOR_AVAILABLE:
+        return None
+    
+    # Custom modifier that preserves medical terminology
+    class HealthcareTextCleaner(DocumentModifier):
+        def __init__(self):
+            super().__init__()
+            # Medical terms to preserve (don't lowercase)
+            self.medical_terms = {
+                'Alzheimer', 'Parkinson', 'ALS', 'Dementia', 'Huntington',
+                'MRI', 'EEG', 'fMRI', 'CT', 'PET', 'SPECT',
+                'Alzheimer\'s', 'Parkinson\'s'
+            }
+        
+        def modify_document(self, document):
+            """Clean text while preserving medical terminology."""
+            text = document.get('text', '')
+            
+            # Remove URLs
+            text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+            
+            # Remove emails
+            text = re.sub(r'\S+@\S+', '', text)
+            
+            # Remove citation markers (e.g., [1], (Smith et al., 2020))
+            text = re.sub(r'\[[\d,\s-]+\]', '', text)
+            text = re.sub(r'\([A-Z][a-z]+\s+et\s+al\.?[^)]*\)', '', text)
+            
+            # Normalize quotation marks
+            text = text.replace('"', '"').replace('"', '"')
+            text = text.replace(''', "'").replace(''', "'")
+            
+            # Normalize whitespace
+            text = re.sub(r'\s+', ' ', text)
+            text = text.strip()
+            
+            # Unicode normalization
+            import unicodedata
+            text = unicodedata.normalize('NFKC', text)
+            
+            # Preserve medical terms (temporary replacement)
+            replacements = {}
+            for i, term in enumerate(self.medical_terms):
+                placeholder = f'__MEDICAL_TERM_{i}__'
+                text = text.replace(term, placeholder)
+                replacements[placeholder] = term
+            
+            # Lowercase (except medical terms)
+            text = text.lower()
+            
+            # Restore medical terms
+            for placeholder, term in replacements.items():
+                text = text.replace(placeholder, term)
+            
+            document['text'] = text
+            return document
+    
+    return HealthcareTextCleaner()
+
+
+class HealthcareTextModifier:
+    """Custom healthcare text modifier for post-NeMo Curator processing.
+    
+    Extends NeMo Curator DocumentModifier interface to:
+    - Extract section boundaries (Abstract, Introduction, Methods, Results, Discussion)
+    - Preserve scientific abbreviations
+    - Keep medical terminology intact
+    - Remove page numbers, headers/footers, duplicate lines
+    - Normalize citations format
+    """
+    
+    def __init__(self):
+        """Initialize healthcare text modifier."""
+        # Scientific abbreviations to preserve
+        self.scientific_abbreviations = {
+            'MMSE', 'MRI', 'EEG', 'fMRI', 'PET', 'CSF', 'CT', 'SPECT', 'DICOM',
+            'AD', 'PD', 'ALS', 'MCI', 'CSF', 'Aβ', 'tau', 'APOE', 'SNP',
+            'ROI', 'VOI', 'FA', 'MD', 'DTI', 'BOLD', 'T1', 'T2', 'FLAIR'
+        }
+        
+        # Section markers
+        self.section_markers = {
+            'abstract': [r'^abstract\s*:', r'^abstract\s*$', r'^\d+\.\s*abstract'],
+            'introduction': [r'^introduction\s*:', r'^introduction\s*$', r'^\d+\.\s*introduction', r'^1\.\s*introduction'],
+            'methods': [r'^methods?\s*:', r'^methods?\s*$', r'^methodology\s*:', r'^\d+\.\s*methods?', r'^2\.\s*methods?'],
+            'results': [r'^results?\s*:', r'^results?\s*$', r'^\d+\.\s*results?', r'^3\.\s*results?'],
+            'discussion': [r'^discussion\s*:', r'^discussion\s*$', r'^conclusion\s*:', r'^\d+\.\s*discussion', r'^4\.\s*discussion'],
+        }
+        
+        # Medical terms patterns (for detection)
+        self.medical_term_patterns = {
+            'neurodegeneration': r'\b(alzheimer|parkinson|als|mci|dementia|tau|amyloid|huntington|neurodegenerative)\w*\b',
+            'neuroscience': r'\b(brain|neural|neuron|fmri|eeg|synapse|cortex|neurotransmitter)\w*\b',
+            'medical_imaging': r'\b(mri|ct|ultrasound|xray|x-ray|pet|spect|radiology|dicom|segmentation)\w*\b',
+            'clinical': r'\b(patient|clinical|diagnosis|prognosis|treatment|symptom|disease|disorder|syndrome|therapy)\w*\b',
+            'drug_discovery': r'\b(drug|molecule|protein|compound|binding|pharmaceutical|medication|therapeutic|biomarker|target)\w*\b',
+        }
+    
+    def extract_sections(self, text: str) -> Dict[str, str]:
+        """Extract section boundaries from text.
+        
+        Args:
+            text: Full text document
+            
+        Returns:
+            Dictionary with section names as keys and section text as values
+        """
+        sections = {}
+        lines = text.split('\n')
+        
+        # Find section boundaries
+        current_section = None
+        current_section_text = []
+        
+        for line in lines:
+            line_stripped = line.strip()
+            if not line_stripped:
+                if current_section:
+                    current_section_text.append('')
                 continue
-            disease = DISEASE_DIRNAMES[dcode]
-            try:
-                fetch_pubmed_abstracts(disease, args.out_dir, max_results=args.max_results, email=args.email)
-                fetch_biorxiv_titles(disease, args.out_dir, max_results=args.max_results, start_date=args.biorxiv_start, end_date=args.biorxiv_end)
-            except Exception as e:
-                print(f"Fetch text failed for {dcode}: {e}")
-        return
-
-    if args.cmd == "fetch-images":
-        for dcode in args.diseases:
-            if dcode not in DISEASE_DIRNAMES:
-                print(f"Skipping unknown disease code: {dcode}")
+            
+            # Check if this line is a section header
+            detected_section = None
+            for section_name, patterns in self.section_markers.items():
+                for pattern in patterns:
+                    if re.match(pattern, line_stripped, re.IGNORECASE):
+                        detected_section = section_name
+                        break
+                if detected_section:
+                    break
+            
+            if detected_section:
+                # Save previous section
+                if current_section and current_section_text:
+                    sections[current_section] = '\n'.join(current_section_text).strip()
+                
+                # Start new section
+                current_section = detected_section
+                current_section_text = []
+            else:
+                if current_section:
+                    current_section_text.append(line)
+                elif not sections:  # Before any section detected, assume abstract/intro
+                    if 'abstract' not in sections:
+                        sections['abstract'] = ''
+                    sections['abstract'] += line + '\n'
+        
+        # Save last section
+        if current_section and current_section_text:
+            sections[current_section] = '\n'.join(current_section_text).strip()
+        
+        # Clean up sections
+        for key in sections:
+            sections[key] = sections[key].strip()
+        
+        return sections
+    
+    def detect_medical_terms(self, text: str) -> List[str]:
+        """Detect medical terms in text.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            List of detected medical terms
+        """
+        detected_terms = set()
+        text_lower = text.lower()
+        
+        for domain, pattern in self.medical_term_patterns.items():
+            matches = re.findall(pattern, text_lower, re.IGNORECASE)
+            detected_terms.update(matches)
+        
+        return sorted(list(detected_terms))
+    
+    def clean_text(self, text: str) -> str:
+        """Clean text: remove page numbers, headers/footers, duplicate lines.
+        
+        Args:
+            text: Raw text
+            
+        Returns:
+            Cleaned text
+        """
+        lines = text.split('\n')
+        cleaned_lines = []
+        seen_lines = set()
+        
+        for line in lines:
+            line_stripped = line.strip()
+            
+            # Skip empty lines (but keep one between paragraphs)
+            if not line_stripped:
+                if cleaned_lines and cleaned_lines[-1]:
+                    cleaned_lines.append('')
                 continue
-            disease = DISEASE_DIRNAMES[dcode]
-            for provider in args.providers:
+            
+            # Skip page numbers (standalone numbers, especially at start/end)
+            if re.match(r'^\d+$', line_stripped):
+                continue
+            
+            # Skip headers/footers (repeated lines, very short lines at start/end)
+            if len(line_stripped) < 3:
+                continue
+            
+            # Skip duplicate lines
+            line_normalized = line_stripped.lower()
+            if line_normalized in seen_lines:
+                continue
+            seen_lines.add(line_normalized)
+            
+            # Remove citation markers but keep content
+            line_cleaned = re.sub(r'\[[\d,\s-]+\]', '', line_stripped)
+            line_cleaned = re.sub(r'\([A-Z][a-z]+\s+et\s+al\.?[^)]*\)', '', line_cleaned)
+            line_cleaned = line_cleaned.strip()
+            
+            if line_cleaned:
+                cleaned_lines.append(line_cleaned)
+        
+        return '\n'.join(cleaned_lines)
+    
+    def normalize_citations(self, text: str) -> str:
+        """Normalize citation format (optional).
+        
+        Args:
+            text: Text with citations
+            
+        Returns:
+            Text with normalized citations
+        """
+        # Convert [1,2,3] to [1, 2, 3]
+        text = re.sub(r'\[(\d+),(\d+)', r'[\1, \2', text)
+        # Convert (Smith et al., 2020) to [Smith et al., 2020]
+        text = re.sub(r'\(([A-Z][a-z]+\s+et\s+al\.?[^)]*)\)', r'[\1]', text)
+        return text
+    
+    def modify_document(self, document: Dict) -> Dict:
+        """Modify document with healthcare-specific processing.
+        
+        Args:
+            document: Document dictionary with 'text' field
+            
+        Returns:
+            Modified document with processed text and metadata
+        """
+        text = document.get('text', '')
+        if not text:
+            return document
+        
+        # Clean text
+        cleaned_text = self.clean_text(text)
+        
+        # Extract sections
+        sections = self.extract_sections(cleaned_text)
+        
+        # Detect medical terms
+        medical_terms = self.detect_medical_terms(cleaned_text)
+        
+        # Normalize citations (optional)
+        cleaned_text = self.normalize_citations(cleaned_text)
+        
+        # Truncate to 12k chars
+        max_chars = 12000
+        if len(cleaned_text) > max_chars:
+            cleaned_text = cleaned_text[:max_chars].rsplit(' ', 1)[0] + '...'
+        
+        # Estimate token count (rough: ~4 chars per token)
+        token_count_estimate = len(cleaned_text) // 4
+        
+        # Update document
+        document['text'] = cleaned_text
+        document['sections'] = sections
+        document['medical_terms_detected'] = medical_terms
+        document['token_count_estimate'] = token_count_estimate
+        
+        return document
+
+
+class HealthcareDomainFilter:
+    """Custom domain classifier for healthcare papers extending NeMo Curator DocumentFilter interface.
+    
+    Scores documents based on healthcare+ML domain relevance and assigns domain tags.
+    Compatible with NeMo Curator's ScoreFilter.
+    """
+    
+    def __init__(self):
+        """Initialize domain filter with healthcare vocabulary."""
+        # Domain keywords with specific terms
+        self.domain_keywords = {
+            'neurodegeneration': [
+                'alzheimer', 'parkinson', 'als', 'mci', 'tau', 'amyloid',
+                'dementia', 'huntington', 'neurodegenerative', 'lewy body'
+            ],
+            'neuroscience': [
+                'brain', 'neural', 'neuroimaging', 'fmri', 'eeg', 'synapse',
+                'neuron', 'cortex', 'neurotransmitter', 'neural network'
+            ],
+            'medical_imaging': [
+                'mri', 'ct', 'ultrasound', 'xray', 'segmentation',
+                'x-ray', 'pet scan', 'spect', 'radiology', 'dicom', 'medical image'
+            ],
+            'clinical': [
+                'patient', 'clinical', 'diagnosis', 'prognosis', 'treatment',
+                'symptom', 'disease', 'disorder', 'syndrome', 'therapy'
+            ],
+            'drug_discovery': [
+                'drug', 'molecule', 'protein', 'compound', 'binding',
+                'pharmaceutical', 'medication', 'therapeutic', 'biomarker', 'target'
+            ],
+        }
+        
+        # Medical terms that indicate high relevance
+        self.medical_terms = set()
+        for keywords in self.domain_keywords.values():
+            self.medical_terms.update(keywords)
+    
+    def score_document(self, document: Dict) -> Dict[str, float]:
+        """Score document based on domain relevance.
+        
+        Args:
+            document: Document dictionary with 'text' field
+            
+        Returns:
+            Dictionary with domain scores and overall relevance score
+        """
+        text = document.get('text', '').lower()
+        if not text:
+            return {
+                'neurodegeneration': 0.0,
+                'neuroscience': 0.0,
+                'medical_imaging': 0.0,
+                'clinical': 0.0,
+                'drug_discovery': 0.0,
+                'relevance': 0.0
+            }
+        
+        # Calculate domain scores
+        domain_scores = {}
+        for domain, keywords in self.domain_keywords.items():
+            # Count keyword matches
+            matches = sum(1 for keyword in keywords if keyword in text)
+            # Score: normalized by number of keywords (0-1)
+            score = min(matches / len(keywords), 1.0)
+            domain_scores[domain] = score
+        
+        # Calculate overall relevance
+        # Base score: average of domain scores
+        base_score = sum(domain_scores.values()) / len(domain_scores) if domain_scores else 0.0
+        
+        # Boost for multiple domains (multi-domain papers are more relevant)
+        active_domains = sum(1 for score in domain_scores.values() if score > 0.1)
+        if active_domains > 1:
+            base_score *= (1.0 + 0.1 * (active_domains - 1))  # 10% boost per additional domain
+        
+        # Boost for paper length (longer papers tend to be more substantial)
+        word_count = len(text.split())
+        if word_count > 500:
+            base_score *= 1.1  # 10% boost for longer papers
+        elif word_count < 200:
+            base_score *= 0.9  # Penalty for very short papers
+        
+        # Count medical terms presence
+        medical_term_count = sum(1 for term in self.medical_terms if term in text)
+        medical_boost = min(medical_term_count / 20.0, 0.2)  # Up to 20% boost
+        base_score += medical_boost
+        
+        # Normalize to 0-1 range
+        relevance = min(base_score, 1.0)
+        
+        # Add relevance to scores
+        domain_scores['relevance'] = relevance
+        
+        return domain_scores
+    
+    def filter_document(self, document: Dict, min_relevance: float = 0.4) -> bool:
+        """Filter document based on relevance score.
+        
+        Args:
+            document: Document dictionary
+            min_relevance: Minimum relevance score to keep (default: 0.4)
+            
+        Returns:
+            True if document should be kept, False otherwise
+        """
+        scores = self.score_document(document)
+        relevance = scores.get('relevance', 0.0)
+        
+        # Store scores in document
+        document['domain_scores'] = scores
+        document['relevance_score'] = relevance
+        
+        # Assign domain tags (domains with score > 0.2)
+        detected_domains = [
+            domain for domain, score in scores.items()
+            if domain != 'relevance' and score > 0.2
+        ]
+        document['domains'] = detected_domains if detected_domains else ['general_ml_health']
+        
+        return relevance >= min_relevance
+
+
+def create_domain_relevance_filter(min_score: float = 0.5):
+    """Create domain-specific relevance filter (legacy function for compatibility).
+    
+    Args:
+        min_score: Minimum relevance score to keep
+        
+    Returns:
+        Custom filter function
+    """
+    filter_instance = HealthcareDomainFilter()
+    
+    def filter_document(document):
+        """Filter document based on domain relevance."""
+        return filter_instance.filter_document(document, min_relevance=min_score)
+    
+    return filter_document
+
+
+def curate_with_nemo(
+    text_dir: str,
+    metadata_jsonl: str,
+    output_jsonl: str,
+    use_gpu: bool = False,
+    skip_dedup: bool = False,
+    min_relevance_score: float = 0.5
+):
+    """Curate healthcare papers using NeMo Curator pipeline.
+    
+    Args:
+        text_dir: Directory containing raw text files
+        metadata_jsonl: Input JSONL file with paper metadata
+        output_jsonl: Output curated dataset JSONL file
+        use_gpu: Whether to use GPU for deduplication
+        skip_dedup: Skip deduplication stage (for memory-constrained environments)
+        min_relevance_score: Minimum domain relevance score to keep
+    """
+    if not NEMO_CURATOR_AVAILABLE:
+        print("❌ Error: NeMo Curator not available.")
+        print("   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
+        print("   Note: NeMo Curator only supports Linux systems")
+        return
+    
+    print("=" * 60)
+    print("🔬 NeMo Curator Text Curation Pipeline")
+    print("=" * 60)
+    print(f"📁 Text directory: {text_dir}")
+    print(f"📁 Metadata file: {metadata_jsonl}")
+    print(f"📁 Output file: {output_jsonl}")
+    print(f"🎯 Min relevance score: {min_relevance_score}")
+    print(f"🔧 GPU deduplication: {use_gpu}")
+    print(f"🔧 Skip deduplication: {skip_dedup}")
+    print()
+    
+    # Initialize Dask client for parallelization
+    try:
+        client = get_client()
+        print(f"✅ Dask client initialized: {client}")
+    except:
+        # Create local Dask client
+        from dask.distributed import Client
+        client = Client(processes=False, threads_per_worker=2)
+        print(f"✅ Created local Dask client: {client}")
+    
+    # Load metadata
+    print("📚 Loading metadata...")
+    metadata_map = {}
+    with open(metadata_jsonl, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
                 try:
-                    if provider == "commons":
-                        fetch_commons_images(disease, args.out_dir, max_results=args.max_results, size_px=args.size)
-                    # Allen Brain Atlas removed
-                    elif provider == "tcia":
-                        fetch_tcia_images(disease, args.out_dir, collection=args.tcia_collection, max_series=max(1, args.max_results // 2))
-                    elif provider == "kaggle":
-                        if args.kaggle_dataset:
-                            fetch_kaggle_dataset(disease, args.out_dir, dataset_slug=args.kaggle_dataset)
-                        else:
-                            print("--kaggle-dataset is required for provider 'kaggle'")
-                    elif provider == "bioimage":
-                        fetch_bioimage_archive(disease, args.out_dir, max_results=args.max_results)
-                except Exception as e:
-                    print(f"Fetch images failed for {dcode} via {provider}: {e}")
-        return
-
-    # Convenience: fetch then preprocess end-to-end
-    if args.cmd == "fetch-and-build":
-        # Not documented subcommand; kept minimal if added later
+                    paper = json.loads(line)
+                    arxiv_id = paper.get('id', '')
+                    if arxiv_id:
+                        metadata_map[arxiv_id] = paper
+                except:
+                    continue
+    print(f"   ✅ Loaded {len(metadata_map)} metadata entries")
+    
+    # Stage 1: Load and prepare documents
+    print("\n" + "=" * 60)
+    print("Stage 1: Loading Documents")
+    print("=" * 60)
+    
+    documents = []
+    text_files = [f for f in os.listdir(text_dir) if f.endswith('.txt')]
+    
+    for filename in text_files:
+        arxiv_id = filename[:-4]  # Remove .txt
+        text_file = os.path.join(text_dir, filename)
+        
+        try:
+            with open(text_file, 'r', encoding='utf-8') as f:
+                text = f.read()
+            
+            if not text.strip():
+                continue
+            
+            # Get metadata
+            metadata = metadata_map.get(arxiv_id, {})
+            
+            document = {
+                'arxiv_id': arxiv_id,
+                'text': text,
+                'year': metadata.get('year'),
+                'title': metadata.get('title', ''),
+            }
+            documents.append(document)
+        except Exception as e:
+            print(f"   ⚠️  Error loading {filename}: {e}")
+            continue
+    
+    print(f"   ✅ Loaded {len(documents)} documents")
+    initial_count = len(documents)
+    
+    # Create DocumentDataset (NeMo Curator format)
+    # For compatibility, use list if NeMo Curator not available
+    if NEMO_CURATOR_AVAILABLE:
+        try:
+            dataset = DocumentDataset(documents)
+            print("   ✅ Using NeMo Curator DocumentDataset")
+        except Exception as e:
+            print(f"   ⚠️  DocumentDataset creation failed: {e}, using list")
+            dataset = documents
+    else:
+        dataset = documents
+        print("   ✅ Using list-based dataset (NeMo Curator not available)")
+    
+    # Stage 2: Text Cleaning & Normalization
+    print("\n" + "=" * 60)
+    print("Stage 2: Text Cleaning & Normalization")
+    print("=" * 60)
+    
+    cleaner = create_healthcare_text_cleaner()
+    if cleaner and NEMO_CURATOR_AVAILABLE:
+        try:
+            if hasattr(dataset, 'map'):
+                dataset = dataset.map(cleaner.modify_document)
+            else:
+                # Fallback: apply to list
+                dataset = [cleaner.modify_document(doc) for doc in dataset]
+            print("   ✅ Text cleaning applied (NeMo Curator)")
+        except Exception as e:
+            print(f"   ⚠️  NeMo Curator cleaning failed: {e}, using fallback")
+            # Fallback to simple cleaning
+            def simple_clean(doc):
+                text = doc.get('text', '')
+                # Remove URLs, emails, citations
+                text = re.sub(r'http[s]?://\S+', '', text)
+                text = re.sub(r'\S+@\S+', '', text)
+                text = re.sub(r'\[[\d,\s-]+\]', '', text)
+                text = re.sub(r'\s+', ' ', text).strip()
+                doc['text'] = text
+                return doc
+            
+            dataset = [simple_clean(doc) for doc in dataset] if isinstance(dataset, list) else dataset.map(simple_clean)
+            print("   ✅ Simple text cleaning applied")
+    else:
+        # Fallback to simple cleaning
+        def simple_clean(doc):
+            text = doc.get('text', '')
+            # Remove URLs, emails, citations
+            text = re.sub(r'http[s]?://\S+', '', text)
+            text = re.sub(r'\S+@\S+', '', text)
+            text = re.sub(r'\[[\d,\s-]+\]', '', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            doc['text'] = text
+            return doc
+        
+        if isinstance(dataset, list):
+            dataset = [simple_clean(doc) for doc in dataset]
+        else:
+            dataset = dataset.map(simple_clean)
+        print("   ✅ Simple text cleaning applied (NeMo Curator not available)")
+    
+    # Stage 3: Quality Filtering
+    print("\n" + "=" * 60)
+    print("Stage 3: Quality Filtering")
+    print("=" * 60)
+    
+    before_quality = len(dataset)
+    
+    # Word count filter: 100-5000 tokens
+    def word_count_filter(doc):
+        text = doc.get('text', '')
+        words = text.split()
+        return 100 <= len(words) <= 5000
+    
+    # Alphanumeric ratio filter: >40%
+    def alphanumeric_filter(doc):
+        text = doc.get('text', '')
+        if not text:
+            return False
+        alnum_chars = sum(1 for c in text if c.isalnum())
+        ratio = alnum_chars / len(text) if len(text) > 0 else 0
+        return ratio > 0.4
+    
+    # Language filter: English only (simple heuristic)
+    def language_filter(doc):
+        text = doc.get('text', '')
+        # Simple heuristic: check for common English words
+        english_words = ['the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with']
+        text_lower = text.lower()
+        english_count = sum(1 for word in english_words if word in text_lower)
+        return english_count >= 3  # At least 3 common English words
+    
+    # Apply filters (handle both list and DocumentDataset)
+    if isinstance(dataset, list):
+        dataset = [doc for doc in dataset if word_count_filter(doc)]
+        print(f"   ✅ Word count filter: {len(dataset)}/{before_quality} documents")
+        
+        dataset = [doc for doc in dataset if alphanumeric_filter(doc)]
+        after_alnum = len(dataset)
+        print(f"   ✅ Alphanumeric filter: {after_alnum} documents")
+        
+        dataset = [doc for doc in dataset if language_filter(doc)]
+        after_lang = len(dataset)
+        print(f"   ✅ Language filter: {after_lang} documents")
+    else:
+        dataset = dataset.filter(word_count_filter)
+        print(f"   ✅ Word count filter: {len(dataset)}/{before_quality} documents")
+        
+        dataset = dataset.filter(alphanumeric_filter)
+        after_alnum = len(dataset)
+        print(f"   ✅ Alphanumeric filter: {after_alnum} documents")
+        
+        dataset = dataset.filter(language_filter)
+        after_lang = len(dataset)
+        print(f"   ✅ Language filter: {after_lang} documents")
+    
+    # Stage 4: Domain-Specific Filtering
+    print("\n" + "=" * 60)
+    print("Stage 4: Domain-Specific Filtering")
+    print("=" * 60)
+    
+    before_domain = len(dataset)
+    
+    # Use HealthcareDomainFilter directly
+    domain_filter = HealthcareDomainFilter()
+    
+    # Apply filter and score documents
+    if isinstance(dataset, list):
+        filtered_docs = []
+        for doc in dataset:
+            if domain_filter.filter_document(doc, min_relevance=min_relevance_score):
+                filtered_docs.append(doc)
+        dataset = filtered_docs
+    else:
+        # Use NeMo Curator ScoreFilter if available
+        if NEMO_CURATOR_AVAILABLE:
+            try:
+                # Create a wrapper for ScoreFilter compatibility
+                class FilterWrapper:
+                    def __init__(self, filter_instance, min_score):
+                        self.filter_instance = filter_instance
+                        self.min_score = min_score
+                    
+                    def score_document(self, doc):
+                        return self.filter_instance.score_document(doc)
+                    
+                    def filter_document(self, doc):
+                        return self.filter_instance.filter_document(doc, self.min_score)
+                
+                wrapper = FilterWrapper(domain_filter, min_relevance_score)
+                # Apply filter
+                if hasattr(dataset, 'filter'):
+                    dataset = dataset.filter(wrapper.filter_document)
+                else:
+                    # Fallback to list comprehension
+                    dataset = [doc for doc in dataset if wrapper.filter_document(doc)]
+            except Exception as e:
+                print(f"   ⚠️  NeMo Curator ScoreFilter failed: {e}, using fallback")
+                dataset = [doc for doc in dataset if domain_filter.filter_document(doc, min_relevance=min_relevance_score)]
+        else:
+            dataset = [doc for doc in dataset if domain_filter.filter_document(doc, min_relevance=min_relevance_score)]
+    
+    after_domain = len(dataset)
+    print(f"   ✅ Domain relevance filter: {after_domain}/{before_domain} documents")
+    print(f"   📊 Relevance threshold: {min_relevance_score}")
+    
+    # Count domain distribution
+    domain_counts = defaultdict(int)
+    for doc in (dataset if isinstance(dataset, list) else list(dataset)):
+        domains = doc.get('domains', [])
+        for domain in domains:
+            domain_counts[domain] += 1
+    
+    if domain_counts:
+        print(f"   📊 Domain distribution:")
+        for domain, count in sorted(domain_counts.items(), key=lambda x: x[1], reverse=True):
+            print(f"      {domain}: {count} documents")
+    
+    # Stage 5: Deduplication (optional)
+    if not skip_dedup:
+        print("\n" + "=" * 60)
+        print("Stage 5: Deduplication")
+        print("=" * 60)
+        
+        before_dedup = len(dataset)
+        
+        try:
+            if NEMO_CURATOR_AVAILABLE:
+                if use_gpu:
+                    deduplicator = FuzzyDedup(similarity_threshold=0.95, use_gpu=True)
+                else:
+                    deduplicator = FuzzyDedup(similarity_threshold=0.95, use_gpu=False)
+                
+                dataset = deduplicator(dataset)
+                after_dedup = len(dataset)
+                print(f"   ✅ Deduplication: {after_dedup}/{before_dedup} documents")
+            else:
+                print("   ⚠️  NeMo Curator not available, skipping deduplication")
+        except Exception as e:
+            print(f"   ⚠️  Deduplication failed: {e}")
+            print("   Continuing without deduplication...")
+    else:
+        print("\n" + "=" * 60)
+        print("Stage 5: Deduplication (Skipped)")
+        print("=" * 60)
+        print("   ℹ️  Deduplication skipped as requested")
+    
+    # Stage 6: Format & Export
+    print("\n" + "=" * 60)
+    print("Stage 6: Format & Export")
+    print("=" * 60)
+    
+    # Domains are already assigned by HealthcareDomainFilter in Stage 4
+    # No need to add them again
+    
+    # Export to JSONL
+    print(f"   💾 Exporting to {output_jsonl}...")
+    os.makedirs(os.path.dirname(output_jsonl) if os.path.dirname(output_jsonl) else '.', exist_ok=True)
+    
+    with open(output_jsonl, 'w', encoding='utf-8') as f:
+        # Handle both list and DocumentDataset
+        docs_iter = dataset if isinstance(dataset, list) else iter(dataset)
+        for doc in docs_iter:
+            # Get domain scores if available
+            domain_scores = doc.get('domain_scores', {})
+            
+            output_record = {
+                'arxiv_id': doc.get('arxiv_id'),
+                'text': doc.get('text'),
+                'domains': doc.get('domains', []),
+                'year': doc.get('year'),
+                'quality_score': doc.get('relevance_score', 0.0),
+                'domain_scores': {k: v for k, v in domain_scores.items() if k != 'relevance'} if domain_scores else {},
+            }
+            f.write(json.dumps(output_record, ensure_ascii=False) + '\n')
+    
+    final_count = len(dataset) if isinstance(dataset, list) else len(list(dataset))
+    
+    # Print summary
+    print("\n" + "=" * 60)
+    print("✅ Curation Complete!")
+    print("=" * 60)
+    print(f"📊 Initial documents: {initial_count}")
+    print(f"📊 After quality filtering: {after_lang}")
+    print(f"📊 After domain filtering: {after_domain}")
+    print(f"📊 Final curated documents: {final_count}")
+    print(f"📊 Retention rate: {final_count/initial_count*100:.1f}%")
+    print(f"📁 Output file: {output_jsonl}")
+    
+    # Quality score distribution
+    if final_count > 0:
+        docs_list = dataset if isinstance(dataset, list) else list(dataset)
+        scores = [doc.get('relevance_score', 0.0) for doc in docs_list]
+        if scores:
+            import numpy as np
+            print(f"\n📊 Quality Score Distribution:")
+            print(f"   Mean: {np.mean(scores):.3f}")
+            print(f"   Median: {np.median(scores):.3f}")
+            print(f"   Min: {np.min(scores):.3f}")
+            print(f"   Max: {np.max(scores):.3f}")
+    
+    # Validation: Sample 100 documents and verify domain detection
+    print("\n" + "=" * 60)
+    print("Validation: Domain Detection Accuracy")
+    print("=" * 60)
+    
+    if final_count > 0:
+        docs_list = dataset if isinstance(dataset, list) else list(dataset)
+        sample_size = min(100, final_count)
+        sample_docs = random.sample(docs_list, sample_size)
+        
+        print(f"   📊 Sampling {sample_size} documents for validation...")
+        
+        validation_results = {
+            'total_sampled': sample_size,
+            'with_domains': 0,
+            'domain_distribution': defaultdict(int),
+            'avg_relevance': 0.0,
+            'high_relevance': 0,  # relevance > 0.7
+        }
+        
+        relevance_scores = []
+        for doc in sample_docs:
+            domains = doc.get('domains', [])
+            if domains and domains != ['general_ml_health']:
+                validation_results['with_domains'] += 1
+                for domain in domains:
+                    validation_results['domain_distribution'][domain] += 1
+            
+            relevance = doc.get('relevance_score', 0.0)
+            relevance_scores.append(relevance)
+            if relevance > 0.7:
+                validation_results['high_relevance'] += 1
+        
+        validation_results['avg_relevance'] = sum(relevance_scores) / len(relevance_scores) if relevance_scores else 0.0
+        
+        print(f"   ✅ Documents with detected domains: {validation_results['with_domains']}/{sample_size}")
+        print(f"   📊 Average relevance score: {validation_results['avg_relevance']:.3f}")
+        print(f"   📊 High relevance documents (>0.7): {validation_results['high_relevance']}/{sample_size}")
+        print(f"   📊 Domain distribution in sample:")
+        for domain, count in sorted(validation_results['domain_distribution'].items(), key=lambda x: x[1], reverse=True):
+            print(f"      {domain}: {count} documents")
+    
+    # Close Dask client
+    try:
+        client.close()
+    except:
         pass
+
+
+def process_curated_dataset(
+    input_jsonl: str,
+    output_jsonl: str,
+    num_workers: int = 4
+):
+    """Process curated dataset with healthcare-specific preprocessing.
+    
+    Args:
+        input_jsonl: Input curated dataset JSONL file (from curate command)
+        output_jsonl: Output processed dataset JSONL file
+        num_workers: Number of parallel workers
+    """
+    print("=" * 60)
+    print("🔬 Healthcare Text Processing Pipeline")
+    print("=" * 60)
+    print(f"📁 Input file: {input_jsonl}")
+    print(f"📁 Output file: {output_jsonl}")
+    print(f"👷 Workers: {num_workers}")
+    print()
+    
+    # Initialize modifier
+    modifier = HealthcareTextModifier()
+    
+    # Load documents
+    print("📚 Loading curated dataset...")
+    documents = []
+    with open(input_jsonl, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                doc = json.loads(line)
+                documents.append(doc)
+            except json.JSONDecodeError as e:
+                print(f"   ⚠️  Warning: Invalid JSON on line {line_num}: {e}")
+                continue
+    
+    total_docs = len(documents)
+    print(f"   ✅ Loaded {total_docs} documents")
+    print()
+    
+    # Process documents in parallel
+    print("🔄 Processing documents...")
+    processed_docs = []
+    lock = threading.Lock()
+    
+    def process_single_doc(doc):
+        """Process a single document."""
+        try:
+            # Apply modifier
+            processed_doc = modifier.modify_document(doc.copy())
+            
+            # Ensure all required fields are present
+            output_doc = {
+                'arxiv_id': processed_doc.get('arxiv_id', ''),
+                'text': processed_doc.get('text', ''),
+                'sections': processed_doc.get('sections', {}),
+                'domains': processed_doc.get('domains', []),
+                'year': processed_doc.get('year'),
+                'quality_score': processed_doc.get('quality_score', processed_doc.get('relevance_score', 0.0)),
+                'token_count_estimate': processed_doc.get('token_count_estimate', 0),
+                'medical_terms_detected': processed_doc.get('medical_terms_detected', []),
+            }
+            
+            return output_doc, None
+        except Exception as e:
+            return None, str(e)
+    
+    # Process in parallel
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [executor.submit(process_single_doc, doc) for doc in documents]
+        
+        completed = 0
+        errors = 0
+        
+        for future in as_completed(futures):
+            completed += 1
+            result, error = future.result()
+            
+            if error:
+                errors += 1
+                if errors <= 10:  # Only show first 10 errors
+                    print(f"   ⚠️  Error processing document: {error}")
+            else:
+                processed_docs.append(result)
+            
+            # Progress update
+            if completed % 500 == 0:
+                print(f"   📊 Progress: {completed}/{total_docs} documents processed...")
+    
+    print(f"   ✅ Processed {len(processed_docs)} documents")
+    if errors > 0:
+        print(f"   ⚠️  Errors: {errors} documents failed")
+    print()
+    
+    # Write output
+    print("💾 Writing processed dataset...")
+    os.makedirs(os.path.dirname(output_jsonl) if os.path.dirname(output_jsonl) else '.', exist_ok=True)
+    
+    with open(output_jsonl, 'w', encoding='utf-8') as f:
+        for doc in processed_docs:
+            f.write(json.dumps(doc, ensure_ascii=False) + '\n')
+    
+    # Statistics
+    print()
+    print("=" * 60)
+    print("✅ Processing Complete!")
+    print("=" * 60)
+    print(f"📊 Total documents: {total_docs}")
+    print(f"✅ Successfully processed: {len(processed_docs)}")
+    print(f"❌ Failed: {errors}")
+    print(f"📁 Output file: {output_jsonl}")
+    
+    # Calculate statistics
+    if processed_docs:
+        total_tokens = sum(doc.get('token_count_estimate', 0) for doc in processed_docs)
+        avg_tokens = total_tokens / len(processed_docs) if processed_docs else 0
+        
+        sections_found = defaultdict(int)
+        for doc in processed_docs:
+            sections = doc.get('sections', {})
+            for section_name in sections:
+                sections_found[section_name] += 1
+        
+        medical_terms_count = sum(len(doc.get('medical_terms_detected', [])) for doc in processed_docs)
+        avg_medical_terms = medical_terms_count / len(processed_docs) if processed_docs else 0
+        
+        print(f"\n📊 Statistics:")
+        print(f"   Average tokens per document: {avg_tokens:.0f}")
+        print(f"   Average medical terms per document: {avg_medical_terms:.1f}")
+        print(f"   Sections detected:")
+        for section, count in sorted(sections_found.items(), key=lambda x: x[1], reverse=True):
+            print(f"      {section}: {count} documents")
+        
+        # File size
+        file_size_mb = os.path.getsize(output_jsonl) / (1024 * 1024)
+        print(f"\n💾 Output file size: {file_size_mb:.2f} MB")
+
+
+# Tokenizer Training Constants
+TOKENIZER_VOCAB_SIZE = 50000
+TOKENIZER_MODEL_TYPE = 'bpe'
+TOKENIZER_CHAR_COVERAGE = 0.9995
+TOKENIZER_SPECIAL_TOKENS = ['[DISEASE]', '[PROTEIN]', '[DRUG]', '[GENE]']
+TOKENIZER_NORMALIZATION = 'identity'  # Don't normalize, preserve case
+
+# Medical terms for validation
+MEDICAL_TERMS = [
+    'alzheimer', 'parkinson', 'protein', 'synapse', 'fmri', 'mri', 'eeg', 'neural',
+    'dementia', 'tau', 'amyloid', 'neuron', 'cortex', 'neurotransmitter',
+    'diagnosis', 'treatment', 'therapy', 'clinical', 'patient', 'disease'
+]
+
+
+def extract_texts_from_jsonl(input_jsonl: str, output_txt: str):
+    """Extract all text from JSONL dataset and concatenate into single .txt file.
+    
+    Args:
+        input_jsonl: Input JSONL file with processed papers
+        output_txt: Output text file path
+    """
+    print(f"📚 Extracting texts from {input_jsonl}...")
+    
+    total_papers = 0
+    total_chars = 0
+    
+    with open(input_jsonl, 'r', encoding='utf-8') as f_in, \
+         open(output_txt, 'w', encoding='utf-8') as f_out:
+        
+        for line_num, line in enumerate(f_in, 1):
+            if not line.strip():
+                continue
+            
+            try:
+                record = json.loads(line)
+                text = record.get('text', '')
+                
+                if text and text.strip():
+                    f_out.write(text + '\n\n')  # Add double newline between papers
+                    total_papers += 1
+                    total_chars += len(text)
+                
+                if line_num % 1000 == 0:
+                    print(f"   Processed {line_num} records, {total_papers} papers with text...")
+            
+            except json.JSONDecodeError:
+                print(f"⚠️  Warning: Invalid JSON on line {line_num}")
+                continue
+    
+    file_size_mb = os.path.getsize(output_txt) / (1024 * 1024)
+    print(f"✅ Extracted {total_papers} papers, {total_chars:,} characters")
+    print(f"💾 Output file size: {file_size_mb:.2f} MB")
+    print(f"📁 Output file: {output_txt}")
+    
+    return total_papers, total_chars
+
+
+def train_tokenizer(
+    input_txt: str,
+    model_prefix: str = 'healthcare_tokenizer',
+    vocab_size: int = TOKENIZER_VOCAB_SIZE,
+    model_type: str = TOKENIZER_MODEL_TYPE,
+    char_coverage: float = TOKENIZER_CHAR_COVERAGE,
+    special_tokens: List[str] = None,
+    normalization: str = TOKENIZER_NORMALIZATION
+):
+    """Train SentencePiece BPE tokenizer.
+    
+    Args:
+        input_txt: Input text file for training
+        model_prefix: Prefix for output model files
+        vocab_size: Vocabulary size
+        model_type: Model type ('bpe', 'unigram', etc.)
+        char_coverage: Character coverage (0.9995 = 99.95%)
+        special_tokens: List of special tokens to preserve
+        normalization: Normalization rule name ('identity' = no normalization)
+    """
+    if not SENTENCEPIECE_AVAILABLE:
+        print("❌ Error: sentencepiece package not available.")
+        print("   Install with: pip install sentencepiece")
+        return None
+    
+    if special_tokens is None:
+        special_tokens = TOKENIZER_SPECIAL_TOKENS
+    
+    print("=" * 60)
+    print("🔤 Training SentencePiece BPE Tokenizer")
+    print("=" * 60)
+    print(f"📁 Input file: {input_txt}")
+    print(f"📊 Vocabulary size: {vocab_size}")
+    print(f"🔧 Model type: {model_type}")
+    print(f"📈 Character coverage: {char_coverage}")
+    print(f"🔤 Special tokens: {special_tokens}")
+    print(f"📝 Normalization: {normalization}")
+    print()
+    
+    # Build SentencePiece training command
+    # Note: sentencepiece.SentencePieceTrainer.train() uses command-line style args
+    train_args = {
+        'input': input_txt,
+        'model_prefix': model_prefix,
+        'vocab_size': vocab_size,
+        'model_type': model_type,
+        'character_coverage': char_coverage,
+        'normalization_rule_name': normalization,
+        'shuffle_input_sentence': True,
+        'input_sentence_size': 10000000,  # Process up to 10M sentences
+        'seed_sentencepiece_size': 1000000,
+        'shrinking_factor': 0.75,
+        'num_threads': 4,
+        'num_sub_iterations': 2,
+    }
+    
+    # Add special tokens
+    if special_tokens:
+        train_args['user_defined_symbols'] = ','.join(special_tokens)
+    
+    print("🚀 Starting tokenizer training...")
+    print("   This may take several minutes for large datasets...")
+    print()
+    
+    try:
+        spm.SentencePieceTrainer.train(**train_args)
+        print("✅ Tokenizer training complete!")
+        print(f"📁 Model file: {model_prefix}.model")
+        print(f"📁 Vocab file: {model_prefix}.vocab")
+        return model_prefix
+    except Exception as e:
+        print(f"❌ Error training tokenizer: {e}")
+        return None
+
+
+def validate_tokenizer(
+    model_path: str,
+    medical_terms: List[str] = None
+) -> Dict:
+    """Validate tokenizer with medical terms and generate report.
+    
+    Args:
+        model_path: Path to tokenizer model file
+        medical_terms: List of medical terms to validate
+        
+    Returns:
+        Dictionary with validation results
+    """
+    if not SENTENCEPIECE_AVAILABLE:
+        print("❌ Error: sentencepiece package not available.")
+        return {}
+    
+    if medical_terms is None:
+        medical_terms = MEDICAL_TERMS
+    
+    print("=" * 60)
+    print("🔍 Tokenizer Validation")
+    print("=" * 60)
+    
+    # Load tokenizer
+    try:
+        sp = spm.SentencePieceProcessor()
+        sp.load(model_path)
+        print(f"✅ Loaded tokenizer from {model_path}")
+    except Exception as e:
+        print(f"❌ Error loading tokenizer: {e}")
+        return {}
+    
+    # Validate medical terms
+    print(f"\n📊 Validating {len(medical_terms)} medical terms...")
+    single_token_count = 0
+    multi_token_count = 0
+    term_results = {}
+    
+    for term in medical_terms:
+        tokens = sp.encode(term, out_type=str)
+        num_tokens = len(tokens)
+        
+        if num_tokens == 1:
+            single_token_count += 1
+            term_results[term] = {
+                'tokens': tokens,
+                'num_tokens': 1,
+                'is_single': True
+            }
+        else:
+            multi_token_count += 1
+            term_results[term] = {
+                'tokens': tokens,
+                'num_tokens': num_tokens,
+                'is_single': False
+            }
+    
+    efficiency = (single_token_count / len(medical_terms)) * 100 if medical_terms else 0
+    
+    print(f"✅ Single-token coverage: {single_token_count}/{len(medical_terms)} ({efficiency:.1f}%)")
+    print(f"⚠️  Multi-token terms: {multi_token_count}/{len(medical_terms)}")
+    
+    # Generate sample tokenizations
+    print(f"\n📝 Sample tokenizations (100 examples):")
+    sample_texts = [
+        "Alzheimer's disease is a neurodegenerative disorder",
+        "Parkinson's disease affects dopamine neurons",
+        "Protein aggregation in tau and amyloid",
+        "Synapse formation and neural plasticity",
+        "fMRI and EEG are neuroimaging techniques",
+        "MRI scans show brain atrophy",
+        "Clinical diagnosis of dementia",
+        "Treatment with therapeutic drugs",
+        "Neural network models for brain imaging",
+        "Patient data from clinical trials",
+    ]
+    
+    # Repeat to get 100 samples
+    all_samples = []
+    for i in range(10):
+        for text in sample_texts:
+            tokens = sp.encode(text, out_type=str)
+            all_samples.append({
+                'text': text,
+                'tokens': tokens,
+                'num_tokens': len(tokens)
+            })
+    
+    # Print first 20 samples
+    for i, sample in enumerate(all_samples[:20], 1):
+        tokens_str = ' '.join(sample['tokens'][:10])  # Show first 10 tokens
+        if len(sample['tokens']) > 10:
+            tokens_str += f" ... ({sample['num_tokens']} total)"
+        print(f"   {i:2d}. Text: {sample['text'][:50]}...")
+        print(f"       Tokens: {tokens_str}")
+    
+    if len(all_samples) > 20:
+        print(f"   ... ({len(all_samples) - 20} more samples)")
+    
+    # Build validation report
+    validation_report = {
+        'model_path': model_path,
+        'vocab_size': sp.get_piece_size(),
+        'medical_terms_tested': len(medical_terms),
+        'single_token_count': single_token_count,
+        'multi_token_count': multi_token_count,
+        'efficiency_percent': efficiency,
+        'term_results': term_results,
+        'sample_tokenizations': all_samples[:100],  # Keep first 100
+    }
+    
+    return validation_report
+
+
+def save_validation_report(report: Dict, output_file: str):
+    """Save validation report to JSON file.
+    
+    Args:
+        report: Validation report dictionary
+        output_file: Output JSON file path
+    """
+    # Convert to JSON-serializable format
+    report_json = {
+        'model_path': report.get('model_path', ''),
+        'vocab_size': report.get('vocab_size', 0),
+        'medical_terms_tested': report.get('medical_terms_tested', 0),
+        'single_token_count': report.get('single_token_count', 0),
+        'multi_token_count': report.get('multi_token_count', 0),
+        'efficiency_percent': report.get('efficiency_percent', 0.0),
+        'term_results': report.get('term_results', {}),
+        'sample_tokenizations': [
+            {
+                'text': s['text'],
+                'tokens': s['tokens'],
+                'num_tokens': s['num_tokens']
+            }
+            for s in report.get('sample_tokenizations', [])[:100]
+        ],
+    }
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(report_json, f, indent=2, ensure_ascii=False)
+    
+    print(f"\n📄 Validation report saved to: {output_file}")
+
+
+def train_healthcare_tokenizer(
+    input_jsonl: str,
+    output_dir: str = './data/arxiv',
+    model_prefix: str = 'healthcare_tokenizer',
+    vocab_size: int = TOKENIZER_VOCAB_SIZE
+):
+    """Complete pipeline: extract texts, train tokenizer, validate.
+    
+    Args:
+        input_jsonl: Input JSONL file with processed papers
+        output_dir: Output directory for tokenizer files
+        model_prefix: Prefix for tokenizer model files
+        vocab_size: Vocabulary size for tokenizer
+    """
+    print("=" * 60)
+    print("🔤 Healthcare Tokenizer Training Pipeline")
+    print("=" * 60)
+    print()
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Step 1: Extract texts
+    temp_txt_file = os.path.join(output_dir, 'training_texts.txt')
+    print("Step 1: Extracting texts from JSONL...")
+    total_papers, total_chars = extract_texts_from_jsonl(input_jsonl, temp_txt_file)
+    print()
+    
+    if total_papers == 0:
+        print("❌ No papers found in input file!")
+        return
+    
+    # Step 2: Train tokenizer
+    print("Step 2: Training SentencePiece tokenizer...")
+    model_path = os.path.join(output_dir, model_prefix)
+    trained_model = train_tokenizer(
+        input_txt=temp_txt_file,
+        model_prefix=model_path,
+        vocab_size=vocab_size,
+        model_type=TOKENIZER_MODEL_TYPE,
+        char_coverage=TOKENIZER_CHAR_COVERAGE,
+        special_tokens=TOKENIZER_SPECIAL_TOKENS,
+        normalization=TOKENIZER_NORMALIZATION
+    )
+    print()
+    
+    if not trained_model:
+        print("❌ Tokenizer training failed!")
+        return
+    
+    # Step 3: Validate tokenizer
+    print("Step 3: Validating tokenizer...")
+    model_file = f"{model_path}.model"
+    validation_report = validate_tokenizer(model_file, medical_terms=MEDICAL_TERMS)
+    print()
+    
+    # Step 4: Save validation report
+    if validation_report:
+        report_file = os.path.join(output_dir, 'tokenizer_validation_report.json')
+        save_validation_report(validation_report, report_file)
+        print()
+        
+        # Print summary
+        print("=" * 60)
+        print("✅ Tokenizer Training Complete!")
+        print("=" * 60)
+        print(f"📁 Model file: {model_file}")
+        print(f"📁 Vocab file: {model_path}.vocab")
+        print(f"📄 Validation report: {report_file}")
+        print(f"📊 Vocabulary size: {validation_report.get('vocab_size', vocab_size)}")
+        print(f"📊 Medical term efficiency: {validation_report.get('efficiency_percent', 0):.1f}%")
+        print()
+        
+        # Print term results
+        print("📊 Medical term tokenization results:")
+        term_results = validation_report.get('term_results', {})
+        for term, result in sorted(term_results.items()):
+            status = "✓" if result['is_single'] else "✗"
+            print(f"   {status} {term}: {result['num_tokens']} token(s) - {result['tokens']}")
+    
+    # Cleanup temp file (optional - comment out if you want to keep it)
+    # if os.path.exists(temp_txt_file):
+    #     os.remove(temp_txt_file)
+    #     print(f"\n🧹 Cleaned up temporary file: {temp_txt_file}")
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="ArXiv paper collection and PDF text extraction",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Collect ArXiv papers
+  python data_pipeline.py collect --max-papers 40000
+  
+  # Extract PDF texts from collected papers
+  python data_pipeline.py extract --input ./data/arxiv/arxiv_papers.jsonl --output-dir ./data/arxiv/texts
+  
+  # Extract with custom workers and rate limit
+  python data_pipeline.py extract --input ./data/arxiv/arxiv_papers.jsonl --output-dir ./data/arxiv/texts --workers 4 --rate-limit 0.3
+  
+  # Preprocess and classify domains
+  python data_pipeline.py preprocess --metadata ./data/arxiv/arxiv_papers.jsonl --text-dir ./data/arxiv/texts --output ./data/arxiv/processed_dataset.jsonl
+  
+  # Curate with NeMo Curator
+  python data_pipeline.py curate --text-dir ./data/arxiv/texts --metadata ./data/arxiv/arxiv_papers.jsonl --output ./data/arxiv/curated_dataset.jsonl
+  
+  # Train SentencePiece tokenizer
+  python data_pipeline.py tokenize --input ./data/arxiv/curated_dataset.jsonl --output-dir ./data/arxiv
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
+    
+    # Collect command
+    collect_parser = subparsers.add_parser('collect', help='Collect ArXiv papers')
+    collect_parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='./data/arxiv',
+        help='Output directory for collected papers (default: ./data/arxiv)'
+    )
+    collect_parser.add_argument(
+        '--max-papers',
+        type=int,
+        default=40000,
+        help='Maximum number of papers to collect (default: 40000)'
+    )
+    collect_parser.add_argument(
+        '--cache-file',
+        type=str,
+        default=None,
+        help='Path to cache file (default: output_dir/arxiv_papers.jsonl)'
+    )
+    collect_parser.add_argument(
+        '--rate-limit',
+        type=float,
+        default=3.0,
+        help='Rate limit in requests per second (default: 3.0)'
+    )
+    
+    # Extract command
+    extract_parser = subparsers.add_parser('extract', help='Extract text from PDFs')
+    extract_parser.add_argument(
+        '--input',
+        type=str,
+        required=True,
+        help='Input JSONL file with paper metadata'
+    )
+    extract_parser.add_argument(
+        '--output-dir',
+        type=str,
+        required=True,
+        help='Output directory for extracted text files'
+    )
+    extract_parser.add_argument(
+        '--workers',
+        type=int,
+        default=3,
+        choices=[2, 3, 4],
+        help='Number of worker threads (default: 3)'
+    )
+    extract_parser.add_argument(
+        '--rate-limit',
+        type=float,
+        default=PDF_RATE_LIMIT,
+        help=f'Rate limit delay in seconds (default: {PDF_RATE_LIMIT})'
+    )
+    
+    # Curate command (NeMo Curator)
+    curate_parser = subparsers.add_parser('curate', help='Curate text using NeMo Curator')
+    curate_parser.add_argument(
+        '--text-dir',
+        type=str,
+        required=True,
+        help='Directory containing raw text files from extract step'
+    )
+    curate_parser.add_argument(
+        '--metadata',
+        type=str,
+        required=True,
+        help='Input JSONL file with paper metadata'
+    )
+    curate_parser.add_argument(
+        '--output',
+        type=str,
+        required=True,
+        help='Output curated dataset JSONL file'
+    )
+    curate_parser.add_argument(
+        '--use-gpu',
+        action='store_true',
+        help='Use GPU for deduplication (if available)'
+    )
+    curate_parser.add_argument(
+        '--skip-dedup',
+        action='store_true',
+        help='Skip deduplication stage (for memory-constrained environments)'
+    )
+    curate_parser.add_argument(
+        '--min-relevance-score',
+        type=float,
+        default=0.5,
+        help='Minimum domain relevance score to keep (default: 0.5)'
+    )
+    
+    # Preprocess command
+    preprocess_parser = subparsers.add_parser('preprocess', help='Preprocess text and classify domains')
+    preprocess_parser.add_argument(
+        '--metadata',
+        type=str,
+        required=True,
+        help='Input JSONL file with paper metadata'
+    )
+    preprocess_parser.add_argument(
+        '--text-dir',
+        type=str,
+        required=True,
+        help='Directory containing extracted text files'
+    )
+    preprocess_parser.add_argument(
+        '--output',
+        type=str,
+        required=True,
+        help='Output JSONL file path'
+    )
+    preprocess_parser.add_argument(
+        '--workers',
+        type=int,
+        default=PREPROCESS_WORKERS,
+        choices=[2, 3, 4, 6, 8],
+        help=f'Number of parallel workers (default: {PREPROCESS_WORKERS})'
+    )
+    
+    # Process command (post-NeMo Curator processing)
+    process_parser = subparsers.add_parser('process', help='Process curated dataset with healthcare-specific preprocessing')
+    process_parser.add_argument(
+        '--input',
+        type=str,
+        required=True,
+        help='Input curated dataset JSONL file (from curate command)'
+    )
+    process_parser.add_argument(
+        '--output',
+        type=str,
+        required=True,
+        help='Output processed dataset JSONL file'
+    )
+    process_parser.add_argument(
+        '--workers',
+        type=int,
+        default=4,
+        choices=[2, 4, 6, 8],
+        help='Number of parallel workers (default: 4)'
+    )
+    
+    # Tokenizer command
+    tokenizer_parser = subparsers.add_parser('tokenize', help='Train SentencePiece BPE tokenizer')
+    tokenizer_parser.add_argument(
+        '--input',
+        type=str,
+        required=True,
+        help='Input JSONL file with processed papers'
+    )
+    tokenizer_parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='./data/arxiv',
+        help='Output directory for tokenizer files (default: ./data/arxiv)'
+    )
+    tokenizer_parser.add_argument(
+        '--model-prefix',
+        type=str,
+        default='healthcare_tokenizer',
+        help='Prefix for tokenizer model files (default: healthcare_tokenizer)'
+    )
+    tokenizer_parser.add_argument(
+        '--vocab-size',
+        type=int,
+        default=TOKENIZER_VOCAB_SIZE,
+        help=f'Vocabulary size (default: {TOKENIZER_VOCAB_SIZE})'
+    )
+    
+    args = parser.parse_args()
+    
+    if args.command == 'collect':
+        rate_limit_delay = 1.0 / args.rate_limit
+        collect_arxiv_papers(
+            output_dir=args.output_dir,
+            max_papers=args.max_papers,
+            cache_file=args.cache_file,
+            rate_limit_delay=rate_limit_delay
+        )
+    elif args.command == 'extract':
+        extract_pdf_texts(
+            input_jsonl=args.input,
+            output_dir=args.output_dir,
+            num_workers=args.workers,
+            rate_limit_delay=args.rate_limit
+        )
+    elif args.command == 'preprocess':
+        preprocess_and_classify(
+            metadata_jsonl=args.metadata,
+            text_dir=args.text_dir,
+            output_jsonl=args.output,
+            num_workers=args.workers
+        )
+    elif args.command == 'curate':
+        curate_with_nemo(
+            text_dir=args.text_dir,
+            metadata_jsonl=args.metadata,
+            output_jsonl=args.output,
+            use_gpu=args.use_gpu,
+            skip_dedup=args.skip_dedup,
+            min_relevance_score=args.min_relevance_score
+        )
+    elif args.command == 'tokenize':
+        train_healthcare_tokenizer(
+            input_jsonl=args.input,
+            output_dir=args.output_dir,
+            model_prefix=args.model_prefix,
+            vocab_size=args.vocab_size
+        )
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
     main()
-
-

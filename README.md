@@ -1,65 +1,21 @@
-# NeuroSeek-MoE: Multimodal Mixture-of-Experts for Neurodegenerative Disease Analysis
+# NeuroSeek-MoE: Healthcare+ML Paper Training Pipeline
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A specialized Mixture-of-Experts model for multimodal neurodegenerative disease analysis, supporting Alzheimer's Disease (AD), Parkinson's Disease (PD), ALS, Huntington's Disease (HD), and Multiple Sclerosis (MS).
+A complete data pipeline and training system for training language models on healthcare+ML papers from ArXiv. Features efficient streaming datasets, NeMo Curator integration, and Colab-optimized training.
 
 ## 🧠 Overview
 
-NeuroSeek-MoE integrates text and image reasoning for comprehensive disease analysis:
-- **Multimodal Input**: Text queries and neuroimaging data
-- **Shared Expert Pool**: Single unified expert architecture with sparse top-k routing
-- **Load Balancing**: Entropy-based auxiliary loss for uniform expert utilization
-- **5 Diseases**: AD, PD, ALS, HD, MS with disease-specific training data
-
-## 🏗️ Architecture
-
-### Model Components
-
-**Two-Tier Expert System**
-
-1. **Shared Experts** (always activated, default: 1 expert)
-   - Standard 2-layer MLP with 4× expansion: `Linear(dim → 4×dim) → ReLU → Linear(4×dim → dim)`
-   - Process all tokens to ensure baseline functionality
-   - Provide fail-safe for unprocessed tokens
-
-2. **Routed Experts** (dynamically selected, auto-scaled by dataset size)
-   - Same 2-layer MLP architecture as shared experts
-   - Count determined by: `max(2, min(num_tokens // 5000, 8))`
-   - For ~2000 samples: typically 2-8 experts
-   - Each expert selects `top_k=1` tokens via Expert Choice routing
-
-**Expert Choice Routing**
-- **Mechanism**: Each expert selects top-k tokens to process (not tokens choosing experts)
-- **Gate**: Linear `nn.Linear(embedding_dim → num_routed_experts)`
-- **Temperature**: Scheduled annealing (start=2.0 → end=0.1) for exploration→exploitation
-- **Noise**: Gumbel noise (scale=0.5) for better exploration
-- **Capacity**: Enforced via `capacity_factor * (batch*seq_len) / num_routed_experts`
-
-**Sequence-Level Processing**
-1. Input → Embedding → `[batch, seq_len, embedding_dim]` (no pooling)
-2. Flatten for routing: `[batch*seq_len, embedding_dim]`
-3. Expert Choice: Each expert selects top-k tokens
-4. Capacity enforcement: Excess tokens dropped or routed to shared experts
-5. Expert processing: Shared (all tokens) + Routed (selected tokens)
-6. Combine → Joint fusion → Normalization + Residual → Decoder → Vocabulary logits
-
-**Load Balancing & Auxiliary Losses**
-- **Load Balance Loss**: L2 penalty on deviation from uniform expert utilization
-- **Z-Loss**: Penalizes extreme router logits to encourage balanced routing
-- **Capacity Loss**: L2 penalty for exceeding expert capacity
-- **Total Aux Loss Weight**: 0.1× (LoadBal + Z-loss + Capacity loss)
-- **Main Loss**: `CrossEntropyLoss + 0.1 × aux_loss`
-- Logs active experts, utilization, and routing metrics per epoch
-
-### Training Details
-
-- **Regularization**: Weight decay (1e-5), dropout (0.1), early stopping (patience=5), LR scheduling, gradient clipping
-- **Loss**: `CrossEntropyLoss + 0.1 × aux_loss` (where aux_loss = LoadBal + Z-loss + Capacity loss)
-- **Expert Scaling**: Auto-scaled by dataset size: `max(2, min(num_tokens // 5000, 8))`
-- **Split**: 80/20 train/test (automatic)
-- **Metrics**: BERTScore (BLEU removed)
+This project provides a complete pipeline for:
+- **ArXiv Paper Collection**: Collect 30-40k healthcare+CS+ML papers with efficient streaming
+- **PDF Text Extraction**: Extract and process text from ArXiv PDFs (first 6 pages, 12k chars max)
+- **NeMo Curator Integration**: Advanced text curation with quality filtering and domain classification
+- **Healthcare-Specific Preprocessing**: Section extraction, medical term preservation, citation normalization
+- **Tokenizer Training**: SentencePiece BPE tokenizer optimized for healthcare terminology
+- **Streaming Dataset**: Memory-efficient IterableDataset for training (<500MB RAM)
+- **Training Pipeline**: Colab-optimized training with mixed precision, gradient accumulation, and checkpointing
+- **Evaluation & Inference**: Comprehensive evaluation metrics and production inference pipeline
 
 ## 🚀 Quick Start
 
@@ -72,243 +28,411 @@ cd neuroseek-moe
 # Core dependencies
 pip install -r requirements.txt
 
-# Metrics and models
-pip install sacrebleu bert-score torch-fidelity
-pip install git+https://github.com/openai/CLIP.git
-pip install diffusers transformers accelerate sentence-transformers
-
-# Optional: NeMo Curator (recommended for advanced data curation)
-pip install "nemo-curator[all]"
-
-# Optional: Jupyter for notebooks
-pip install jupyter notebook
+# Optional: NeMo Curator (Linux only)
+# pip install "nemo-curator[text]"  # CPU version
+# pip install "nemo-curator[text_cuda12]"  # CUDA 12 version
 ```
 
-### Option 1: Colab Notebook (Recommended)
+### Option 1: Google Colab (Recommended for Non-Linux)
 
-For easy experimentation:
-- Open `notebooks/NeuroSeek_MoE_Complete_Pipeline.ipynb` in Google Colab
-- Complete pipeline: setup → data → training → visualization
-- GPU support included
+For easy setup and GPU access, use the Colab notebook:
 
-### Option 2: Local Setup
+1. Open `notebooks/ArXiv_Pipeline_Colab.ipynb` in Google Colab
+2. Run all cells sequentially
+3. The notebook will:
+   - Install all dependencies
+   - Configure the pipeline for Colab
+   - Run the complete pipeline
+   - Provide progress monitoring and visualization
+   - Handle NeMo Curator automatically (Colab uses Linux)
 
-**1. Build Dataset**
+**Features:**
+- Automatic environment setup
+- GPU detection and optimization
+- Progress monitoring with plots
+- Resume capability
+- Download results to Google Drive
+
+### Option 2: Complete Pipeline (Local/Linux)
+
+Run the entire pipeline from paper collection to inference export with a single command:
+
 ```bash
-python data_pipeline.py biomed-nemo-build \
-  --staging ./staging \
-  --processed ./processed \
-  --max-text 500 \
-  --max-images 50 \
-  --max-pages 2
+# Run complete pipeline
+python run_pipeline.py --config config.yaml
+
+# Resume from a specific step (if pipeline was interrupted)
+python run_pipeline.py --config config.yaml --start-from-step 5
+
+# The script automatically:
+# - Detects which steps are already complete
+# - Resumes from the first incomplete step
+# - Cleans up intermediate files after processing
+# - Generates a comprehensive report
 ```
 
-**2. Train Model**
-```bash
-# Single configuration
-python train_real.py \
-  --multimodal-jsonl processed/multimodal_dataset.jsonl \
-  --epochs 10 \
-  --batch-size 8 \
-  --learning-rate 0.0001 \
-  --device auto
+**Configuration**: Edit `config.yaml` to customize:
+- Number of papers to collect
+- NeMo Curator filter thresholds
+- Training hyperparameters
+- Evaluation settings
+- Inference export options
 
-# Compare expert configurations (recommended)
-python compare_expert_configs.py \
-  --multimodal-jsonl processed/multimodal_dataset.jsonl \
-  --expert-configs 1,2,4 \
-  --epochs 10
-```
+### Option 3: Manual Step-by-Step Pipeline
 
-**3. Visualize Results**
 ```bash
-cd notebooks
-jupyter notebook training_visualization.ipynb
+# Step 1: Collect ArXiv papers (30-40k papers)
+python data_pipeline.py collect --max-papers 40000 --output-dir ./data/arxiv
+
+# Step 2: Extract PDF texts
+python data_pipeline.py extract \
+    --input ./data/arxiv/arxiv_papers.jsonl \
+    --output-dir ./data/arxiv/texts \
+    --workers 4
+
+# Step 3: Preprocess and classify domains (optional, if not using NeMo Curator)
+python data_pipeline.py preprocess \
+    --metadata ./data/arxiv/arxiv_papers.jsonl \
+    --text-dir ./data/arxiv/texts \
+    --output ./data/arxiv/processed_dataset.jsonl
+
+# Step 4: Curate with NeMo Curator (recommended, Linux only)
+python data_pipeline.py curate \
+    --text-dir ./data/arxiv/texts \
+    --metadata ./data/arxiv/arxiv_papers.jsonl \
+    --output ./data/arxiv/curated_dataset.jsonl \
+    --min-relevance-score 0.5
+
+# Step 5: Process curated dataset with healthcare-specific preprocessing
+python data_pipeline.py process \
+    --input ./data/arxiv/curated_dataset.jsonl \
+    --output ./data/arxiv/processed_dataset.jsonl \
+    --workers 4
+
+# Step 6: Train SentencePiece tokenizer
+python data_pipeline.py tokenize \
+    --input ./data/arxiv/processed_dataset.jsonl \
+    --output-dir ./data/arxiv \
+    --vocab-size 50000
+
+# Step 7: Train model (see train_colab.py)
 ```
 
 ## 📊 Data Pipeline
 
-### Data Sources
+### Stage 1: ArXiv Paper Collection
 
-- **Text**: PubMed abstracts (filtered for Reviews, Meta-Analyses; excludes Case Reports, Letters)
-- **Images**: NeuroVault neuroimaging data (NIfTI format)
-
-### Processing Options
-
-**NeMo Curator (Optional, Recommended)**
-- **Text**: Advanced curation (normalize, dedupe, PII redaction) when available
-- **Image**: Enhanced image pipeline when available
-- **Fallback**: Basic processing if NeMo Curator not installed
-
-**Article Quality Filters** (default enabled):
-- Minimum abstract length (default: 200 chars)
-- Preferred types: Review, Meta-Analysis, Systematic Review
-- Excluded types: Case Reports, Letter, Editorial, Retracted Publication
-- Optional: Minimum publication year filter
-
-### Dataset Structure
-
-```
-processed/
-├── text_dataset.jsonl          # PubMed abstracts
-├── image_dataset.jsonl         # NeuroVault images
-└── multimodal_dataset.jsonl    # Combined for training
-```
-
-Each line is JSON: `{"text": "...", "disease": "AD", "modality": "text"}` or `{"image_path": "...", "caption": "...", "disease": "AD", "modality": "image"}`
-
-### Pipeline Options
-
-```bash
-# Basic dataset
-python data_pipeline.py biomed-nemo-build \
-  --staging ./staging \
-  --processed ./processed \
-  --max-text 500 \
-  --max-images 50
-
-# With article quality filters
-python data_pipeline.py biomed-nemo-build \
-  --staging ./staging \
-  --processed ./processed \
-  --max-text 500 \
-  --article-types "Review" "Meta-Analysis" \
-  --exclude-types "Case Reports" "Letter" \
-  --min-year 2015 \
-  --min-abstract-length 300
-```
-
-**Note**: Datasets are cached automatically. Re-running skips already processed data.
-
-## 📝 Training
-
-### Basic Training
-
-```bash
-python train_real.py \
-  --multimodal-jsonl processed/multimodal_dataset.jsonl \
-  --outputs outputs \
-  --checkpoints checkpoints \
-  --epochs 10 \
-  --batch-size 8 \
-  --learning-rate 0.0001 \
-  --device auto \
-  --early-stopping-patience 5
-```
-
-### Expert Configuration Comparison
-
-```bash
-# Compare multiple expert counts
-python compare_expert_configs.py \
-  --multimodal-jsonl processed/multimodal_dataset.jsonl \
-  --expert-configs 1,2,4,8 \
-  --epochs 10 \
-  --selection-metric combined
-```
-
-**Outputs**:
-- `checkpoints/config_{N}expert/` - Per-configuration checkpoints
-- `evaluation/expert_comparison.json` - Comparison results
-- `evaluation/best_config.json` - Best configuration selected
-
-### Training Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--num-experts` | Number of experts in shared pool | 2 |
-| `--learning-rate` | Learning rate | 0.0001 |
-| `--early-stopping-patience` | Early stopping patience | 5 |
-| `--resume-from` | Resume from epoch | None |
-| `--device` | Device (auto/cpu/cuda) | auto |
-
-## 📊 Visualization
-
-### Training Visualization Notebook
-
-```bash
-cd notebooks
-jupyter notebook training_visualization.ipynb
-```
+Collects papers from ArXiv using healthcare+CS+ML queries:
+- `cat:cs.LG AND (healthcare OR medical OR clinical)`
+- `cat:cs.AI AND (neurodegeneration OR disease)`
+- `cat:q-bio.NC AND (machine learning)`
 
 **Features**:
-- Loss curves (train vs test) over epochs
-- BERTScore tracking
-- Per-configuration loss curves (for expert comparison)
-- Auxiliary load-balancing loss tracking
-- Active experts per epoch
-- Expert configuration comparison plots
+- Streaming to disk (no memory accumulation)
+- Deduplication by `arxiv_id`
+- Rate limiting (3 requests/sec)
+- Checkpointing every 5000 papers
+- Date filtering: 2015-2024
 
-**Outputs**: `training_curves.png`, `per_config_loss_curves.png`, `expert_config_comparison.png`
+```bash
+python data_pipeline.py collect --max-papers 40000
+```
+
+### Stage 2: PDF Text Extraction
+
+Extracts text from ArXiv PDFs:
+- First 6 pages only
+- Max 12,000 characters per paper
+- Memory-efficient streaming downloads
+- Parallel processing (2-4 workers)
+- Resume capability with checkpoints
+
+```bash
+python data_pipeline.py extract \
+    --input ./data/arxiv/arxiv_papers.jsonl \
+    --output-dir ./data/arxiv/texts \
+    --workers 4 \
+    --rate-limit 0.4
+```
+
+### Stage 3: NeMo Curator Curation (Optional, Linux only)
+
+Advanced text curation with quality filtering:
+- **Text Cleaning**: Remove URLs, emails, citations, normalize whitespace
+- **Quality Filtering**: Word count (100-5000), alphanumeric ratio (>40%), language detection
+- **Domain Filtering**: Relevance scoring for healthcare domains
+- **Deduplication**: Fuzzy deduplication with MinHash (similarity 0.95)
+- **GPU Support**: Optional GPU-accelerated deduplication
+
+```bash
+python data_pipeline.py curate \
+    --text-dir ./data/arxiv/texts \
+    --metadata ./data/arxiv/arxiv_papers.jsonl \
+    --output ./data/arxiv/curated_dataset.jsonl \
+    --use-gpu  # Optional: use GPU for deduplication
+```
+
+### Stage 4: Healthcare-Specific Preprocessing
+
+Post-NeMo Curator processing:
+- Extract section boundaries (Abstract, Introduction, Methods, Results, Discussion)
+- Preserve scientific abbreviations (MMSE, MRI, EEG, fMRI, PET, CSF)
+- Keep medical terminology intact
+- Remove page numbers, headers/footers
+- Normalize citations
+- Detect medical terms by domain
+
+```bash
+python data_pipeline.py process \
+    --input ./data/arxiv/curated_dataset.jsonl \
+    --output ./data/arxiv/processed_dataset.jsonl \
+    --workers 4
+```
+
+### Stage 5: Tokenizer Training
+
+Train SentencePiece BPE tokenizer:
+- Vocabulary size: 50,000
+- Model type: BPE
+- Character coverage: 0.9995
+- Special tokens: `[DISEASE]`, `[PROTEIN]`, `[DRUG]`, `[GENE]`
+- Normalization: identity (preserve case)
+- Validation: Medical term tokenization efficiency
+
+```bash
+python data_pipeline.py tokenize \
+    --input ./data/arxiv/processed_dataset.jsonl \
+    --output-dir ./data/arxiv \
+    --vocab-size 50000
+```
+
+**Output**:
+- `healthcare_tokenizer.model`
+- `healthcare_tokenizer.vocab`
+- `tokenizer_validation_report.json`
+
+## 🎯 Training
+
+### Streaming Dataset
+
+Memory-efficient `IterableDataset` for training:
+- Streams from disk (<500MB RAM regardless of corpus size)
+- Worker-aware distribution (no duplicates)
+- Shuffling with buffer (shuffle_buffer=100)
+- Variable-length sequences (no padding in dataset)
+- Skips papers with <64 tokens
+
+```python
+from arxiv_dataset import ArXivStreamingDataset, create_dataloader
+import sentencepiece as spm
+
+# Load tokenizer
+tokenizer = spm.SentencePieceProcessor()
+tokenizer.load('./data/arxiv/healthcare_tokenizer.model')
+
+# Create dataset
+dataset = ArXivStreamingDataset(
+    text_dir='./data/arxiv/texts',
+    metadata_jsonl='./data/arxiv/processed_dataset.jsonl',
+    tokenizer=tokenizer,
+    max_length=512,
+    min_length=64,
+    shuffle_buffer=100
+)
+
+# Create dataloader
+dataloader = create_dataloader(
+    dataset,
+    batch_size=6,
+    num_workers=4,
+    pin_memory=True
+)
+```
+
+### Model Adapter
+
+Connects dataset to DeepSeekMoE model:
+- Handles device transfer
+- Variable-length sequence padding (within batch)
+- Forward pass: `logits = model(input_ids)`
+- Loss computation: `F.cross_entropy(logits, target_ids)`
+- Domain-aware weighting (optional):
+  - Neurodegeneration: `loss *= 1.5`
+  - Neuroscience: `loss *= 1.2`
+
+```python
+from training_adapter import ModelAdapter
+
+adapter = ModelAdapter(
+    model=model,
+    device='cuda',
+    domain_weights={'neurodegeneration': 1.5, 'neuroscience': 1.2}
+)
+
+for batch in dataloader:
+    result = adapter.process_batch(batch)
+    loss = result['loss']
+    logits = result['logits']
+    metadata = result['batch_metadata']
+```
+
+### Colab Training
+
+Optimized for Colab GPU (~12GB VRAM):
+- Mixed precision training (`torch.cuda.amp`)
+- Gradient accumulation (simulate larger batches)
+- Gradient checkpointing (if available)
+- Cosine annealing with warmup
+- Gradient clipping (max_norm=1.0)
+- Dynamic batch sizing
+- Checkpointing every 5000 steps
+
+```bash
+python train_colab.py \
+    --model-path ./checkpoints/model.pt \
+    --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
+    --dataset-text-dir ./data/arxiv/texts \
+    --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
+    --checkpoint-dir ./checkpoints \
+    --batch-size 6 \
+    --gradient-accumulation-steps 4 \
+    --max-steps 50000 \
+    --learning-rate 5e-4
+```
+
+## 📊 Evaluation
+
+Comprehensive evaluation utilities:
+- Perplexity calculation
+- Domain classification accuracy
+- Neurodegeneration relevance ranking (MRR@20)
+- Section classification accuracy
+
+```bash
+python evaluate.py \
+    --model-checkpoint ./checkpoints/step_50000.pt \
+    --test-dataset ./data/arxiv/test_dataset.jsonl \
+    --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
+    --output-dir ./evaluation
+```
+
+## 🔌 Inference
+
+Production inference pipeline:
+- Batch encoding
+- Literature review (similarity search)
+- Domain classification
+- Embedding caching
+- Optional: INT8 quantization, ONNX export
+
+```bash
+python inference.py \
+    --model-checkpoint ./checkpoints/step_50000.pt \
+    --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
+    --mode embed \
+    --text "Alzheimer disease and tau protein aggregation"
+```
 
 ## 📁 Project Structure
 
 ```
 neuroseek-moe/
-├── notebooks/
-│   ├── NeuroSeek_MoE_Complete_Pipeline.ipynb  # Complete Colab pipeline
-│   └── training_visualization.ipynb            # Training analysis
-├── processed/                   # Processed datasets (JSONL)
-├── checkpoints/                 # Model checkpoints
-│   └── config_*/               # Per-configuration checkpoints
-├── evaluation/                  # Training results
-├── data_pipeline.py             # Data processing pipeline
-├── train_real.py               # Training script
-├── compare_expert_configs.py   # Expert comparison
-├── model_architecture.py       # Model architecture
-└── requirements.txt            # Dependencies
+├── data_pipeline.py          # Complete data pipeline (collect, extract, curate, process, tokenize)
+├── arxiv_dataset.py          # Streaming IterableDataset for training
+├── training_adapter.py       # Model adapter (connects dataset to model)
+├── train_colab.py            # Colab-optimized training loop
+├── evaluate.py               # Evaluation utilities
+├── inference.py              # Production inference pipeline
+├── model_architecture.py     # Model architecture definitions
+├── train_real.py             # Model implementation (SimpleMoEModel)
+├── requirements.txt          # Python dependencies
+├── README.md                 # This file
+├── data/
+│   └── arxiv/                # ArXiv data directory
+│       ├── arxiv_papers.jsonl      # Collected metadata
+│       ├── texts/                  # Extracted text files
+│       ├── curated_dataset.jsonl   # NeMo Curator output
+│       ├── processed_dataset.jsonl # Final processed dataset
+│       └── healthcare_tokenizer.*   # Trained tokenizer
+├── checkpoints/              # Model checkpoints
+└── notebooks/                # Jupyter notebooks (optional)
 ```
 
 ## 🔧 Configuration
 
-### Data Pipeline Filters
+### Data Pipeline
 
-**Article Quality Filters** (default enabled):
-- `--min-abstract-length`: Minimum abstract length (default: 200)
-- `--article-types`: Preferred types (default: Review, Meta-Analysis, Systematic Review)
-- `--exclude-types`: Excluded types (default: Case Reports, Letter, Editorial, Retracted Publication)
-- `--min-year`: Minimum publication year (optional)
+**ArXiv Collection**:
+- `--max-papers`: Maximum papers to collect (default: 40000)
+- `--rate-limit`: Requests per second (default: 3.0)
 
-### Training Parameters
+**PDF Extraction**:
+- `--workers`: Number of parallel workers (default: 3, choices: 2-4)
+- `--rate-limit`: Delay between requests in seconds (default: 0.4)
 
-- **Model**: `vocab_size=10007`, `embedding_dim=128`, `num_experts=2` (configurable)
-- **Regularization**: Weight decay (1e-5), dropout (0.1), gradient clipping (max_norm=1.0)
-- **Optimization**: Adam optimizer, LR scheduler (ReduceLROnPlateau), early stopping
+**NeMo Curator**:
+- `--min-relevance-score`: Minimum domain relevance (default: 0.5)
+- `--use-gpu`: Use GPU for deduplication (optional)
+- `--skip-dedup`: Skip deduplication (memory-constrained)
 
-## 📚 Reference
+**Tokenizer**:
+- `--vocab-size`: Vocabulary size (default: 50000)
+- `--model-prefix`: Tokenizer file prefix (default: healthcare_tokenizer)
 
-### Model Implementations
+### Training
 
-- **Text Encoding**: BioBERT / sentence-transformers
-- **Image Encoding**: OpenAI CLIP (ViT-B/32)
-- **Metrics**: BERTScore, sacrebleu, torch-fidelity
+**Dataset**:
+- `max_length`: Maximum sequence length (default: 512)
+- `min_length`: Minimum sequence length (default: 64)
+- `shuffle_buffer`: Shuffle buffer size (default: 100)
 
-### Citation
+**DataLoader**:
+- `batch_size`: Batch size (default: 6 for Colab)
+- `num_workers`: Number of workers (default: 4)
+- `pin_memory`: Pin memory for GPU (default: True)
 
-```bibtex
-@software{neuroseek_moe_2024,
-  title={NeuroSeek-MoE: Multimodal Mixture-of-Experts for Neurodegenerative Disease Analysis},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/your-username/neuroseek-moe}
-}
-```
+**Training**:
+- `gradient_accumulation_steps`: Gradient accumulation (default: 4)
+- `max_steps`: Maximum training steps (default: 50000)
+- `learning_rate`: Learning rate (default: 5e-4)
+- `warmup_steps`: Warmup steps (default: 2000)
 
-## ⚠️ Known Issues
+## 📚 Key Features
 
-- **NeuroVault Downloads**: Some URLs fail to download (normal behavior)
-- **Dataset Caching**: Datasets cached automatically; delete files to force regeneration
+### Memory Efficiency
+- **Streaming I/O**: All stages stream to disk, no full dataset in RAM
+- **IterableDataset**: Streams papers during training (<500MB RAM)
+- **Checkpointing**: Resume capability at every stage
+
+### Performance
+- **Parallel Processing**: Multi-threaded PDF extraction and preprocessing
+- **Dask Integration**: NeMo Curator uses Dask for parallelization
+- **GPU Support**: Optional GPU acceleration for deduplication
+- **Throughput**: >1000 samples/sec on Colab GPU
+
+### Healthcare-Specific
+- **Medical Term Preservation**: Disease names, abbreviations preserved
+- **Domain Classification**: Automatic domain tagging (neurodegeneration, neuroscience, etc.)
+- **Section Extraction**: Abstract, Introduction, Methods, Results, Discussion
+- **Special Tokens**: `[DISEASE]`, `[PROTEIN]`, `[DRUG]`, `[GENE]`
+
+## ⚠️ Platform Compatibility
+
+- **NeMo Curator**: Linux only (will gracefully skip on macOS/Windows)
+- **DeepSpeed**: Linux/Colab only (training falls back to PyTorch on macOS)
+- **All other components**: Cross-platform (macOS, Linux, Windows)
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License - see LICENSE file for details.
 
 ## 🙏 Acknowledgments
 
-- **DeepSeek** for MoE architecture inspiration
-- **NeuroVault** for neuroimaging datasets
-- **PubMed** for biomedical literature access
+- **ArXiv** for open access to research papers
+- **NeMo Curator** for advanced text curation
+- **SentencePiece** for efficient tokenization
+- **PyTorch** for deep learning framework
 
 ---
 
-**NeuroSeek-MoE**: Advancing neurodegenerative disease research through multimodal AI 🧠✨
+**NeuroSeek-MoE**: Training language models on healthcare+ML literature 🧠✨

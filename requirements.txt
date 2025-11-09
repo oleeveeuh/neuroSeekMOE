@@ -4,6 +4,25 @@
 numpy>=1.21.0
 pillow>=8.0.0
 requests>=2.25.0
+arxiv>=2.1.0
+pyyaml>=6.0
+
+# PDF extraction (use either PyPDF2 or pdfplumber)
+PyPDF2>=3.0.0
+# Alternative: pdfplumber>=0.9.0
+
+# Tokenizer training
+sentencepiece>=0.1.99
+
+# Evaluation utilities
+scikit-learn>=1.0.0
+matplotlib>=3.5.0
+pandas>=1.3.0
+
+# NeMo Curator (optional, for text curation)
+# Install with: pip install "nemo-curator[text]" (CPU) or "nemo-curator[text_cuda12]" (CUDA 12)
+# nemo-curator>=0.1.0
+# dask>=2023.1.0
 
 # Optional dependencies for enhanced functionality
 # Uncomment as needed:

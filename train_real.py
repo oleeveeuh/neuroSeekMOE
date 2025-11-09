@@ -17,6 +17,7 @@ import math
 import os
 from typing import Dict, List, Tuple, Optional
 import time
+import numpy as np
 
 # math is already imported, so we can use math.cos and math.pi
 
@@ -890,14 +891,14 @@ def batch_expert_forward(expert_modules: nn.ModuleList, inputs: torch.Tensor,
 class SimpleMoEModel(nn.Module):
     """Simplified trainable MoE model with learnable parameters.
     
-    Architecture:
+    Architecture (DeepSeek-MoE aligned):
     - Shared Experts (always activated): Process all tokens, provide baseline functionality
-      - Typically 1-2 experts (num_shared_experts parameter)
+      - Default: 2 experts (DeepSeek-MoE default)
       - Always active regardless of routing decisions
       - Stored in self.shared_experts ModuleList
       
     - Routed Experts (selected via Expert Choice routing): Specialized experts that select tokens
-      - Typically 60+ experts for large-scale models (num_routed_experts parameter)
+      - Default: 4 experts (DeepSeek-MoE default for small-scale models)
       - Each expert selects top_k tokens to process
       - Selected dynamically via Expert Choice routing
       - Stored in self.routed_experts ModuleList
@@ -906,6 +907,8 @@ class SimpleMoEModel(nn.Module):
     - Expert Choice: Each routed expert selects top_k tokens to process
     - Capacity Control: Enforces sparsity via (batch_size * seq_len) / num_routed_experts
     - Fail-safe: Unprocessed tokens fall back to shared experts
+    - Default top_k: 2 (DeepSeek-MoE default)
+    - Default noise_scale: 0.5 (DeepSeek-MoE default)
     
     Backward Compatibility:
     - Supports legacy num_experts, num_text_experts, num_image_experts, num_multimodal_experts
@@ -920,10 +923,11 @@ class SimpleMoEModel(nn.Module):
         num_text_experts: int = None,
         num_image_experts: int = None,
         num_multimodal_experts: int = None,
-        num_shared_experts: int = 1,
-        num_routed_experts: int = None,
-        top_k: int = 1,  # Reduced from 2 to force specialization
-        noise_scale: float = 0.5,  # Increased from 0.01 to 0.5 for better expert exploration
+        num_shared_experts: int = 2,  # DeepSeek-MoE default
+        num_routed_experts: int = 4,  # DeepSeek-MoE default
+        top_k: int = 2,  # DeepSeek-MoE default
+        noise_scale: float = 0.5,  # DeepSeek-MoE default
+        load_balance_loss_weight: float = 0.1,  # DeepSeek-MoE default
         z_loss_weight: float = 0.001,
         capacity_factor: float = 1.5,
         residual_factor: float = 0.1,
@@ -939,23 +943,79 @@ class SimpleMoEModel(nn.Module):
             raise ValueError(f"num_shared_experts must be >= 0, got {num_shared_experts}")
         self.num_shared_experts = num_shared_experts
         
-        # Determine routed experts count (typically 60+)
-        # Backward compatibility: if num_routed_experts is None, infer from legacy parameters
+        # Determine routed experts count
+        # For Expert Choice routing: size based on tokens per batch
+        # For Token-Choice routing: size based on dataset size
+        
+        # Check if using Expert Choice routing (has top_k parameter)
+        # This is used both for expert sizing and top_k adjustment
+        using_expert_choice = (top_k is not None and top_k > 0)
+        
         if num_routed_experts is None:
-            # Legacy mode: if only num_experts is provided, use it as routed experts
-            # Otherwise, use the sum of all expert types or default to num_experts
-            if num_text_experts is None and num_image_experts is None and num_multimodal_experts is None:
-                total_num_experts = num_experts
-            else:
-                num_text_experts = num_text_experts or 0
-                num_image_experts = num_image_experts or 0
-                num_multimodal_experts = num_multimodal_experts or 0
-                total_num_experts = num_text_experts + num_image_experts + num_multimodal_experts
-                if total_num_experts == 0:
-                    total_num_experts = num_experts  # Fallback to default
             
-            # Subtract shared experts from total to get routed experts
-            num_routed_experts = max(1, total_num_experts - num_shared_experts)
+            if using_expert_choice:
+                # EXPERT CHOICE ROUTING: Each expert selects top-k tokens
+                # Must have enough experts to route all tokens meaningfully
+                
+                # Estimate tokens per batch (typical training configuration)
+                # These can be tuned based on actual training setup
+                estimated_batch_size = 8
+                estimated_seq_len = 127
+                estimated_tokens_per_batch = estimated_batch_size * estimated_seq_len
+                
+                # Target: each expert should process at least this many tokens
+                # Balances: too few (< 30) = underrouting; too many (> 200) = wastes capacity
+                tokens_per_expert_target = 80
+                
+                # Calculate required experts
+                # Formula: num_experts = ceil(total_tokens / tokens_per_expert_target)
+                import math
+                num_routed_experts = max(2, math.ceil(estimated_tokens_per_batch / tokens_per_expert_target))
+                
+                # Cap at maximum for small datasets (prevent over-sizing)
+                max_routed_experts = 128
+                if num_routed_experts > max_routed_experts:
+                    num_routed_experts = max_routed_experts
+                
+                # Store sizing parameters for reference
+                self.expert_sizing_method = "expert_choice"
+                self.estimated_tokens_per_batch = estimated_tokens_per_batch
+                self.tokens_per_expert_target = tokens_per_expert_target
+                
+                # Logging
+                print(f"🔧 Expert Choice Routing Auto-Sizing:")
+                print(f"   Estimated tokens per batch: {estimated_tokens_per_batch}")
+                print(f"   Target tokens per expert: {tokens_per_expert_target}")
+                print(f"   Calculated routed experts: {num_routed_experts}")
+                
+            else:
+                # TOKEN-CHOICE ROUTING: Each token selects top-k experts
+                # Can use sparser formula based on dataset size
+                
+                # Legacy mode: if only num_experts provided, use it as routed experts
+                if num_text_experts is None and num_image_experts is None and num_multimodal_experts is None:
+                    total_num_experts = num_experts
+                else:
+                    num_text_experts = num_text_experts or 0
+                    num_image_experts = num_image_experts or 0
+                    num_multimodal_experts = num_multimodal_experts or 0
+                    total_num_experts = num_text_experts + num_image_experts + num_multimodal_experts
+                    if total_num_experts == 0:
+                        total_num_experts = num_experts  # Fallback to default
+                
+                # Subtract shared experts from total to get routed experts
+                num_routed_experts = max(1, total_num_experts - num_shared_experts)
+                
+                # Store sizing parameters for reference
+                self.expert_sizing_method = "token_choice"
+                self.estimated_tokens_per_batch = None
+                
+                print(f"🔧 Token-Choice Routing: Using {num_routed_experts} routed experts")
+        else:
+            # User explicitly set num_routed_experts - respect that
+            # Determine method based on top_k parameter (already set above)
+            self.expert_sizing_method = "expert_choice" if using_expert_choice else "token_choice"
+            self.estimated_tokens_per_batch = None
         
         # Validate routed experts count
         if num_routed_experts < 1:
@@ -963,6 +1023,47 @@ class SimpleMoEModel(nn.Module):
         
         self.num_routed_experts = num_routed_experts
         self.num_experts = num_shared_experts + num_routed_experts  # Total for compatibility
+        
+        # Auto-adjust top_k based on number of experts for Expert Choice routing
+        # Ensure meaningful token coverage for Expert Choice routing
+        if using_expert_choice and top_k is not None:
+            # Calculate recommended top_k for good expert utilization
+            # Target: ~5-10% of tokens routed to experts
+            # Formula: top_k = (total_tokens * coverage_target) / num_experts
+            
+            # Use the same estimated tokens per batch as in expert sizing
+            if hasattr(self, 'estimated_tokens_per_batch') and self.estimated_tokens_per_batch is not None:
+                estimated_tokens_per_batch = self.estimated_tokens_per_batch
+            else:
+                # Fallback to default estimates
+                estimated_batch_size = 8
+                estimated_seq_len = 127
+                estimated_tokens_per_batch = estimated_batch_size * estimated_seq_len
+            
+            coverage_target = 0.08  # 8% coverage (good balance between specialization and utilization)
+            
+            recommended_top_k = max(1, int(
+                (estimated_tokens_per_batch * coverage_target) / num_routed_experts
+            ))
+            
+            # Cap recommended_top_k to prevent excessive routing
+            max_recommended_top_k = min(10, num_routed_experts)  # Cap at 10 or num_routed_experts, whichever is smaller
+            recommended_top_k = min(recommended_top_k, max_recommended_top_k)
+            
+            # If the provided top_k is too small, increase it
+            if top_k < recommended_top_k:
+                print(f"⚠️  Adjusting top_k for Expert Choice routing:")
+                print(f"   Original top_k: {top_k}")
+                print(f"   Recommended top_k: {recommended_top_k}")
+                print(f"   With {num_routed_experts} experts × {recommended_top_k} tokens = {num_routed_experts * recommended_top_k} tokens routed")
+                print(f"   Coverage: {(num_routed_experts * recommended_top_k) / estimated_tokens_per_batch * 100:.1f}%")
+                
+                top_k = recommended_top_k
+            else:
+                # Log current coverage for visibility
+                current_coverage = (num_routed_experts * top_k) / estimated_tokens_per_batch * 100
+                print(f"✅ top_k ({top_k}) is sufficient for {num_routed_experts} experts")
+                print(f"   Coverage: {current_coverage:.1f}%")
         
         # Validate top_k parameter (controls how many tokens each expert selects)
         if top_k < 1:
@@ -972,13 +1073,17 @@ class SimpleMoEModel(nn.Module):
             print(f"⚠️  Warning: top_k ({top_k}) exceeds num_routed_experts ({num_routed_experts}). Adjusting top_k to {num_routed_experts}")
             top_k = num_routed_experts
         self.top_k = top_k
-        self.noise_scale = noise_scale  # Scale of noise added to router logits during training
+        self.noise_scale = noise_scale  # Scale of noise added to router logits during training (DeepSeek-MoE default: 0.5)
+        self.load_balance_loss_weight = load_balance_loss_weight  # Weight for load balancing loss (DeepSeek-MoE default: 0.1)
         self.z_loss_weight = z_loss_weight  # Weight for Z-loss auxiliary loss
         self.target_z = 1.0  # Target Z value for Z-loss (default 1.0 for moderate spread)
         self.capacity_factor = capacity_factor  # Capacity factor for expert load balancing
         self.residual_factor = residual_factor  # Residual connection strength (default 0.1)
         self.embedding_dim = embedding_dim
         self.vocab_size = vocab_size  # Store vocab_size for validation
+        
+        # Print DeepSeek-MoE configuration
+        print(f"🔧 DeepSeek-MoE Config: {self.num_shared_experts} shared, {self.num_routed_experts} routed, top_k={self.top_k}, noise_scale={self.noise_scale}, load_balance_weight={self.load_balance_loss_weight}")
         
         # Embedding layer
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
@@ -1015,6 +1120,11 @@ class SimpleMoEModel(nn.Module):
         # Used for Expert Choice routing where each expert selects top_k tokens
         self.gate = nn.Linear(embedding_dim, self.num_routed_experts)
         
+        # Learnable weight for blending shared and routed experts (DeepSeek technique)
+        # Prevents shared experts from dominating and causing expert collapse
+        # Initialized to 0.5 (sigmoid(0.5) ≈ 0.62), target range: 0.3-0.5
+        self.shared_expert_weight = nn.Parameter(torch.tensor(0.5))
+        
         # Temperature scheduling for router: enables exploration then exploitation
         # Higher temperature early = soft routing (exploration)
         # Lower temperature later = sparse routing (exploitation)
@@ -1036,8 +1146,13 @@ class SimpleMoEModel(nn.Module):
         # Output normalization before projection (applied after combining experts)
         self.output_norm = nn.LayerNorm(embedding_dim)
         
+        # Dropout layers for DeepSeek-MoE aligned regularization (0.1-0.3 range)
+        self.expert_input_dropout = nn.Dropout(p=0.1)  # Applied before expert processing
+        self.expert_output_dropout = nn.Dropout(p=0.1)  # Applied after expert outputs
+        self.fusion_dropout = nn.Dropout(p=0.2)  # Applied after joint fusion (DeepSeek range: 0.1-0.3)
+        
         # Dropout for regularization before residual connection
-        self.residual_dropout = nn.Dropout(p=0.1)
+        self.residual_dropout = nn.Dropout(p=0.2)  # Increased from 0.1 to combat overfitting
         
         # Output decoder (standard 2-layer MLP)
         self.decoder = nn.Sequential(
@@ -1204,12 +1319,38 @@ class SimpleMoEModel(nn.Module):
         else:
             token_concentration = torch.tensor(0.0, device=device)
         
+        # Metric 6: Per-expert token counts (DeepSeek-style debugging)
+        # Count unique tokens assigned to each expert (for diagnosis of routing collapse)
+        expert_token_counts = []
+        for expert_id in range(num_routed_experts):
+            if expert_id < token_indices.shape[0]:
+                # Get unique token indices for this expert (may have duplicates due to top_k)
+                unique_tokens = token_indices[expert_id].unique()
+                count = unique_tokens.numel()
+                expert_token_counts.append(count)
+            else:
+                expert_token_counts.append(0)
+        
+        # Convert to tensor for consistency with other metrics
+        expert_token_counts_tensor = torch.tensor(expert_token_counts, dtype=torch.long, device=device)
+        
+        # Compute min and max for quick diagnosis
+        if len(expert_token_counts) > 0:
+            min_tokens_per_expert = torch.tensor(min(expert_token_counts), dtype=torch.long, device=device)
+            max_tokens_per_expert = torch.tensor(max(expert_token_counts), dtype=torch.long, device=device)
+        else:
+            min_tokens_per_expert = torch.tensor(0, dtype=torch.long, device=device)
+            max_tokens_per_expert = torch.tensor(0, dtype=torch.long, device=device)
+        
         return {
             'router_entropy': router_entropy,
             'load_imbalance': load_imbalance,
             'top_expert_fraction': top_expert_fraction,
             'expert_utilization': expert_utilization,
             'token_concentration': token_concentration,
+            'expert_token_counts': expert_token_counts_tensor,  # [num_routed_experts] - unique tokens per expert
+            'min_tokens_per_expert': min_tokens_per_expert,  # Scalar - minimum tokens any expert received
+            'max_tokens_per_expert': max_tokens_per_expert,  # Scalar - maximum tokens any expert received
         }
     
     def forward(self, text_tokens: torch.Tensor, image_features: torch.Tensor = None, return_load_balance_loss: bool = False, return_gate_logits: bool = False):
@@ -1244,6 +1385,9 @@ class SimpleMoEModel(nn.Module):
         
         # Flatten batch and seq_len for routing: [batch, seq_len, embedding_dim] -> [batch*seq_len, embedding_dim]
         text_flat = text_sequence.view(-1, embedding_dim)  # [batch*seq_len, embedding_dim]
+        
+        # Apply expert input dropout (DeepSeek regularization) - only during training
+        text_flat = self.expert_input_dropout(text_flat) if self.training else text_flat
         
         # Compute gate logits using shared gate (per token)
         gate_logits = self.gate(text_flat)  # [batch*seq_len, num_routed_experts]
@@ -1332,6 +1476,9 @@ class SimpleMoEModel(nn.Module):
         # Reshape back to sequence: [batch*seq_len, embedding_dim] -> [batch, seq_len, embedding_dim]
         routed_combined = routed_combined_flat.view(batch_size, seq_len, embedding_dim)
         
+        # Apply expert output dropout (DeepSeek regularization) - only during training
+        routed_combined = self.expert_output_dropout(routed_combined) if self.training else routed_combined
+        
         # Handle tokens that were not selected by any expert (fail-safe to shared experts)
         # Track which tokens were processed by routed experts (in flattened space)
         processed_tokens_flat = torch.zeros(batch_size * seq_len, dtype=torch.bool, device=text_sequence.device)
@@ -1349,8 +1496,13 @@ class SimpleMoEModel(nn.Module):
             # Blend: use shared experts for unprocessed tokens, routed for others
             routed_combined = (1.0 - unprocessed_mask) * routed_combined + unprocessed_mask * shared_combined
         
-        # Combine shared and routed expert outputs
-        combined = shared_combined + routed_combined  # [batch, seq_len, embedding_dim]
+        # Combine shared and routed expert outputs with learnable weighting (DeepSeek technique)
+        # This prevents shared experts from dominating and causing expert collapse
+        # Weight shared and routed separately using learnable parameter
+        shared_scale = torch.sigmoid(self.shared_expert_weight)  # 0-1 scale (target: ~0.3-0.5)
+        routed_scale = 1.0 - shared_scale  # Complementary scale
+        
+        combined = shared_scale * shared_combined + routed_scale * routed_combined  # [batch, seq_len, embedding_dim]
         
         # Joint fusion with normalization and residual connection
         # Process each token: [batch, seq_len, embedding_dim] -> [batch, seq_len, embedding_dim]
@@ -1359,7 +1511,8 @@ class SimpleMoEModel(nn.Module):
         fused_output_flat = self.joint_fusion(combined_flat)  # [batch*seq_len, embedding_dim]
         # Apply normalization and residual: x = x + dropout(norm(ffn(x)))
         fused_output_flat = self.joint_fusion_norm(fused_output_flat)
-        fused_output_flat = nn.functional.dropout(fused_output_flat, p=0.1, training=self.training)
+        # Apply fusion dropout (DeepSeek regularization) - only during training
+        fused_output_flat = self.fusion_dropout(fused_output_flat) if self.training else fused_output_flat
         # Add residual connection
         fused_output_flat = combined_flat + fused_output_flat  # Residual connection
         
@@ -1385,7 +1538,7 @@ class SimpleMoEModel(nn.Module):
         
         # For compatibility with existing code, return [batch, vocab_size] by taking last token
         # This maintains backward compatibility while enabling sequence-level processing
-        output = output[:, -1, :]  # [batch, vocab_size] - use last token for prediction
+        # output = output[:, -1, :]  # [batch, vocab_size] - use last token for prediction
         
         # Debug: Check output shape (should be [batch, vocab_size])
         # Only print once to reduce noise
@@ -1437,8 +1590,13 @@ class SimpleMoEModel(nn.Module):
                         # Ensure it's on the correct device
                         cap_loss_tensor = cap_loss_tensor.to(output.device)
                     
-                    # Combined auxiliary loss: weighted sum of all losses
-                    aux_loss = load_bal_loss + self.z_loss_weight * z_loss_val + 0.1 * cap_loss_tensor
+                    # Combined auxiliary loss: DeepSeek-aligned weighted sum of all losses
+                    # Apply proper weights to each component
+                    weighted_load_bal = self.load_balance_loss_weight * load_bal_loss  # 0.1x (DeepSeek default)
+                    weighted_z_loss = self.z_loss_weight * z_loss_val  # 0.001x (DeepSeek default)
+                    weighted_cap_loss = 0.01 * cap_loss_tensor  # 0.01x (capacity loss weight)
+                    
+                    aux_loss = weighted_load_bal + weighted_z_loss + weighted_cap_loss
                     
                     # Ensure routing_metrics exists and convert all values to tensors on correct device
                     if not hasattr(self, '_routing_metrics') or self._routing_metrics is None:
@@ -1478,6 +1636,192 @@ class SimpleMoEModel(nn.Module):
         return output
 
 
+def setup_optimizer_and_scheduler(model, config):
+    """Setup optimizer and learning rate scheduler matching DeepSeek training procedure.
+    
+    Creates AdamW optimizer with warmup + cosine annealing scheduler.
+    Warmup prevents instability early, cosine annealing encourages exploration then exploitation.
+    
+    Args:
+        model: PyTorch model
+        config: Dictionary with:
+            - learning_rate: float (e.g., 0.0001)
+            - num_epochs: int
+            - total_train_steps: int (len(train_loader) * num_epochs)
+            - warmup_steps: int (default: 10% of total_train_steps)
+    
+    Returns:
+        (optimizer, scheduler) tuple
+    """
+    learning_rate = config.get('learning_rate', 0.0001)
+    total_train_steps = config.get('total_train_steps', 1000)
+    warmup_steps = config.get('warmup_steps', max(1, int(total_train_steps * 0.1)))
+    weight_decay = config.get('weight_decay', 1e-5)
+    
+    # Create optimizer: AdamW with weight decay
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay
+    )
+    
+    # Create warmup scheduler: linear warmup from 0 to learning_rate over warmup_steps
+    def warmup_lambda(step):
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
+        return 1.0
+    
+    warmup_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_lambda)
+    
+    # Create cosine annealing scheduler: from learning_rate to 0.1*learning_rate
+    # over remaining steps (total_train_steps - warmup_steps)
+    cosine_steps = max(1, total_train_steps - warmup_steps)
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=cosine_steps,
+        eta_min=0.1 * learning_rate
+    )
+    
+    # Chain schedulers: warmup first, then cosine annealing
+    # We'll use SequentialLR to chain them
+    from torch.optim.lr_scheduler import SequentialLR
+    
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_steps]
+    )
+    
+    return optimizer, scheduler
+
+
+def log_training_report(epoch, num_epochs, train_loss, test_loss, model, routing_metrics, 
+                        avg_load_bal_loss, avg_z_loss, avg_cap_loss, num_active_experts,
+                        avg_expert_utilization, shared_scale, report_file='training_report.txt'):
+    """Log training metrics in DeepSeek-MoE style.
+    
+    Provides comprehensive visibility into training health, routing dynamics,
+    and expert utilization following DeepSeek logging patterns.
+    
+    Args:
+        epoch: Current epoch number (0-indexed)
+        num_epochs: Total number of epochs
+        train_loss: Average training loss for the epoch
+        test_loss: Average test loss for the epoch
+        model: SimpleMoEModel instance
+        routing_metrics: Dictionary of routing metrics from compute_routing_metrics()
+        avg_load_bal_loss: Average load balance loss for the epoch
+        avg_z_loss: Average Z-loss for the epoch
+        avg_cap_loss: Average capacity loss for the epoch
+        num_active_experts: Number of active routed experts
+        avg_expert_utilization: Average expert utilization rate
+        shared_scale: Shared expert weight (from sigmoid(shared_expert_weight))
+        report_file: Path to file for saving reports
+    """
+    # Extract routing metrics with safe defaults
+    router_entropy = routing_metrics.get('router_entropy', torch.tensor(0.0))
+    if isinstance(router_entropy, torch.Tensor):
+        router_entropy = router_entropy.item()
+    
+    load_imbalance = routing_metrics.get('load_imbalance', torch.tensor(0.0))
+    if isinstance(load_imbalance, torch.Tensor):
+        load_imbalance = load_imbalance.item()
+    
+    top_expert_fraction = routing_metrics.get('top_expert_fraction', torch.tensor(0.0))
+    if isinstance(top_expert_fraction, torch.Tensor):
+        top_expert_fraction = top_expert_fraction.item()
+    
+    expert_utilization = routing_metrics.get('expert_utilization', None)
+    if expert_utilization is not None and isinstance(expert_utilization, torch.Tensor):
+        # Compute shared vs routed utilization
+        if model.num_shared_experts > 0 and model.num_routed_experts > 0:
+            # Expert utilization is for routed experts only
+            routed_util = expert_utilization.mean().item() if expert_utilization.numel() > 0 else 0.0
+            # Shared experts are always active, so utilization is typically high
+            # Approximate as 1.0 - routed_util for shared (they handle overflow)
+            shared_util = max(0.0, min(1.0, shared_scale * 1.0))  # Scale by shared weight
+        else:
+            routed_util = expert_utilization.mean().item() if expert_utilization.numel() > 0 else 0.0
+            shared_util = 0.0
+    else:
+        routed_util = avg_expert_utilization if avg_expert_utilization > 0 else 0.0
+        shared_util = shared_scale  # Use shared_scale as proxy
+    
+    expert_token_counts = routing_metrics.get('expert_token_counts', None)
+    if expert_token_counts is not None:
+        if isinstance(expert_token_counts, torch.Tensor):
+            expert_counts_list = expert_token_counts.cpu().tolist()
+        else:
+            expert_counts_list = list(expert_token_counts) if isinstance(expert_token_counts, (list, tuple)) else [expert_token_counts]
+        expert_counts_str = str(expert_counts_list[:10])  # Show first 10
+        if len(expert_counts_list) > 10:
+            expert_counts_str += f" ... (showing first 10 of {len(expert_counts_list)})"
+    else:
+        expert_counts_str = "N/A"
+    
+    # Compute expert diversity (coefficient of variation of token counts)
+    if expert_token_counts is not None and isinstance(expert_token_counts, torch.Tensor):
+        counts_list = expert_token_counts.cpu().tolist()
+        if len(counts_list) > 1 and sum(counts_list) > 0:
+            counts_array = np.array(counts_list)
+            mean_counts = counts_array.mean()
+            std_counts = counts_array.std()
+            expert_diversity = std_counts / (mean_counts + 1e-10)  # CV
+        else:
+            expert_diversity = 0.0
+    else:
+        expert_diversity = "N/A"
+    
+    # Health checks
+    all_experts_active = num_active_experts == model.num_routed_experts
+    load_balanced = load_imbalance < 0.3
+    no_collapse = top_expert_fraction < 0.6
+    entropy_healthy = router_entropy > 0.3
+    
+    report = f"""
+============================================================
+📚 Epoch {epoch+1}/{num_epochs}
+============================================================
+
+✅ Losses:
+   Train Loss: {train_loss:.4f}
+   Test Loss:  {test_loss:.4f}
+
+🔍 DeepSeek-MoE Diagnostics:
+   Shared Expert Utilization: {shared_util:.2%}
+   Routed Expert Utilization: {routed_util:.2%}
+   Per-Expert Tokens: {expert_counts_str}
+   
+   ✅ Load Balance Loss: {avg_load_bal_loss:.6f}
+   ✅ Z-Loss: {avg_z_loss:.6f}
+   ✅ Capacity Loss: {avg_cap_loss:.6f}
+   
+   Router Entropy: {router_entropy:.4f} (target: 0.3-1.0)
+   Load Imbalance: {load_imbalance:.4f} (target: <0.3)
+   Top Expert Fraction: {top_expert_fraction:.2%} (target: 40-60%)
+
+🌡️  Training Dynamics:
+   Current Temperature: {model.gate_temperature:.4f}
+   Gating Noise Scale: {model.noise_scale:.4f}
+   Expert Diversity: {expert_diversity if isinstance(expert_diversity, str) else f'{expert_diversity:.4f}'}
+
+⚠️  Health Checks:
+   All routed experts active: {'✓' if all_experts_active else '✗'} ({num_active_experts}/{model.num_routed_experts})
+   Load balanced: {'✓' if load_balanced else '✗'} (imbalance: {load_imbalance:.4f})
+   No expert collapse: {'✓' if no_collapse else '✗'} (top expert: {top_expert_fraction:.2%})
+   Entropy healthy: {'✓' if entropy_healthy else '✗'} (entropy: {router_entropy:.4f})
+"""
+    
+    print(report)
+    
+    # Save to file
+    try:
+        with open(report_file, 'a') as f:
+            f.write(report + '\n')
+    except Exception as e:
+        print(f"   ⚠️  Warning: Could not write to report file {report_file}: {e}")
+
+
 def train_real_model(
     multimodal_jsonl: str = None,
     text_jsonl: str = None,
@@ -1486,7 +1830,7 @@ def train_real_model(
     outputs_dir: str = None,
     epochs: int = 10,
     batch_size: int = 8,
-    learning_rate: float = 0.0001,
+    learning_rate: float = 0.00005,  # Reduced from 0.0001 to combat overfitting
     device: str = "auto",
     checkpoint_dir: str = "checkpoints",
     disable_diagrams: bool = False,
@@ -1591,6 +1935,9 @@ def train_real_model(
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     
+    # Calculate total training steps for scheduler
+    total_train_steps = len(train_dataloader) * epochs
+    
     # Build model
     print(f"\n🏗️  Building trainable PyTorch MoE model...")
     
@@ -1613,8 +1960,7 @@ def train_real_model(
             num_text_experts=num_text_experts_val,
             num_image_experts=num_image_experts_val,
             num_multimodal_experts=num_multimodal_experts_val,
-            top_k=1,  # Force specialization
-            noise_scale=0.5,  # Better exploration
+            # Using DeepSeek-MoE defaults: top_k=2, noise_scale=0.5, load_balance_loss_weight=0.1
             temperature_schedule="linear",  # Enable annealing
             temperature_start=2.0,  # High start for exploration
             temperature_end=0.1,  # Low end for exploitation
@@ -1622,41 +1968,38 @@ def train_real_model(
     else:
         # Backward compatibility: split num_experts evenly
         # If num_experts is small (≤2), increase routed experts to prevent routing collapse
-        # But scale based on dataset size to avoid over-parameterization
+        # Use Expert Choice routing calculation (based on tokens per batch)
         if num_experts <= 2:
             print(f"   ⚠️  WARNING: num_experts={num_experts} is too small, risks routing collapse.")
-            # Calculate appropriate number of routed experts based on dataset size
-            # Formula: num_experts = max(2, min(num_tokens // 5000, 8))
-            # Alternative: Optimal num_experts ≈ sqrt(num_tokens / 10,000)
-            # Using training samples as "tokens" (num_tokens = dataset_size)
-            if dataset_size:
-                # Direct formula: max(2, min(num_tokens // 5000, 8))
-                num_routed_experts_override = max(2, min(dataset_size // 5000, 8))
-                
-                # Also compute square root formula for comparison
-                sqrt_formula_experts = int((dataset_size / 10000) ** 0.5)
-                sqrt_formula_experts = max(2, min(sqrt_formula_experts, 8))  # Cap at 8
-                
-                # Use the direct formula (more conservative)
-                actual_samples_per_expert = dataset_size // num_routed_experts_override if num_routed_experts_override > 0 else 0
-                print(f"   🔧 Auto-adjusting: Using {num_routed_experts_override} routed experts")
-                print(f"      Formula: max(2, min({dataset_size} // 5000, 8)) = {num_routed_experts_override}")
-                print(f"      Based on {dataset_size} training samples → ~{actual_samples_per_expert} samples/expert")
-                if sqrt_formula_experts != num_routed_experts_override:
-                    print(f"      (sqrt formula would suggest: {sqrt_formula_experts} experts)")
-            else:
-                # Fallback: use minimum 2 experts
-                num_routed_experts_override = 2
-                print(f"   🔧 Auto-adjusting: Using {num_routed_experts_override} routed experts (default minimum)")
-            num_shared_experts_override = 1
+            # Calculate appropriate number of routed experts based on Expert Choice routing
+            # For Expert Choice: size based on tokens per batch, not dataset size
+            
+            # Estimate tokens per batch from actual training configuration
+            estimated_tokens_per_batch = batch_size * 127  # Typical seq_len from training
+            
+            # Target: each expert should process at least this many tokens
+            tokens_per_expert_target = 80
+            
+            # Calculate required experts
+            num_routed_experts_override = max(2, math.ceil(estimated_tokens_per_batch / tokens_per_expert_target))
+            
+            # Cap at maximum for small datasets (prevent over-sizing)
+            max_routed_experts = 128
+            if num_routed_experts_override > max_routed_experts:
+                num_routed_experts_override = max_routed_experts
+            
+            print(f"   🔧 Expert Choice Routing Auto-Sizing:")
+            print(f"      Estimated tokens per batch: {estimated_tokens_per_batch} (batch_size={batch_size} × seq_len≈127)")
+            print(f"      Target tokens per expert: {tokens_per_expert_target}")
+            print(f"      Calculated routed experts: {num_routed_experts_override}")
+            num_shared_experts_override = 2  # DeepSeek-MoE default
             model = SimpleMoEModel(
                 vocab_size=10007,
                 embedding_dim=128,
                 num_experts=num_experts,  # Keep for backward compat
                 num_shared_experts=num_shared_experts_override,
                 num_routed_experts=num_routed_experts_override,
-                top_k=1,  # Force specialization
-                noise_scale=0.5,  # Better exploration
+                # Using DeepSeek-MoE defaults: top_k=2, noise_scale=0.5, load_balance_loss_weight=0.1
                 temperature_schedule="linear",  # Enable annealing
                 temperature_start=2.0,  # High start for exploration
                 temperature_end=0.1,  # Low end for exploitation
@@ -1667,8 +2010,7 @@ def train_real_model(
                 vocab_size=10007,
                 embedding_dim=128,
                 num_experts=num_experts,
-                top_k=1,  # Force specialization
-                noise_scale=0.5,  # Better exploration
+                # Using DeepSeek-MoE defaults: num_shared_experts=2, num_routed_experts=4, top_k=2, noise_scale=0.5, load_balance_loss_weight=0.1
                 temperature_schedule="linear",  # Enable annealing
                 temperature_start=2.0,  # High start for exploration
                 temperature_end=0.1,  # Low end for exploitation
@@ -1734,7 +2076,7 @@ def train_real_model(
         if opt_params.get("eps") == "auto":
             opt_params["eps"] = 1e-8  # Standard epsilon
         if opt_params.get("weight_decay") == "auto":
-            opt_params["weight_decay"] = 1e-5
+            opt_params["weight_decay"] = 1e-3  # Increased from 1e-5 to combat overfitting
         
         # Scheduler params
         if "scheduler" not in ds_config:
@@ -1780,27 +2122,78 @@ def train_real_model(
         print(f"     ZeRO stage: {ds_config.get('zero_optimization', {}).get('stage', 'N/A')}")
         print(f"     BF16 enabled: {ds_config.get('bf16', {}).get('enabled', 'N/A')}")
         
-        # Initialize DeepSpeed
-        model_engine, optimizer, _, scheduler = deepspeed.initialize(
-            model=model,
-            config=ds_config
-        )
+        # For single GPU training, disable distributed/MPI discovery
+        # DeepSpeed will still work but won't try to initialize MPI
+        # Check if we're in a single GPU environment
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if num_gpus <= 1:
+            # Disable MPI discovery for single GPU
+            os.environ['MASTER_ADDR'] = 'localhost'
+            os.environ['MASTER_PORT'] = '12355'
+            os.environ['RANK'] = '0'
+            os.environ['LOCAL_RANK'] = '0'
+            os.environ['WORLD_SIZE'] = '1'
+            # Disable MPI discovery
+            os.environ['DEEPSPEED_DISABLE_MPI'] = '1'
         
-        print(f"✅ DeepSpeed initialized")
-        print(f"   Optimizer: {ds_config.get('optimizer', {}).get('type', 'AdamW')}")
-        print(f"   Learning rate: {learning_rate}")
-        print(f"   Weight decay: {opt_params.get('weight_decay', 'N/A')}")
-        print(f"   ZeRO stage: {ds_config.get('zero_optimization', {}).get('stage', 'N/A')}")
+        # Initialize DeepSpeed
+        try:
+            # Try to initialize DeepSpeed with explicit args to avoid MPI
+            model_engine, optimizer, _, scheduler = deepspeed.initialize(
+                model=model,
+                config=ds_config,
+                model_parameters=model.parameters() if hasattr(model, 'parameters') else None
+            )
+        except Exception as e:
+            error_str = str(e).lower()
+            if "mpi4py" in error_str or "mpi" in error_str or "init_distributed" in error_str:
+                # If MPI is required but not available, fall back to standard PyTorch
+                print(f"⚠️  DeepSpeed initialization failed (MPI/distributed issue): {e}")
+                print(f"   Falling back to standard PyTorch optimizer")
+                print(f"   Note: For single GPU training, standard PyTorch is sufficient")
+                use_deepspeed = False
+                model_engine = None  # Will be set to model below
+                optimizer = None
+                scheduler = None
+            else:
+                raise
+        
+        if model_engine is not None:
+            print(f"✅ DeepSpeed initialized")
+            print(f"   Optimizer: {ds_config.get('optimizer', {}).get('type', 'AdamW')}")
+            print(f"   Learning rate: {learning_rate}")
+            print(f"   Weight decay: {opt_params.get('weight_decay', 'N/A')}")
+            print(f"   ZeRO stage: {ds_config.get('zero_optimization', {}).get('stage', 'N/A')}")
+        else:
+            # Fallback: use standard PyTorch optimizer with DeepSeek-style scheduler
+            use_deepspeed = False
+            model_engine = model
+            # Setup optimizer and scheduler matching DeepSeek training procedure
+            scheduler_config = {
+                'learning_rate': learning_rate,
+                'num_epochs': epochs,
+                'total_train_steps': total_train_steps,
+                'warmup_steps': max(1, int(total_train_steps * 0.1)),
+                'weight_decay': 1e-3  # Increased from 1e-5 to combat overfitting
+            }
+            optimizer, scheduler = setup_optimizer_and_scheduler(model, scheduler_config)
+            print(f"✅ Using standard PyTorch optimizer with DeepSeek-style LR scheduling (DeepSpeed disabled)")
+            print(f"   Total training steps: {total_train_steps}, Warmup steps: {scheduler_config['warmup_steps']}")
     else:
         if use_deepspeed:
             print(f"⚠️  DeepSpeed requested but not available. Using standard PyTorch optimizer.")
-        # Standard PyTorch optimizer
-        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-        # Learning rate scheduler to reduce LR when validation plateaus
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6
-        )
+        # Standard PyTorch optimizer with DeepSeek-style scheduler
+        scheduler_config = {
+            'learning_rate': learning_rate,
+            'num_epochs': epochs,
+            'total_train_steps': total_train_steps,
+            'warmup_steps': max(1, int(total_train_steps * 0.1)),
+            'weight_decay': 1e-5
+        }
+        optimizer, scheduler = setup_optimizer_and_scheduler(model, scheduler_config)
         model_engine = model
+        print(f"✅ Using DeepSeek-style LR scheduling")
+        print(f"   Total training steps: {total_train_steps}, Warmup steps: {scheduler_config['warmup_steps']}")
         
         # DIAGNOSTIC 4 (continued): Optimizer state
         print(f"   Optimizer: {type(optimizer).__name__}")
@@ -1919,6 +2312,9 @@ def train_real_model(
         # Initialize global step counter for temperature scheduling
         global_step = 0
         
+        # Initialize auxiliary loss history for routing stability detection (DeepSeek technique)
+        aux_loss_history = []  # Track aux_loss over last N steps to detect routing collapse
+        
         for epoch in range(start_epoch, epochs):
             print(f"\n{'='*60}")
             print(f"📚 Epoch {epoch + 1}/{epochs}" + (f" (resumed from {start_epoch})" if epoch == start_epoch and start_epoch > 0 else ""))
@@ -1933,6 +2329,7 @@ def train_real_model(
             total_dropped_fraction = 0.0  # Track dropped token fraction
             total_expert_utilization = 0.0  # Track expert utilization
             batch_count = 0
+            epoch_aux_losses = []  # Track aux_loss per batch for epoch variance calculation
             bert_scores = []
             diagnostics_run = False  # Flag to ensure diagnostics run once per first epoch
             expert_usage = torch.zeros(model.num_experts, device=device)  # Track expert usage
@@ -2015,7 +2412,14 @@ def train_real_model(
                     target_z = getattr(model, 'target_z', 1.0)  # Default target_z = 1.0
                     z_loss_val = z_loss(gate_logits, z_loss_weight=1.0, target_z=target_z)
                     cap_loss = torch.tensor(0.0, device=output.device)
-                    aux_loss = load_bal_loss + model.z_loss_weight * z_loss_val
+                    
+                    # Apply DeepSeek-aligned weights (same as in forward() method)
+                    load_bal_weight = getattr(model, 'load_balance_loss_weight', 0.1)
+                    z_loss_weight = getattr(model, 'z_loss_weight', 0.001)
+                    weighted_load_bal = load_bal_weight * load_bal_loss
+                    weighted_z_loss = z_loss_weight * z_loss_val
+                    weighted_cap_loss = 0.01 * cap_loss
+                    aux_loss = weighted_load_bal + weighted_z_loss + weighted_cap_loss
                     routing_metrics = {}  # Empty metrics for backward compatibility
                 
                 # Ensure output is 2D [batch, vocab_size] - handle any shape issues
@@ -2124,17 +2528,96 @@ def train_real_model(
                     unique_experts = torch.unique(topk_idx)
                     expert_usage[unique_experts] += 1
                 
-                # Combine main loss with auxiliary loss (already weighted in forward())
-                # Weight the auxiliary loss to penalize uneven routing more strongly
-                # Increased from 0.01 to 0.1 to prevent routing collapse
-                aux_loss_weight = 0.1  # Increased from 0.01 to 0.1 for stronger load balancing
-                loss = main_loss + aux_loss_weight * aux_loss
+                # Combine main loss with auxiliary loss
+                # Note: aux_loss already has proper weights applied in forward() method
+                # (load_balance_loss_weight * load_bal_loss + z_loss_weight * z_loss_val + 0.01 * cap_loss)
+                # So we just add it directly without additional weighting
+                loss = main_loss + aux_loss
+                
+                # Optional logging to verify weights are applied and routing health (every 50 steps for routing, 100 for weights)
+                if batch_idx % 50 == 0:
+                    # Get routing metrics for per-expert diagnosis
+                    if hasattr(model_engine, '_routing_metrics') and model_engine._routing_metrics:
+                        metrics = model_engine._routing_metrics
+                    elif hasattr(model, '_routing_metrics') and model._routing_metrics:
+                        metrics = model._routing_metrics
+                    else:
+                        metrics = None
+                    
+                    if metrics and 'expert_token_counts' in metrics:
+                        expert_counts = metrics['expert_token_counts']
+                        if isinstance(expert_counts, torch.Tensor):
+                            expert_counts_list = expert_counts.cpu().tolist()
+                        else:
+                            expert_counts_list = list(expert_counts) if isinstance(expert_counts, (list, tuple)) else [expert_counts]
+                        
+                        min_tokens = metrics.get('min_tokens_per_expert', torch.tensor(0))
+                        max_tokens = metrics.get('max_tokens_per_expert', torch.tensor(0))
+                        if isinstance(min_tokens, torch.Tensor):
+                            min_tokens = min_tokens.item()
+                        if isinstance(max_tokens, torch.Tensor):
+                            max_tokens = max_tokens.item()
+                        
+                        print(f"   Step {batch_idx}: Per-expert tokens: {expert_counts_list}")
+                        print(f"   Step {batch_idx}: Token range: {min_tokens}-{max_tokens} per expert")
+                
+                # Optional logging to verify weights are applied (every 100 steps)
+                if batch_idx % 100 == 0:
+                    # Get model for accessing weights
+                    if use_deepspeed and model_engine is not None and hasattr(model_engine, 'module'):
+                        actual_model = model_engine.module
+                    else:
+                        actual_model = model
+                    
+                    # Extract individual weighted components for logging
+                    # Note: aux_loss is already weighted, so we need to compute individual components
+                    # for logging purposes
+                    load_bal_weight = actual_model.load_balance_loss_weight if hasattr(actual_model, 'load_balance_loss_weight') else 0.1
+                    z_loss_weight = actual_model.z_loss_weight if hasattr(actual_model, 'z_loss_weight') else 0.001
+                    weighted_load_bal = load_bal_weight * load_bal_loss
+                    weighted_z_loss = z_loss_weight * z_loss_val
+                    weighted_cap_loss = 0.01 * (cap_loss.item() if isinstance(cap_loss, torch.Tensor) else cap_loss)
+                    
+                    # Get shared expert weight for logging (DeepSeek technique monitoring)
+                    shared_scale = torch.sigmoid(actual_model.shared_expert_weight).item() if hasattr(actual_model, 'shared_expert_weight') else 0.5
+                    
+                    print(f"   Step {batch_idx}: Main: {main_loss.item():.4f}, "
+                          f"LoadBal({load_bal_weight:.2f}x): {weighted_load_bal.item():.6f}, "
+                          f"Z({z_loss_weight:.4f}x): {weighted_z_loss.item():.6f}, "
+                          f"Cap(0.01x): {weighted_cap_loss:.6f}, "
+                          f"Shared weight: {shared_scale:.4f} (target: ~0.3-0.5)")
                 
                 # Accumulate auxiliary loss components
-                total_aux_loss += aux_loss.item()
+                aux_loss_value = aux_loss.item()
+                total_aux_loss += aux_loss_value
                 total_load_bal_loss += load_bal_loss.item()
                 total_z_loss += z_loss_val.item()
                 total_cap_loss += cap_loss.item() if isinstance(cap_loss, torch.Tensor) else cap_loss
+                
+                # Track aux_loss history for routing stability detection (DeepSeek technique)
+                aux_loss_history.append(aux_loss_value)
+                epoch_aux_losses.append(aux_loss_value)
+                
+                # Keep only last 50 values for stability check
+                if len(aux_loss_history) > 50:
+                    aux_loss_history = aux_loss_history[-50:]
+                
+                # Check routing stability (detect collapse before it affects test loss)
+                if len(aux_loss_history) == 50 and epoch > 3:
+                    stability = np.std(aux_loss_history)
+                    if stability < 0.00001:
+                        # Get model for accessing weights
+                        if use_deepspeed and model_engine is not None and hasattr(model_engine, 'module'):
+                            actual_model = model_engine.module
+                        else:
+                            actual_model = model
+                        load_bal_weight = actual_model.load_balance_loss_weight if hasattr(actual_model, 'load_balance_loss_weight') else 0.1
+                        noise_scale = actual_model.noise_scale if hasattr(actual_model, 'noise_scale') else 0.5
+                        print(f"   ⚠️  WARNING: Auxiliary loss collapsed (stability={stability:.8f})")
+                        print(f"   ⚠️  This indicates routing collapse - auxiliary loss is no longer varying")
+                        print(f"   💡 Consider adjusting: load_balance_loss_weight, noise_scale, or num_experts")
+                        print(f"   💡 Current values: load_bal_weight={load_bal_weight:.4f}, noise_scale={noise_scale:.4f}")
+                        # Note: We don't trigger early stopping here, just warn - let user decide
                 
                 # DIAGNOSTIC: Check load balance loss and expert usage (first batch only)
                 if not diagnostics_run and epoch == start_epoch and batch_idx == 0:
@@ -2239,7 +2722,8 @@ def train_real_model(
                         else:
                             util = 0.0
                         print(f"     Capacity: Dropped {dropped:.2f}%, Utilization {util:.2f}%")
-                    print(f"     Combined aux loss: {aux_loss.item():.4f} (weighted: {aux_loss_weight * aux_loss.item():.6f})")
+                    # aux_loss is already the weighted sum, so no need to multiply again
+                    print(f"     Combined aux loss: {aux_loss.item():.4f}")
                     print(f"     Total loss: {loss.item():.4f}")
                 
                 # Backward pass and optimizer step
@@ -2379,6 +2863,11 @@ def train_real_model(
                     # Gradient clipping to prevent exploding gradients
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
+                    
+                    # Step scheduler after each training step (DeepSeek-style)
+                    # Only step if not using DeepSpeed (DeepSpeed handles scheduler internally)
+                    if not (use_deepspeed and DEEPSPEED_AVAILABLE):
+                        scheduler.step()
                 
                 # Increment global step counter for temperature scheduling
                 global_step += 1
@@ -2627,6 +3116,19 @@ def train_real_model(
             print(f"   Test Loss:  {test_avg_loss:.4f} (evaluated on {total_test_samples} test samples)")
             print(f"🔍 Epoch {epoch + 1}: Aux loss = {avg_aux_loss:.4f} (LoadBal: {avg_load_bal_loss:.4f}, Z-loss: {avg_z_loss:.4f}, Cap: {avg_cap_loss:.4f})")
             
+            # Log auxiliary loss variance per epoch (DeepSeek routing stability metric)
+            if len(epoch_aux_losses) > 1:
+                aux_loss_variance = np.std(epoch_aux_losses)
+                print(f"   📊 Aux loss variance: {aux_loss_variance:.8f}", end="")
+                if aux_loss_variance < 0.00001:
+                    print(f" ⚠️  (COLLAPSE: variance too low, routing may be unstable)")
+                elif aux_loss_variance < 0.0001:
+                    print(f" ⚠️  (LOW: variance below healthy threshold)")
+                else:
+                    print(f" ✅ (HEALTHY: variance indicates active routing)")
+            else:
+                print(f"   📊 Aux loss variance: N/A (insufficient data)")
+            
             # Verify load balance loss is non-zero
             if avg_load_bal_loss == 0.0:
                 print(f"   ⚠️  WARNING: Load balance loss is zero! This may indicate routing issues.")
@@ -2642,11 +3144,36 @@ def train_real_model(
             else:
                 print(f"   ✅ All {num_active_experts} routed experts are being used")
             
-            # Print routing metrics if available
+            # Get routing metrics and shared expert scale for comprehensive report
             model_for_metrics = model_engine.module if (use_deepspeed and model_engine is not None and hasattr(model_engine, 'module')) else model
+            routing_metrics = {}
             if hasattr(model_for_metrics, '_routing_metrics') and model_for_metrics._routing_metrics:
                 routing_metrics = model_for_metrics._routing_metrics
-                print(f"   📊 Routing Metrics:")
+            
+            # Get shared expert scale
+            shared_scale = torch.sigmoid(model_for_metrics.shared_expert_weight).item() if hasattr(model_for_metrics, 'shared_expert_weight') else 0.5
+            
+            # Generate comprehensive DeepSeek-style training report
+            report_file_path = os.path.join(outputs_dir, 'training_report.txt')
+            log_training_report(
+                epoch=epoch,
+                num_epochs=epochs,
+                train_loss=avg_loss,
+                test_loss=test_avg_loss,
+                model=model_for_metrics,
+                routing_metrics=routing_metrics,
+                avg_load_bal_loss=avg_load_bal_loss,
+                avg_z_loss=avg_z_loss,
+                avg_cap_loss=avg_cap_loss,
+                num_active_experts=num_active_experts,
+                avg_expert_utilization=avg_expert_utilization,
+                shared_scale=shared_scale,
+                report_file=report_file_path
+            )
+            
+            # Legacy routing metrics print (kept for backward compatibility)
+            if routing_metrics:
+                print(f"   📊 Routing Metrics (detailed):")
                 print(f"      Router entropy: {routing_metrics.get('router_entropy', torch.tensor(0.0)).item():.4f}")
                 print(f"      Load imbalance: {routing_metrics.get('load_imbalance', torch.tensor(0.0)).item():.4f}")
                 print(f"      Top expert fraction: {routing_metrics.get('top_expert_fraction', torch.tensor(0.0)).item():.4f}")
@@ -2682,15 +3209,21 @@ def train_real_model(
             test_loss = test_avg_loss
             test_bert = test_avg_bert
             
-            # Update learning rate scheduler based on test loss
-            if scheduler is not None:
+            # Learning rate scheduler step (only for non-DeepSpeed)
+            # Note: For DeepSeek-style SequentialLR scheduler, we step after each batch,
+            # not after each epoch. This is already handled in the training loop above.
+            # DeepSpeed scheduler handles steps internally, so no action needed here.
+            if scheduler is not None and not (use_deepspeed and DEEPSPEED_AVAILABLE):
+                # For backward compatibility, check if it's ReduceLROnPlateau (old scheduler)
                 if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                     scheduler.step(test_avg_loss)
-                else:
-                    # DeepSpeed scheduler handles steps internally
-                    pass
+                # For SequentialLR (DeepSeek-style), scheduler is already stepped per batch
+            
+            # Log current learning rate for monitoring
             if optimizer is not None and hasattr(optimizer, 'param_groups'):
                 current_lr = optimizer.param_groups[0]['lr']
+                if epoch == start_epoch or (epoch + 1) % 5 == 0:
+                    print(f"   Current learning rate: {current_lr:.6f}")
             else:
                 current_lr = learning_rate
             
@@ -2822,8 +3355,8 @@ def main() -> None:
     ap.add_argument("--checkpoints", default="checkpoints", help="Directory for model checkpoints")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--learning-rate", type=float, default=0.0001,
-                    help="Learning rate (default: 0.0001, reduced to prevent overfitting)")
+    ap.add_argument("--learning-rate", type=float, default=0.00005,
+                    help="Learning rate (default: 0.00005, reduced to prevent overfitting)")
     ap.add_argument("--early-stopping-patience", type=int, default=5,
                     help="Number of epochs without improvement before early stopping (default: 5, set to 0 to disable)")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], 

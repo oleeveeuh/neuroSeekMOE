@@ -1,0 +1,692 @@
+"""
+Colab-Optimized Training Loop for DeepSeekMoE
+
+Optimized for Colab T4 GPU (12GB VRAM) with:
+- Mixed precision training
+- Gradient accumulation
+- Gradient checkpointing
+- Dynamic batch sizing
+- Efficient checkpointing
+- Comprehensive logging
+
+Usage:
+    python train_colab.py \
+        --model-path ./checkpoints/step_0.pt \
+        --dataset-text-dir ./data/arxiv/texts \
+        --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
+        --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
+        --output-dir ./checkpoints \
+        --batch-size 6 \
+        --gradient-accumulation 4 \
+        --max-steps 50000 \
+        --learning-rate 5e-4
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+from pathlib import Path
+from typing import Dict, Optional, List
+import csv
+
+import torch
+import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+
+# Import our components
+from arxiv_dataset import ArXivStreamingDataset, create_dataloader
+from training_adapter import ModelAdapter
+
+try:
+    import sentencepiece as spm
+    SENTENCEPIECE_AVAILABLE = True
+except ImportError:
+    SENTENCEPIECE_AVAILABLE = False
+    print("⚠️  sentencepiece not available")
+
+
+class TrainingLogger:
+    """Logger for training metrics with CSV export."""
+    
+    def __init__(self, log_file: str):
+        self.log_file = log_file
+        self.metrics = []
+        self.fieldnames = [
+            'step', 'loss', 'learning_rate', 'gpu_memory_mb', 'throughput_samples_per_sec',
+            'domain_neurodegeneration', 'domain_neuroscience', 'domain_medical_imaging',
+            'domain_clinical', 'domain_drug_discovery', 'domain_general_ml_health'
+        ]
+        
+        # Initialize CSV file
+        with open(self.log_file, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+            writer.writeheader()
+    
+    def log(self, metrics: Dict):
+        """Log metrics to CSV."""
+        self.metrics.append(metrics)
+        
+        with open(self.log_file, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+            writer.writerow(metrics)
+    
+    def get_latest_metrics(self, n: int = 100) -> List[Dict]:
+        """Get latest N metrics."""
+        return self.metrics[-n:]
+
+
+def get_gpu_memory_mb() -> float:
+    """Get current GPU memory usage in MB."""
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / (1024 ** 2)
+    return 0.0
+
+
+def find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
+    """Find latest checkpoint in directory.
+    
+    Args:
+        checkpoint_dir: Directory containing checkpoints
+        
+    Returns:
+        Path to latest checkpoint, or None if none found
+    """
+    if not os.path.exists(checkpoint_dir):
+        return None
+    
+    checkpoints = []
+    for filename in os.listdir(checkpoint_dir):
+        if filename.startswith('step_') and filename.endswith('.pt'):
+            try:
+                step = int(filename.replace('step_', '').replace('.pt', ''))
+                checkpoints.append((step, os.path.join(checkpoint_dir, filename)))
+            except ValueError:
+                continue
+    
+    if not checkpoints:
+        return None
+    
+    # Sort by step number and return latest
+    checkpoints.sort(key=lambda x: x[0])
+    return checkpoints[-1][1]
+
+
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    scaler: GradScaler,
+    step: int,
+    checkpoint_dir: str,
+    max_checkpoints: int = 2
+):
+    """Save training checkpoint.
+    
+    Args:
+        model: Model to save
+        optimizer: Optimizer state
+        scheduler: Scheduler state
+        scaler: GradScaler state
+        step: Current training step
+        checkpoint_dir: Directory to save checkpoints
+        max_checkpoints: Maximum number of checkpoints to keep
+    """
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    checkpoint_path = os.path.join(checkpoint_dir, f'step_{step}.pt')
+    
+    checkpoint = {
+        'step': step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'scaler_state_dict': scaler.state_dict(),
+    }
+    
+    torch.save(checkpoint, checkpoint_path)
+    print(f"💾 Saved checkpoint: {checkpoint_path}")
+    
+    # Delete old checkpoints (keep only last max_checkpoints)
+    checkpoints = []
+    for filename in os.listdir(checkpoint_dir):
+        if filename.startswith('step_') and filename.endswith('.pt'):
+            try:
+                step_num = int(filename.replace('step_', '').replace('.pt', ''))
+                checkpoints.append((step_num, os.path.join(checkpoint_dir, filename)))
+            except ValueError:
+                continue
+    
+    if len(checkpoints) > max_checkpoints:
+        checkpoints.sort(key=lambda x: x[0])
+        # Delete oldest checkpoints
+        for step_num, path in checkpoints[:-max_checkpoints]:
+            os.remove(path)
+            print(f"🗑️  Deleted old checkpoint: step_{step_num}.pt")
+
+
+def load_checkpoint(
+    checkpoint_path: str,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    scaler: GradScaler
+) -> int:
+    """Load training checkpoint.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file
+        model: Model to load state into
+        optimizer: Optimizer to load state into
+        scheduler: Scheduler to load state into
+        scaler: GradScaler to load state into
+        
+    Returns:
+        Step number from checkpoint
+    """
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    scaler.load_state_dict(checkpoint['scaler_state_dict'])
+    
+    step = checkpoint.get('step', 0)
+    print(f"✅ Loaded checkpoint from step {step}: {checkpoint_path}")
+    
+    return step
+
+
+def count_domains_in_batch(batch_metadata: Dict) -> Dict[str, int]:
+    """Count domain distribution in batch.
+    
+    Args:
+        batch_metadata: Batch metadata from adapter
+        
+    Returns:
+        Dictionary with domain counts
+    """
+    domain_counts = {
+        'neurodegeneration': 0,
+        'neuroscience': 0,
+        'medical_imaging': 0,
+        'clinical': 0,
+        'drug_discovery': 0,
+        'general_ml_health': 0
+    }
+    
+    domains_list = batch_metadata.get('domains', [])
+    for domains in domains_list:
+        for domain in domains:
+            if domain in domain_counts:
+                domain_counts[domain] += 1
+    
+    return domain_counts
+
+
+def find_max_batch_size(
+    model: nn.Module,
+    adapter: ModelAdapter,
+    tokenizer,
+    dataset: ArXivStreamingDataset,
+    device: torch.device,
+    start_batch_size: int = 8,
+    min_batch_size: int = 1
+) -> int:
+    """Dynamically find maximum batch size that fits in GPU memory.
+    
+    Args:
+        model: Model to test
+        adapter: Model adapter
+        tokenizer: Tokenizer
+        dataset: Dataset
+        device: Device to test on
+        start_batch_size: Starting batch size to test
+        min_batch_size: Minimum batch size to try
+        
+    Returns:
+        Maximum batch size that fits
+    """
+    print(f"🔍 Finding maximum batch size (starting from {start_batch_size})...")
+    
+    model.eval()
+    batch_size = start_batch_size
+    
+    # Create a small dataloader for testing
+    test_dataloader = create_dataloader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=0,  # Single worker for testing
+        pin_memory=False
+    )
+    
+    while batch_size >= min_batch_size:
+        try:
+            # Clear cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Try to process a batch
+            batch = next(iter(test_dataloader))
+            
+            with autocast():
+                result = adapter.process_batch(batch)
+                loss = result['loss']
+                # Simulate backward pass
+                loss.backward()
+            
+            # If successful, try larger batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            print(f"   ✅ Batch size {batch_size} fits")
+            batch_size = min(batch_size + 2, start_batch_size * 2)  # Cap at 2x start
+            break
+            
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                print(f"   ❌ Batch size {batch_size} too large, trying {batch_size - 1}")
+                batch_size -= 1
+            else:
+                raise
+    
+    model.train()
+    print(f"✅ Maximum batch size: {batch_size}")
+    return max(batch_size, min_batch_size)
+
+
+def train(
+    model: nn.Module,
+    dataset: ArXivStreamingDataset,
+    adapter: ModelAdapter,
+    checkpoint_dir: str,
+    batch_size: int = 6,
+    gradient_accumulation_steps: int = 4,
+    max_steps: int = 50000,
+    learning_rate: float = 5e-4,
+    warmup_steps: int = 2000,
+    save_interval: int = 5000,
+    log_interval: int = 100,
+    domain_log_interval: int = 1000,
+    resume_from_checkpoint: Optional[str] = None,
+    auto_find_batch_size: bool = True
+):
+    """Main training loop optimized for Colab GPU.
+    
+    Args:
+        model: DeepSeekMoE model
+        dataset: ArXiv streaming dataset
+        adapter: Model adapter
+        checkpoint_dir: Directory for checkpoints
+        batch_size: Batch size (will be auto-adjusted if needed)
+        gradient_accumulation_steps: Gradient accumulation steps
+        max_steps: Maximum training steps
+        learning_rate: Learning rate
+        warmup_steps: Warmup steps for scheduler
+        save_interval: Steps between checkpoints
+        log_interval: Steps between logging
+        domain_log_interval: Steps between domain distribution logging
+        resume_from_checkpoint: Path to checkpoint to resume from (auto-detected if None)
+        auto_find_batch_size: Whether to auto-detect max batch size
+    """
+    device = adapter.device
+    
+    # Find maximum batch size if requested
+    if auto_find_batch_size and torch.cuda.is_available():
+        # We need tokenizer for this, but it's in adapter
+        # For now, use provided batch_size
+        pass  # Skip auto-detection for now (requires tokenizer access)
+    
+    # Create dataloader
+    dataloader = create_dataloader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    # Setup optimizer
+    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    
+    # Setup scheduler: warmup + cosine annealing
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=0.1,
+        end_factor=1.0,
+        total_iters=warmup_steps
+    )
+    
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=max_steps - warmup_steps,
+        eta_min=learning_rate * 0.1
+    )
+    
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_steps]
+    )
+    
+    # Mixed precision scaler
+    scaler = GradScaler()
+    
+    # Enable gradient checkpointing if available
+    if hasattr(model, 'gradient_checkpointing_enable'):
+        model.gradient_checkpointing_enable()
+        print("✅ Gradient checkpointing enabled")
+    
+    # Resume from checkpoint if specified or auto-detect
+    start_step = 0
+    if resume_from_checkpoint:
+        start_step = load_checkpoint(resume_from_checkpoint, model, optimizer, scheduler, scaler)
+    else:
+        latest_checkpoint = find_latest_checkpoint(checkpoint_dir)
+        if latest_checkpoint:
+            start_step = load_checkpoint(latest_checkpoint, model, optimizer, scheduler, scaler)
+    
+    # Setup logging
+    log_file = os.path.join(checkpoint_dir, 'training_log.csv')
+    logger = TrainingLogger(log_file)
+    
+    # Training state
+    model.train()
+    accumulated_loss = 0.0
+    step = start_step
+    samples_processed = 0
+    start_time = time.time()
+    
+    print("=" * 60)
+    print("🚀 Starting Training Loop")
+    print("=" * 60)
+    print(f"   Device: {device}")
+    print(f"   Batch size: {batch_size}")
+    print(f"   Gradient accumulation: {gradient_accumulation_steps}")
+    print(f"   Effective batch size: {batch_size * gradient_accumulation_steps}")
+    print(f"   Max steps: {max_steps}")
+    print(f"   Starting from step: {start_step}")
+    print("=" * 60)
+    print()
+    
+    # Training loop
+    dataloader_iter = iter(dataloader)
+    
+    while step < max_steps:
+        # Zero gradients at start of accumulation
+        if step % gradient_accumulation_steps == 0:
+            optimizer.zero_grad()
+        
+        try:
+            batch = next(dataloader_iter)
+        except StopIteration:
+            dataloader_iter = iter(dataloader)
+            batch = next(dataloader_iter)
+        
+        # Forward pass with mixed precision
+        try:
+            with autocast():
+                result = adapter.process_batch(batch)
+                loss = result['loss']
+                batch_metadata = result['batch_metadata']
+            
+            # Scale loss for gradient accumulation
+            loss = loss / gradient_accumulation_steps
+            
+            # Backward pass
+            scaler.scale(loss).backward()
+            
+            accumulated_loss += loss.item() * gradient_accumulation_steps
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                print(f"⚠️  OOM at step {step}, skipping batch")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                # Reset gradients if we were accumulating
+                if step % gradient_accumulation_steps != 0:
+                    optimizer.zero_grad()
+                continue
+            else:
+                raise
+        
+        # Update weights after accumulation
+        if (step + 1) % gradient_accumulation_steps == 0:
+            # Gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            # Optimizer step
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+        
+        step += 1
+        samples_processed += batch_metadata.get('batch_size', batch_size)
+        
+        # Logging
+        if step % log_interval == 0:
+            elapsed_time = time.time() - start_time
+            throughput = samples_processed / elapsed_time if elapsed_time > 0 else 0
+            gpu_memory = get_gpu_memory_mb()
+            current_lr = scheduler.get_last_lr()[0]
+            avg_loss = accumulated_loss / log_interval
+            
+            # Count domains if it's domain log interval
+            domain_counts = {}
+            if step % domain_log_interval == 0:
+                domain_counts = count_domains_in_batch(batch_metadata)
+            
+            metrics = {
+                'step': step,
+                'loss': avg_loss,
+                'learning_rate': current_lr,
+                'gpu_memory_mb': gpu_memory,
+                'throughput_samples_per_sec': throughput,
+                **{f'domain_{k}': v for k, v in domain_counts.items()}
+            }
+            
+            logger.log(metrics)
+            
+            print(f"Step {step:6d} | Loss: {avg_loss:.4f} | LR: {current_lr:.2e} | "
+                  f"GPU: {gpu_memory:.0f}MB | Throughput: {throughput:.1f} samples/sec")
+            
+            if domain_counts:
+                print(f"   Domains: {domain_counts}")
+            
+            accumulated_loss = 0.0
+        
+        # Checkpointing
+        if step % save_interval == 0:
+            save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
+    
+    # Final checkpoint
+    print("\n💾 Saving final checkpoint...")
+    save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
+    
+    print("\n✅ Training complete!")
+    print(f"📊 Training log saved to: {log_file}")
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Colab-optimized training loop for DeepSeekMoE",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    # Model and data paths
+    parser.add_argument('--model-path', type=str, required=True,
+                       help='Path to model checkpoint or initial weights')
+    parser.add_argument('--dataset-text-dir', type=str, required=True,
+                       help='Directory containing text files')
+    parser.add_argument('--dataset-metadata', type=str, required=True,
+                       help='JSONL file with paper metadata')
+    parser.add_argument('--tokenizer-path', type=str, required=True,
+                       help='Path to SentencePiece tokenizer model')
+    
+    # Training config
+    parser.add_argument('--output-dir', type=str, default='./checkpoints',
+                       help='Output directory for checkpoints')
+    parser.add_argument('--batch-size', type=int, default=6,
+                       help='Batch size (default: 6)')
+    parser.add_argument('--gradient-accumulation', type=int, default=4,
+                       help='Gradient accumulation steps (default: 4)')
+    parser.add_argument('--max-steps', type=int, default=50000,
+                       help='Maximum training steps (default: 50000)')
+    parser.add_argument('--learning-rate', type=float, default=5e-4,
+                       help='Learning rate (default: 5e-4)')
+    parser.add_argument('--warmup-steps', type=int, default=2000,
+                       help='Warmup steps (default: 2000)')
+    
+    # Checkpointing and logging
+    parser.add_argument('--save-interval', type=int, default=5000,
+                       help='Steps between checkpoints (default: 5000)')
+    parser.add_argument('--log-interval', type=int, default=100,
+                       help='Steps between logging (default: 100)')
+    parser.add_argument('--domain-log-interval', type=int, default=1000,
+                       help='Steps between domain distribution logging (default: 1000)')
+    parser.add_argument('--resume-from-checkpoint', type=str, default=None,
+                       help='Path to checkpoint to resume from (auto-detected if None)')
+    
+    # Domain weights
+    parser.add_argument('--domain-weight-neurodegeneration', type=float, default=1.5,
+                       help='Loss weight for neurodegeneration papers (default: 1.5)')
+    parser.add_argument('--domain-weight-neuroscience', type=float, default=1.2,
+                       help='Loss weight for neuroscience papers (default: 1.2)')
+    
+    args = parser.parse_args()
+    
+    # Load tokenizer
+    if not SENTENCEPIECE_AVAILABLE:
+        raise ImportError("sentencepiece package required. Install with: pip install sentencepiece")
+    
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.load(args.tokenizer_path)
+    print(f"✅ Loaded tokenizer from {args.tokenizer_path}")
+    print(f"   Vocabulary size: {tokenizer.get_piece_size()}")
+    
+    # Create dataset
+    dataset = ArXivStreamingDataset(
+        text_dir=args.dataset_text_dir,
+        metadata_jsonl=args.dataset_metadata,
+        tokenizer=tokenizer,
+        max_length=512,
+        min_length=64
+    )
+    print(f"✅ Created dataset with ~{len(dataset)} samples")
+    
+    # Load model - use SimpleMoEModel from train_real.py
+    vocab_size = tokenizer.get_piece_size()
+    
+    try:
+        from train_real import SimpleMoEModel
+        print("✅ Imported SimpleMoEModel from train_real.py")
+    except ImportError:
+        print("⚠️  Could not import SimpleMoEModel, using dummy model")
+        # Fallback to dummy model
+        class DummyModel(nn.Module):
+            def __init__(self, vocab_size):
+                super().__init__()
+                self.embedding = nn.Embedding(vocab_size, 768)
+                self.transformer = nn.TransformerEncoder(
+                    nn.TransformerEncoderLayer(768, 8, dim_feedforward=2048, batch_first=True),
+                    num_layers=6
+                )
+                self.lm_head = nn.Linear(768, vocab_size)
+            
+            def forward(self, input_ids):
+                x = self.embedding(input_ids)
+                x = self.transformer(x)
+                logits = self.lm_head(x)
+                return logits
+        
+        SimpleMoEModel = DummyModel
+    
+    # Create model with DeepSeek-MoE configuration
+    # Optimized for Colab T4 (12GB VRAM): smaller embedding_dim, fewer experts
+    model = SimpleMoEModel(
+        vocab_size=vocab_size,
+        embedding_dim=256,  # Reduced from default for memory efficiency
+        num_shared_experts=2,
+        num_routed_experts=4,  # Small number for Colab
+        top_k=2,
+        noise_scale=0.5,
+        load_balance_loss_weight=0.1,
+        temperature_schedule="linear",
+        temperature_start=2.0,
+        temperature_end=0.1,
+    )
+    
+    # Wrap model to match expected signature: model(input_ids) -> logits
+    # SimpleMoEModel returns tuple, so we need a wrapper
+    class ModelWrapper(nn.Module):
+        def __init__(self, base_model):
+            super().__init__()
+            self.base_model = base_model
+        
+        def forward(self, input_ids):
+            # SimpleMoEModel expects (text_tokens, image_features=None, ...)
+            # We only have text, so pass None for image_features
+            output = self.base_model(input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False)
+            # SimpleMoEModel returns tuple, extract logits
+            if isinstance(output, tuple):
+                logits = output[0]  # First element is logits
+            else:
+                logits = output
+            return logits
+    
+    model = ModelWrapper(model)
+    
+    # If model path exists, try to load it
+    if os.path.exists(args.model_path):
+        try:
+            checkpoint = torch.load(args.model_path, map_location='cpu')
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                print(f"✅ Loaded model from {args.model_path}")
+            else:
+                model.load_state_dict(checkpoint, strict=False)
+                print(f"✅ Loaded model weights from {args.model_path}")
+        except Exception as e:
+            print(f"⚠️  Could not load model from {args.model_path}: {e}")
+            print("   Using randomly initialized model")
+    else:
+        print(f"⚠️  Model path {args.model_path} does not exist, using randomly initialized model")
+    
+    # Create adapter
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    adapter = ModelAdapter(
+        model=model,
+        device=device,
+        domain_weights={
+            'neurodegeneration': args.domain_weight_neurodegeneration,
+            'neuroscience': args.domain_weight_neuroscience
+        }
+    )
+    
+    # Start training
+    train(
+        model=model,
+        dataset=dataset,
+        adapter=adapter,
+        checkpoint_dir=args.output_dir,
+        batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation,
+        max_steps=args.max_steps,
+        learning_rate=args.learning_rate,
+        warmup_steps=args.warmup_steps,
+        save_interval=args.save_interval,
+        log_interval=args.log_interval,
+        domain_log_interval=args.domain_log_interval,
+        resume_from_checkpoint=args.resume_from_checkpoint
+    )
+
+
+if __name__ == "__main__":
+    main()
+

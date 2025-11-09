@@ -21,8 +21,14 @@ pandas>=1.3.0
 
 # NeMo Curator (optional, for text curation)
 # Install with: pip install "nemo-curator[text]" (CPU) or "nemo-curator[text_cuda12]" (CUDA 12)
+# Also requires: pip install nemo-curator s5cmd (for ArXiv download)
 # nemo-curator>=0.1.0
 # dask>=2023.1.0
+# s5cmd>=2.0.0  # For S3 access to ArXiv data
+
+# Language detection (optional, for language filtering)
+# langdetect>=1.0.9
+# Alternative: textblob>=0.17.0
 
 # Optional dependencies for enhanced functionality
 # Uncomment as needed:

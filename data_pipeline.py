@@ -124,6 +124,43 @@ try:
             except ImportError:
                 pass  # Will create client manually
         
+        # Try to import ProcessingStage and Stage for custom stages
+        try:
+            from nemo_curator.stages import ProcessingStage, Stage
+            ProcessingStage_AVAILABLE = True
+            Stage_AVAILABLE = True
+        except ImportError:
+            ProcessingStage = None
+            ProcessingStage_AVAILABLE = False
+            try:
+                from nemo_curator.stages import Stage
+                Stage_AVAILABLE = True
+            except ImportError:
+                Stage = None
+                Stage_AVAILABLE = False
+        
+        # Try to import ArxivDownloadExtractStage and JsonlWriter
+        try:
+            from nemo_curator.stages import ArxivDownloadExtractStage
+            ArxivDownloadExtractStage_AVAILABLE = True
+        except ImportError:
+            ArxivDownloadExtractStage = None
+            ArxivDownloadExtractStage_AVAILABLE = False
+        
+        try:
+            from nemo_curator.stages import JsonlWriter
+            JsonlWriter_AVAILABLE = True
+        except ImportError:
+            JsonlWriter = None
+            JsonlWriter_AVAILABLE = False
+        
+        try:
+            from nemo_curator import Pipeline
+            Pipeline_AVAILABLE = True
+        except ImportError:
+            Pipeline = None
+            Pipeline_AVAILABLE = False
+        
         import dask
         NEMO_CURATOR_AVAILABLE = True
         print("✅ NeMo Curator imported successfully")
@@ -1708,6 +1745,746 @@ def create_domain_relevance_filter(min_score: float = 0.5):
         return filter_instance.filter_document(document, min_relevance=min_score)
     
     return filter_document
+
+
+# Language detection (optional)
+try:
+    from langdetect import detect, DetectorFactory
+    DetectorFactory.seed = 0  # For consistent results
+    LANGDETECT_AVAILABLE = True
+except ImportError:
+    try:
+        from textblob import TextBlob
+        LANGDETECT_AVAILABLE = True
+        def detect(text):
+            try:
+                blob = TextBlob(text[:1000])  # Use first 1000 chars for speed
+                return blob.detect_language()
+            except:
+                return 'en'  # Default to English if detection fails
+    except ImportError:
+        LANGDETECT_AVAILABLE = False
+        def detect(text):
+            return 'en'  # Default to English if langdetect not available
+
+
+class HealthcareFilterStage(ProcessingStage if (NEMO_CURATOR_AVAILABLE and ProcessingStage_AVAILABLE) else object):
+    """Custom NeMo Curator ProcessingStage for healthcare document filtering and classification.
+    
+    Extends: nemo_curator.stages.ProcessingStage
+    
+    Input: JSONL from ArxivDownloadExtractStage (raw ArXiv text)
+    Output: JSONL with curated documents (text cleaned, quality filtered, domain classified)
+    """
+    
+    def __init__(self):
+        """Initialize healthcare filter stage."""
+        if NEMO_CURATOR_AVAILABLE and ProcessingStage_AVAILABLE:
+            super().__init__()
+        
+        # Domain keywords
+        self.healthcare_domains = {
+            'neurodegeneration': ['alzheimer', 'parkinson', 'als', 'dementia', 'mci', 'tau', 'amyloid'],
+            'neuroscience': ['brain', 'neural', 'neuroimaging', 'fmri', 'eeg', 'synapse'],
+            'medical_imaging': ['mri', 'ct', 'ultrasound', 'xray', 'segmentation'],
+            'clinical': ['patient', 'clinical', 'diagnosis', 'prognosis', 'treatment'],
+            'drug_discovery': ['drug', 'molecule', 'protein', 'compound', 'binding'],
+        }
+        
+        # ML method keywords
+        self.ml_keywords = [
+            'machine learning', 'deep learning', 'neural network', 'transformer',
+            'lstm', 'prediction', 'classification', 'regression', 'clustering',
+            'supervised', 'unsupervised', 'reinforcement learning', 'cnn', 'rnn',
+            'attention', 'bert', 'gpt', 'autoencoder', 'gan'
+        ]
+        
+        # Statistics
+        self.stats = {
+            'total_in': 0,
+            'passed_quality': 0,
+            'passed_domain': 0,
+            'total_out': 0
+        }
+    
+    def _clean_latex(self, text: str) -> str:
+        """Remove LaTeX artifacts from text.
+        
+        Args:
+            text: Raw text with LaTeX commands
+            
+        Returns:
+            Cleaned text
+        """
+        # Remove LaTeX commands: \command{...} or \command
+        text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)  # \command{content} -> content
+        text = re.sub(r'\\[a-zA-Z]+\s+', ' ', text)  # \command -> space
+        
+        # Remove math blocks: $$...$$ or $...$
+        text = re.sub(r'\$\$.*?\$\$', ' ', text, flags=re.DOTALL)
+        text = re.sub(r'\$[^$]+\$', ' ', text)
+        
+        # Remove LaTeX environments: \begin{env}...\end{env}
+        text = re.sub(r'\\begin\{[^}]+\}.*?\\end\{[^}]+\}', ' ', text, flags=re.DOTALL)
+        
+        # Remove braces: {{content}} -> content
+        text = re.sub(r'\{\{([^}]*)\}\}', r'\1', text)
+        text = re.sub(r'\{([^}]*)\}', r'\1', text)
+        
+        # Remove special LaTeX characters
+        text = text.replace('\\', ' ')
+        text = text.replace('&', ' ')
+        text = text.replace('%', ' ')
+        
+        return text
+    
+    def _remove_references(self, text: str) -> str:
+        """Remove references section from text.
+        
+        Args:
+            text: Full document text
+            
+        Returns:
+            Text with references section removed
+        """
+        # Find references section
+        ref_patterns = [
+            r'(?i)\n\s*(references|bibliography)\s*\n.*$',
+            r'(?i)\n\s*references\s*\n.*$',
+            r'(?i)\n\s*bibliography\s*\n.*$',
+        ]
+        
+        for pattern in ref_patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                text = text[:match.start()]
+                break
+        
+        return text
+    
+    def _count_sentences(self, text: str) -> int:
+        """Count sentences in text.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            Number of sentences
+        """
+        # Simple sentence detection: count periods, exclamation, question marks
+        # followed by space or newline
+        sentences = re.findall(r'[.!?]+(?:\s+|$)', text)
+        return len(sentences)
+    
+    def _check_quality(self, text: str) -> tuple[bool, float]:
+        """Check document quality.
+        
+        Args:
+            text: Document text
+            
+        Returns:
+            (passed, quality_score) tuple
+        """
+        if not text or len(text.strip()) < 100:
+            return False, 0.0
+        
+        # Word count check: 100-5000 tokens (estimate: 1 token = 4 chars)
+        char_count = len(text)
+        token_estimate = char_count // 4
+        if not (100 <= token_estimate <= 5000):
+            return False, 0.0
+        
+        # Alphanumeric ratio: > 40%
+        alnum_chars = sum(1 for c in text if c.isalnum())
+        alnum_ratio = alnum_chars / len(text) if len(text) > 0 else 0
+        if alnum_ratio <= 0.4:
+            return False, 0.0
+        
+        # Min unique sentences: 5
+        sentence_count = self._count_sentences(text)
+        if sentence_count < 5:
+            return False, 0.0
+        
+        # Language detection (optional)
+        if LANGDETECT_AVAILABLE:
+            try:
+                lang = detect(text[:1000])  # Use first 1000 chars for speed
+                if lang != 'en':
+                    return False, 0.0
+            except:
+                pass  # If detection fails, assume English
+        
+        # Quality score: combination of factors
+        quality_score = (
+            0.3 * min(token_estimate / 2000, 1.0) +  # Token count (normalized)
+            0.3 * alnum_ratio +  # Alphanumeric ratio
+            0.2 * min(sentence_count / 50, 1.0) +  # Sentence count (normalized)
+            0.2 * (1.0 if LANGDETECT_AVAILABLE else 0.5)  # Language check
+        )
+        
+        return True, quality_score
+    
+    def _classify_domains(self, text: str) -> tuple[list[str], float, float]:
+        """Classify document domains and compute scores.
+        
+        Args:
+            text: Document text (lowercase)
+            
+        Returns:
+            (domains, domain_score, ml_score) tuple
+        """
+        text_lower = text.lower()
+        
+        # Check healthcare domains
+        detected_domains = []
+        domain_matches = 0
+        total_domain_keywords = 0
+        
+        for domain, keywords in self.healthcare_domains.items():
+            matches = sum(1 for keyword in keywords if keyword in text_lower)
+            if matches > 0:
+                detected_domains.append(domain)
+                domain_matches += matches
+            total_domain_keywords += len(keywords)
+        
+        # Check ML methods
+        ml_matches = sum(1 for keyword in self.ml_keywords if keyword in text_lower)
+        
+        # Compute scores
+        domain_score = min(domain_matches / max(total_domain_keywords, 1), 1.0)
+        ml_score = min(ml_matches / max(len(self.ml_keywords), 1), 1.0)
+        
+        # Combined relevance score
+        relevance_score = (domain_score * 0.6 + ml_score * 0.4)
+        
+        return detected_domains, domain_score, ml_score
+    
+    def _extract_year_from_filename(self, filename: str) -> int:
+        """Extract year from filename if possible.
+        
+        Args:
+            filename: Source tar filename
+            
+        Returns:
+            Year as integer, or None if not found
+        """
+        # ArXiv filenames often contain dates: YYYYMMDD
+        year_match = re.search(r'(\d{4})(\d{2})(\d{2})', filename)
+        if year_match:
+            return int(year_match.group(1))
+        
+        # Try YYYY pattern
+        year_match = re.search(r'\b(20\d{2})\b', filename)
+        if year_match:
+            year = int(year_match.group(1))
+            if 2015 <= year <= 2024:
+                return year
+        
+        return None
+    
+    def _process_document(self, doc: Dict) -> Dict:
+        """Process a single document.
+        
+        Args:
+            doc: Input document with 'text' and 'file_name' fields
+            
+        Returns:
+            Processed document or None if filtered out
+        """
+        self.stats['total_in'] += 1
+        
+        text = doc.get('text', '')
+        filename = doc.get('file_name', '')
+        
+        if not text:
+            return None
+        
+        # Step 1: Text cleaning
+        # Remove LaTeX artifacts
+        cleaned_text = self._clean_latex(text)
+        
+        # Remove references section
+        cleaned_text = self._remove_references(cleaned_text)
+        
+        # Normalize whitespace
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+        cleaned_text = cleaned_text.strip()
+        
+        # Truncate to 12k chars
+        max_chars = 12000
+        if len(cleaned_text) > max_chars:
+            cleaned_text = cleaned_text[:max_chars].rsplit(' ', 1)[0] + '...'
+        
+        # Step 2: Quality filters
+        passed_quality, quality_score = self._check_quality(cleaned_text)
+        if not passed_quality:
+            return None
+        
+        self.stats['passed_quality'] += 1
+        
+        # Step 3: Domain classification
+        domains, domain_score, ml_score = self._classify_domains(cleaned_text)
+        
+        # Check requirements:
+        # - At least 1 healthcare domain keyword
+        # - At least 2 ML method keywords
+        # - Domain + ML relevance score > 0.6
+        healthcare_keywords_found = len(domains) > 0
+        ml_keywords_found = sum(1 for keyword in self.ml_keywords if keyword in cleaned_text.lower()) >= 2
+        relevance_score = (domain_score * 0.6 + ml_score * 0.4)
+        
+        if not (healthcare_keywords_found and ml_keywords_found and relevance_score > 0.6):
+            return None
+        
+        self.stats['passed_domain'] += 1
+        self.stats['total_out'] += 1
+        
+        # Extract year from filename
+        year = self._extract_year_from_filename(filename)
+        
+        # Estimate tokens
+        token_estimate = len(cleaned_text) // 4
+        
+        # Build output document
+        output_doc = {
+            'text': cleaned_text,
+            'file_name': filename,
+            'domains': domains,
+            'domain_score': round(domain_score, 3),
+            'ml_score': round(ml_score, 3),
+            'quality_score': round(quality_score, 3),
+            'year': year,
+            'token_estimate': token_estimate
+        }
+        
+        return output_doc
+    
+    def __call__(self, dataset):
+        """Process dataset (NeMo Curator interface).
+        
+        Args:
+            dataset: Input dataset (DocumentDataset or iterable)
+            
+        Returns:
+            Processed dataset
+        """
+        # Reset stats
+        self.stats = {
+            'total_in': 0,
+            'passed_quality': 0,
+            'passed_domain': 0,
+            'total_out': 0
+        }
+        
+        # Process documents
+        processed_docs = []
+        for doc in dataset:
+            processed = self._process_document(doc)
+            if processed:
+                processed_docs.append(processed)
+        
+        # Log stats
+        print(f"📊 HealthcareFilterStage Statistics:")
+        print(f"   Total in: {self.stats['total_in']}")
+        print(f"   Passed quality: {self.stats['passed_quality']}")
+        print(f"   Passed domain: {self.stats['passed_domain']}")
+        print(f"   Total out: {self.stats['total_out']}")
+        
+        return processed_docs
+
+
+class HealthcareQualityFilterStage(ProcessingStage if (NEMO_CURATOR_AVAILABLE and ProcessingStage_AVAILABLE) else object):
+    """Custom NeMo Curator ProcessingStage for deduplication and quality verification.
+    
+    Extends: nemo_curator.stages.ProcessingStage
+    
+    Input: JSONL from HealthcareFilterStage (domain-classified documents)
+    Output: JSONL with duplicates removed and quality verified
+    """
+    
+    def __init__(self):
+        """Initialize quality filter stage."""
+        if NEMO_CURATOR_AVAILABLE and ProcessingStage_AVAILABLE:
+            super().__init__()
+        
+        # Statistics
+        self.stats = {
+            'total_in': 0,
+            'duplicates_removed': 0,
+            'unique_out': 0,
+            'language_filter_out': 0,
+            'quality_filter_out': 0
+        }
+        
+        # Track seen hashes for deduplication
+        self.seen_hashes = set()
+    
+    def _compute_hash(self, text: str) -> str:
+        """Compute hash of first 1000 + last 1000 chars.
+        
+        Args:
+            text: Document text
+            
+        Returns:
+            Hash string
+        """
+        import hashlib
+        
+        # Get first 1000 and last 1000 chars
+        first_part = text[:1000] if len(text) > 1000 else text
+        last_part = text[-1000:] if len(text) > 1000 else ''
+        
+        # Combine and hash
+        combined = first_part + last_part
+        hash_obj = hashlib.md5(combined.encode('utf-8'))
+        return hash_obj.hexdigest()
+    
+    def _check_language(self, text: str) -> bool:
+        """Check if text is English.
+        
+        Args:
+            text: Document text
+            
+        Returns:
+            True if English, False otherwise
+        """
+        if not LANGDETECT_AVAILABLE:
+            return True  # Assume English if detection not available
+        
+        try:
+            lang = detect(text[:1000])  # Use first 1000 chars for speed
+            return lang == 'en'
+        except:
+            return True  # Default to English if detection fails
+    
+    def _check_content_quality(self, text: str) -> bool:
+        """Check content quality.
+        
+        Args:
+            text: Document text
+            
+        Returns:
+            True if passes quality checks, False otherwise
+        """
+        lines = text.split('\n')
+        if len(lines) == 0:
+            return False
+        
+        # Check: >30% of lines are repeated
+        line_counts = {}
+        for line in lines:
+            line_stripped = line.strip()
+            if line_stripped:
+                line_counts[line_stripped] = line_counts.get(line_stripped, 0) + 1
+        
+        total_lines = len([l for l in lines if l.strip()])
+        if total_lines == 0:
+            return False
+        
+        repeated_lines = sum(1 for count in line_counts.values() if count > 1)
+        repeated_ratio = repeated_lines / total_lines if total_lines > 0 else 0
+        
+        if repeated_ratio > 0.3:
+            return False
+        
+        # Check: <5 sentences detected
+        sentence_count = len(re.findall(r'[.!?]+(?:\s+|$)', text))
+        if sentence_count < 5:
+            return False
+        
+        # Check: <50 alphanumeric characters
+        alnum_chars = sum(1 for c in text if c.isalnum())
+        if alnum_chars < 50:
+            return False
+        
+        return True
+    
+    def _process_document(self, doc: Dict) -> Dict:
+        """Process a single document.
+        
+        Args:
+            doc: Input document
+            
+        Returns:
+            Processed document or None if filtered out
+        """
+        self.stats['total_in'] += 1
+        
+        text = doc.get('text', '')
+        if not text:
+            return None
+        
+        # Step 1: Fuzzy deduplication
+        doc_hash = self._compute_hash(text)
+        if doc_hash in self.seen_hashes:
+            self.stats['duplicates_removed'] += 1
+            return None
+        
+        self.seen_hashes.add(doc_hash)
+        
+        # Step 2: Language detection
+        if not self._check_language(text):
+            self.stats['language_filter_out'] += 1
+            return None
+        
+        # Step 3: Content quality checks
+        if not self._check_content_quality(text):
+            self.stats['quality_filter_out'] += 1
+            return None
+        
+        self.stats['unique_out'] += 1
+        
+        # Add hash to document
+        output_doc = doc.copy()
+        output_doc['hash'] = doc_hash
+        
+        return output_doc
+    
+    def __call__(self, dataset):
+        """Process dataset (NeMo Curator interface).
+        
+        Args:
+            dataset: Input dataset (DocumentDataset or iterable)
+            
+        Returns:
+            Processed dataset
+        """
+        # Reset stats (but keep seen_hashes for cross-batch deduplication)
+        self.stats = {
+            'total_in': 0,
+            'duplicates_removed': 0,
+            'unique_out': 0,
+            'language_filter_out': 0,
+            'quality_filter_out': 0
+        }
+        
+        # Process documents
+        processed_docs = []
+        for doc in dataset:
+            processed = self._process_document(doc)
+            if processed:
+                processed_docs.append(processed)
+        
+        # Log stats
+        print(f"📊 HealthcareQualityFilterStage Statistics:")
+        print(f"   Total in: {self.stats['total_in']}")
+        print(f"   Duplicates removed: {self.stats['duplicates_removed']}")
+        print(f"   Language filter out: {self.stats['language_filter_out']}")
+        print(f"   Quality filter out: {self.stats['quality_filter_out']}")
+        print(f"   Unique out: {self.stats['unique_out']}")
+        print(f"   Retention rate: {self.stats['unique_out'] / max(self.stats['total_in'], 1) * 100:.1f}%")
+        
+        return processed_docs
+
+
+class HealthcareJsonlWriter(Stage if (NEMO_CURATOR_AVAILABLE and Stage_AVAILABLE) else object):
+    """Custom NeMo Curator writer stage to save filtered documents with proper formatting.
+    
+    Extends: nemo_curator.stages.Stage
+    
+    Input: JSONL from HealthcareQualityFilterStage (curated documents)
+    Output: Single JSONL file with final curated dataset
+    """
+    
+    def __init__(self, output_path: str = "./curated_dataset.jsonl"):
+        """Initialize writer stage.
+        
+        Args:
+            output_path: Path to output JSONL file
+        """
+        if NEMO_CURATOR_AVAILABLE and Stage_AVAILABLE:
+            super().__init__()
+        
+        self.output_path = output_path
+        self.stats = {
+            'total_processed': 0,
+            'domain_counts': defaultdict(int),
+            'year_counts': defaultdict(int),
+            'total_tokens': 0,
+            'quality_scores': [],
+            'log_interval': 1000
+        }
+    
+    def _extract_arxiv_id(self, file_name: str) -> str:
+        """Extract ArXiv ID from filename.
+        
+        Args:
+            file_name: Source tar filename or document identifier
+            
+        Returns:
+            ArXiv ID string, or None if not found
+        """
+        if not file_name:
+            return None
+        
+        # ArXiv IDs are typically in format: YYMM.NNNNN or YYMM.NNNNNvN
+        # Or extracted from paths like: arxiv/src/YYMM/YYMM.NNNNN.tar.gz
+        arxiv_id_match = re.search(r'(\d{4})\.(\d{5})(?:v\d+)?', file_name)
+        if arxiv_id_match:
+            return f"{arxiv_id_match.group(1)}.{arxiv_id_match.group(2)}"
+        
+        # Try alternative format: YYMMNNNNN
+        arxiv_id_match = re.search(r'(\d{2})(\d{2})(\d{5})', file_name)
+        if arxiv_id_match:
+            year_part = arxiv_id_match.group(1) + arxiv_id_match.group(2)
+            num_part = arxiv_id_match.group(3)
+            return f"{year_part}.{num_part}"
+        
+        # If no match, use filename as ID (sanitized)
+        filename_base = os.path.basename(file_name)
+        filename_base = re.sub(r'[^a-zA-Z0-9._-]', '_', filename_base)
+        return filename_base if filename_base else None
+    
+    def _format_document(self, doc: Dict) -> Dict:
+        """Format document for output.
+        
+        Args:
+            doc: Input document from previous stage
+            
+        Returns:
+            Formatted document
+        """
+        # Extract arxiv_id from file_name
+        file_name = doc.get('file_name', '')
+        arxiv_id = self._extract_arxiv_id(file_name)
+        
+        # Build formatted document
+        formatted_doc = {
+            'arxiv_id': arxiv_id,
+            'text': doc.get('text', ''),
+            'domains': doc.get('domains', []),
+            'domain_score': doc.get('domain_score', 0.0),
+            'ml_score': doc.get('ml_score', 0.0),
+            'quality_score': doc.get('quality_score', 0.0),
+            'year': doc.get('year'),
+            'token_count': doc.get('token_estimate', doc.get('token_count', 0))
+        }
+        
+        return formatted_doc
+    
+    def _update_stats(self, doc: Dict):
+        """Update statistics for a document.
+        
+        Args:
+            doc: Formatted document
+        """
+        self.stats['total_processed'] += 1
+        
+        # Domain distribution
+        domains = doc.get('domains', [])
+        for domain in domains:
+            self.stats['domain_counts'][domain] += 1
+        
+        # Year distribution
+        year = doc.get('year')
+        if year:
+            self.stats['year_counts'][year] += 1
+        
+        # Token count
+        token_count = doc.get('token_count', 0)
+        self.stats['total_tokens'] += token_count
+        
+        # Quality score
+        quality_score = doc.get('quality_score', 0.0)
+        if quality_score > 0:
+            self.stats['quality_scores'].append(quality_score)
+    
+    def _log_progress(self):
+        """Log progress every N records."""
+        if self.stats['total_processed'] % self.stats['log_interval'] == 0:
+            print(f"📝 Processed {self.stats['total_processed']} documents...")
+    
+    def _log_final_stats(self):
+        """Log final statistics."""
+        print("\n" + "=" * 60)
+        print("📊 HealthcareJsonlWriter Final Statistics")
+        print("=" * 60)
+        
+        print(f"\n📄 Total documents processed: {self.stats['total_processed']}")
+        
+        # Domain distribution
+        if self.stats['domain_counts']:
+            print(f"\n🏷️  Domain distribution:")
+            for domain, count in sorted(
+                self.stats['domain_counts'].items(),
+                key=lambda x: x[1],
+                reverse=True
+            ):
+                percentage = (count / self.stats['total_processed']) * 100
+                print(f"   {domain}: {count} ({percentage:.1f}%)")
+        
+        # Year distribution
+        if self.stats['year_counts']:
+            print(f"\n📅 Year distribution:")
+            for year in sorted(self.stats['year_counts'].keys()):
+                count = self.stats['year_counts'][year]
+                percentage = (count / self.stats['total_processed']) * 100
+                print(f"   {year}: {count} ({percentage:.1f}%)")
+        
+        # Token statistics
+        if self.stats['total_processed'] > 0:
+            avg_tokens = self.stats['total_tokens'] / self.stats['total_processed']
+            print(f"\n🔢 Token statistics:")
+            print(f"   Total estimated tokens: {self.stats['total_tokens']:,}")
+            print(f"   Average tokens per document: {avg_tokens:.1f}")
+        
+        # Quality score distribution
+        if self.stats['quality_scores']:
+            quality_scores = self.stats['quality_scores']
+            print(f"\n⭐ Quality score distribution:")
+            print(f"   Min: {min(quality_scores):.3f}")
+            print(f"   Max: {max(quality_scores):.3f}")
+            print(f"   Mean: {sum(quality_scores) / len(quality_scores):.3f}")
+            print(f"   Median: {sorted(quality_scores)[len(quality_scores) // 2]:.3f}")
+        
+        print(f"\n💾 Output file: {self.output_path}")
+        print("=" * 60)
+    
+    def __call__(self, dataset):
+        """Process dataset and write to JSONL file (NeMo Curator interface).
+        
+        Args:
+            dataset: Input dataset (DocumentDataset or iterable)
+            
+        Returns:
+            Path to output file
+        """
+        # Reset stats
+        self.stats = {
+            'total_processed': 0,
+            'domain_counts': defaultdict(int),
+            'year_counts': defaultdict(int),
+            'total_tokens': 0,
+            'quality_scores': [],
+            'log_interval': 1000
+        }
+        
+        # Create output directory if needed
+        output_dir = os.path.dirname(self.output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+        
+        print(f"📝 Writing curated dataset to {self.output_path}...")
+        
+        # Write documents to file
+        with open(self.output_path, 'w', encoding='utf-8') as f:
+            for doc in dataset:
+                # Format document
+                formatted_doc = self._format_document(doc)
+                
+                # Update statistics
+                self._update_stats(formatted_doc)
+                
+                # Write to file
+                f.write(json.dumps(formatted_doc, ensure_ascii=False) + '\n')
+                
+                # Log progress
+                self._log_progress()
+        
+        # Log final statistics
+        self._log_final_stats()
+        
+        return self.output_path
 
 
 def curate_with_nemo(

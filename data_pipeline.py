@@ -2203,10 +2203,14 @@ def create_healthcare_text_cleaner():
     
     # Custom modifier that preserves medical terminology
     # Extends: nemo_curator.modifiers.DocumentModifier
-    class HealthcareTextCleaner(DocumentModifier):
+    _HealthcareTextCleanerBase = DocumentModifier if (NEMO_CURATOR_AVAILABLE and DocumentModifier is not None) else object
+    class HealthcareTextCleaner(_HealthcareTextCleanerBase):
         def __init__(self):
-            if NEMO_CURATOR_AVAILABLE:
-                super().__init__()
+            if NEMO_CURATOR_AVAILABLE and DocumentModifier is not None:
+                try:
+                    super().__init__()
+                except:
+                    pass  # If super() fails, continue without it
             # Medical terms to preserve (don't lowercase)
             self.medical_terms = {
                 'Alzheimer', 'Parkinson', 'ALS', 'Dementia', 'Huntington',
@@ -2478,17 +2482,25 @@ class HealthcareTextModifier:
         return document
 
 
-class HealthcareDomainFilter(DocumentFilter if NEMO_CURATOR_AVAILABLE else object):
+# Define base class for HealthcareDomainFilter
+_HealthcareDomainFilterBase = DocumentFilter if (NEMO_CURATOR_AVAILABLE and DocumentFilter is not None) else object
+
+class HealthcareDomainFilter(_HealthcareDomainFilterBase):
     """Custom domain classifier for healthcare papers extending NeMo Curator DocumentFilter interface.
     
     Scores documents based on healthcare+ML domain relevance and assigns domain tags.
     Compatible with NeMo Curator's ScoreFilter.
     
-    Extends: nemo_curator.filters.DocumentFilter
+    Extends: nemo_curator.filters.DocumentFilter (if available)
     """
     
     def __init__(self):
         """Initialize domain filter with healthcare vocabulary."""
+        if NEMO_CURATOR_AVAILABLE and DocumentFilter is not None:
+            try:
+                super().__init__()
+            except:
+                pass  # If super() fails, continue without it
         # Domain keywords with specific terms
         self.domain_keywords = {
             'neurodegeneration': [

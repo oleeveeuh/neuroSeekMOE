@@ -1191,7 +1191,8 @@ class RAMEfficientArxivCollector:
         # Fetch many more results to account for filtering (no abstract, date range, etc.)
         # ArXiv API allows up to 300,000 results, so we can request a large number
         # Use a much larger window to ensure we can find enough papers
-        max_search_results = max(max_papers * 20, 100000)  # Fetch 20x target to account for filtering
+        # For large targets (30k+), we need to fetch even more results to account for filtering
+        max_search_results = max(max_papers * 30, 200000)  # Increased: 30x target, min 200k results
         
         try:
             client = arxiv.Client(
@@ -1241,7 +1242,7 @@ class RAMEfficientArxivCollector:
                     elif total_results_checked > 5000 and papers_in_query == 0:
                         print(f"   Query returned no papers after checking {total_results_checked} results, moving to next query")
                         break
-                    elif total_results_checked > 50000:  # Increased from 10000 to allow more results
+                    elif total_results_checked > 200000:  # Increased from 50000 to allow more results (200k = ~4x increase)
                         print(f"   Query exhausted after checking {total_results_checked} results, moving to next query")
                         break
                     # Otherwise, try one more batch in case of temporary issues
@@ -1264,10 +1265,12 @@ class RAMEfficientArxivCollector:
         
         except StopIteration:
             print("   Reached end of search results")
+            # Don't break - continue to next query if target not reached
         except Exception as e:
             print(f"   Query error: {e}")
             import traceback
             print(f"   Traceback: {traceback.format_exc()}")
+            # Continue to next query even on error
         
         print(f"\nQuery complete: {papers_in_query} papers")
         return papers_in_query
@@ -1429,6 +1432,18 @@ class RAMEfficientArxivCollector:
                 # If we got papers but haven't reached target, continue to next query
                 if papers > 0 and self.total_collected < total_target:
                     print(f"   Collected {papers} papers from this query, continuing...")
+                elif papers == 0 and self.total_collected < total_target:
+                    print(f"   Query returned 0 papers, but target not reached ({self.total_collected}/{total_target}). Continuing to next query...")
+            
+            # After all queries, check if we need more papers
+            if self.total_collected < total_target:
+                remaining = total_target - self.total_collected
+                print(f"\nTarget not reached: {self.total_collected}/{total_target} papers ({remaining} remaining)")
+                print("All queries exhausted. Consider:")
+                print("  1. Adding more diverse queries")
+                print("  2. Relaxing date filtering (if enabled)")
+                print("  3. Reducing quality filters")
+                print("  4. Increasing max_search_results per query")
         
         except KeyboardInterrupt:
             print("\nCollection paused by user")
@@ -1436,6 +1451,8 @@ class RAMEfficientArxivCollector:
         finally:
             self._save_checkpoint()
             print(f"\nTotal collected: {self.total_collected} papers")
+            if self.total_collected < total_target:
+                print(f"Target: {total_target} papers (shortfall: {total_target - self.total_collected})")
             self._log_memory("Final:")
 
 
@@ -1478,7 +1495,8 @@ def collect_arxiv_efficient(
     # Define queries with diverse ML + healthcare/neuroscience combinations
     # Each query can contribute up to its limit, but we'll continue until total_target is reached
     # Use larger per-query limits to ensure we can reach the target
-    query_limit_per_query = max(total_target // 4, 10000)  # Distribute target across more queries
+    # For 30k target, set per-query limit to at least 15k to allow queries to contribute more
+    query_limit_per_query = max(total_target // 2, 15000)  # Increased from total_target // 4 to allow more papers per query
     
     queries = [
         # Machine Learning + Healthcare combinations
@@ -1517,6 +1535,15 @@ def collect_arxiv_efficient(
         # Neuroscience + ML (broader)
         ("cat:q-bio.NC AND (artificial intelligence OR machine learning OR deep learning)", query_limit_per_query),
         ("cat:q-bio.NC AND (neural network OR transformer OR lstm)", query_limit_per_query),
+        
+        # Additional very broad queries to help reach target
+        ("cat:cs.LG AND health", query_limit_per_query),
+        ("cat:cs.AI AND medical", query_limit_per_query),
+        ("cat:stat.ML AND (health OR medical OR clinical)", query_limit_per_query),
+        ("cat:q-bio.NC AND (learning OR prediction OR classification)", query_limit_per_query),
+        ("cat:cs.CV AND (medical OR health OR clinical)", query_limit_per_query),
+        ("cat:cs.LG AND (disease OR diagnosis OR treatment)", query_limit_per_query),
+        ("cat:cs.AI AND (brain OR neural OR neuroscience)", query_limit_per_query),
     ]
     
     # Collect

@@ -328,11 +328,19 @@ class PipelineOrchestrator:
             
             extraction_config = self.config['extraction']
             
+            # Map config keys to function parameters
+            num_workers = extraction_config.get('workers', extraction_config.get('num_workers', 2))
+            rate_limit_delay = extraction_config.get('rate_limit', extraction_config.get('rate_limit_delay', 0.4))
+            
+            logger.info(f"🔍 Starting PDF extraction...")
+            logger.info(f"   Workers: {num_workers}")
+            logger.info(f"   Rate limit: {1.0/rate_limit_delay:.1f} requests/sec")
+            
             extract_pdf_texts(
                 input_jsonl=str(self.metadata_jsonl),
                 output_dir=str(self.text_dir),
-                num_workers=extraction_config['num_workers'],
-                rate_limit_delay=extraction_config['rate_limit_delay']
+                num_workers=num_workers,
+                rate_limit_delay=rate_limit_delay
             )
             
             if not self.text_dir.exists():

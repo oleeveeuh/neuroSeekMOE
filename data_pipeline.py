@@ -1143,7 +1143,9 @@ class RAMEfficientArxivCollector:
         papers_in_query = 0
         batch_num = 0
         results_processed = 0
-        max_search_results = max(max_papers * 2, 500)  # Fetch extra for filtering
+        # Fetch many more results to account for filtering (no abstract, date range, etc.)
+        # ArXiv API allows up to 300,000 results, so we can request a large number
+        max_search_results = max(max_papers * 5, 10000)  # Fetch 5x target to account for filtering
         
         try:
             client = arxiv.Client(
@@ -1401,12 +1403,17 @@ def collect_arxiv_efficient(
         rate_limit=rate_limit
     )
     
-    # Define queries
+    # Define queries with higher limits to reach target
+    # Each query can contribute up to its limit, but we'll continue until total_target is reached
+    query_limit_per_query = max(total_target // 4, 5000)  # Distribute target across queries
     queries = [
-        ("cat:cs.LG AND healthcare", 3000),
-        ("cat:cs.AI AND (neurodegeneration OR disease)", 3000),
-        ("cat:q-bio.NC AND (machine learning)", 2000),
-        ("cat:stat.ML AND medical", 2000),
+        ("cat:cs.LG AND healthcare", query_limit_per_query),
+        ("cat:cs.AI AND (neurodegeneration OR disease)", query_limit_per_query),
+        ("cat:q-bio.NC AND (machine learning)", query_limit_per_query),
+        ("cat:stat.ML AND medical", query_limit_per_query),
+        # Additional broader queries to help reach target
+        ("cat:cs.LG AND (medical OR clinical OR health)", query_limit_per_query),
+        ("cat:cs.AI AND (disease OR diagnosis OR treatment)", query_limit_per_query),
     ]
     
     # Collect

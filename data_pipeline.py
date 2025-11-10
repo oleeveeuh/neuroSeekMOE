@@ -241,11 +241,14 @@ MIN_YEAR = 2016  # None = no minimum (accept all years)
 MAX_YEAR = None  # None = no maximum (accept all years)
 # Alternative: MIN_YEAR = 2015, MAX_YEAR = 2024 for date filtering
 
-# ArXiv search queries
+# ArXiv search queries (legacy - used by older collection functions)
+# Note: The main collection now uses diverse ML + healthcare/neuroscience combinations
 ARXIV_QUERIES = [
     "cat:cs.LG AND (healthcare OR medical OR clinical)",
-    "cat:cs.AI AND (neurodegeneration OR disease)",
-    "cat:q-bio.NC AND (machine learning)",
+    "cat:cs.AI AND (neuroscience OR brain OR neural)",
+    "cat:q-bio.NC AND (machine learning OR deep learning)",
+    "cat:cs.AI AND (neurodegeneration OR alzheimer OR parkinson)",
+    "cat:cs.LG AND (mri OR ct OR medical imaging)",
 ]
 
 # Output fields (minimal metadata)
@@ -1188,7 +1191,7 @@ class RAMEfficientArxivCollector:
         # Fetch many more results to account for filtering (no abstract, date range, etc.)
         # ArXiv API allows up to 300,000 results, so we can request a large number
         # Use a much larger window to ensure we can find enough papers
-        max_search_results = max(max_papers * 10, 50000)  # Fetch 10x target to account for filtering
+        max_search_results = max(max_papers * 20, 100000)  # Fetch 20x target to account for filtering
         
         try:
             client = arxiv.Client(
@@ -1238,7 +1241,7 @@ class RAMEfficientArxivCollector:
                     elif total_results_checked > 5000 and papers_in_query == 0:
                         print(f"   ⚠️  Query returned no papers after checking {total_results_checked} results, moving to next query")
                         break
-                    elif total_results_checked > 10000:
+                    elif total_results_checked > 50000:  # Increased from 10000 to allow more results
                         print(f"   ⚠️  Query exhausted after checking {total_results_checked} results, moving to next query")
                         break
                     # Otherwise, try one more batch in case of temporary issues
@@ -1412,6 +1415,9 @@ class RAMEfficientArxivCollector:
                 remaining = total_target - self.total_collected
                 max_for_query = min(max_per_query, remaining)
                 
+                print(f"\n📋 Query {query_num}/{len(queries)}: {query}")
+                print(f"   Target: {max_for_query} papers (remaining: {remaining})")
+                
                 # Collect query
                 papers = self.collect_query(
                     query=query,
@@ -1419,6 +1425,10 @@ class RAMEfficientArxivCollector:
                     query_num=query_num,
                     total_queries=len(queries)
                 )
+                
+                # If we got papers but haven't reached target, continue to next query
+                if papers > 0 and self.total_collected < total_target:
+                    print(f"   ✅ Collected {papers} papers from this query, continuing...")
         
         except KeyboardInterrupt:
             print("\n⏸️  Collection paused by user")
@@ -1465,21 +1475,48 @@ def collect_arxiv_efficient(
         rate_limit=rate_limit
     )
     
-    # Define queries with higher limits to reach target
+    # Define queries with diverse ML + healthcare/neuroscience combinations
     # Each query can contribute up to its limit, but we'll continue until total_target is reached
     # Use larger per-query limits to ensure we can reach the target
-    query_limit_per_query = max(total_target // 3, 10000)  # Distribute target across queries with larger limits
+    query_limit_per_query = max(total_target // 4, 10000)  # Distribute target across more queries
+    
     queries = [
-        ("cat:cs.LG AND healthcare", query_limit_per_query),
-        ("cat:cs.AI AND (neurodegeneration OR disease)", query_limit_per_query),
-        ("cat:q-bio.NC AND (machine learning)", query_limit_per_query),
-        ("cat:stat.ML AND medical", query_limit_per_query),
-        # Additional broader queries to help reach target
-        ("cat:cs.LG AND (medical OR clinical OR health)", query_limit_per_query),
-        ("cat:cs.AI AND (disease OR diagnosis OR treatment)", query_limit_per_query),
-        # Even broader queries as fallback
-        ("cat:cs.LG AND (health OR medicine)", query_limit_per_query),
-        ("cat:cs.AI AND health", query_limit_per_query),
+        # Machine Learning + Healthcare combinations
+        ("cat:cs.LG AND (healthcare OR medical OR clinical)", query_limit_per_query),
+        ("cat:cs.AI AND (healthcare OR medical OR clinical)", query_limit_per_query),
+        ("cat:stat.ML AND (healthcare OR medical OR clinical)", query_limit_per_query),
+        
+        # Machine Learning + Neuroscience combinations
+        ("cat:cs.LG AND (neuroscience OR brain OR neural OR neuroimaging)", query_limit_per_query),
+        ("cat:cs.AI AND (neuroscience OR brain OR neural OR neuroimaging)", query_limit_per_query),
+        ("cat:q-bio.NC AND (machine learning OR deep learning OR neural network)", query_limit_per_query),
+        
+        # Machine Learning + Neurodegeneration/Disease combinations
+        ("cat:cs.AI AND (neurodegeneration OR alzheimer OR parkinson OR dementia)", query_limit_per_query),
+        ("cat:cs.LG AND (disease OR diagnosis OR treatment OR prognosis)", query_limit_per_query),
+        ("cat:stat.ML AND (disease OR diagnosis OR treatment)", query_limit_per_query),
+        
+        # Machine Learning + Medical Imaging combinations
+        ("cat:cs.LG AND (mri OR ct OR medical imaging OR radiology)", query_limit_per_query),
+        ("cat:cs.AI AND (mri OR ct OR medical imaging OR radiology)", query_limit_per_query),
+        ("cat:cs.CV AND (medical imaging OR medical image OR radiology)", query_limit_per_query),
+        
+        # Machine Learning + Clinical combinations
+        ("cat:cs.LG AND (patient OR clinical OR diagnosis OR prognosis)", query_limit_per_query),
+        ("cat:cs.AI AND (patient OR clinical OR diagnosis OR prognosis)", query_limit_per_query),
+        
+        # Machine Learning + Drug Discovery combinations
+        ("cat:cs.LG AND (drug OR molecule OR protein OR compound OR pharmaceutical)", query_limit_per_query),
+        ("cat:cs.AI AND (drug OR molecule OR protein OR compound OR pharmaceutical)", query_limit_per_query),
+        
+        # Broader healthcare + ML combinations
+        ("cat:cs.LG AND (health OR medicine OR biomedical)", query_limit_per_query),
+        ("cat:cs.AI AND (health OR medicine OR biomedical)", query_limit_per_query),
+        ("cat:stat.ML AND (health OR medicine OR biomedical)", query_limit_per_query),
+        
+        # Neuroscience + ML (broader)
+        ("cat:q-bio.NC AND (artificial intelligence OR machine learning OR deep learning)", query_limit_per_query),
+        ("cat:q-bio.NC AND (neural network OR transformer OR lstm)", query_limit_per_query),
     ]
     
     # Collect
@@ -2946,15 +2983,15 @@ class HealthcareFilterStage(ProcessingStage if (NEMO_CURATOR_AVAILABLE and Proce
         # Step 3: Domain classification
         domains, domain_score, ml_score = self._classify_domains(cleaned_text)
         
-        # Check requirements:
-        # - At least 1 healthcare domain keyword
-        # - At least 2 ML method keywords
-        # - Domain + ML relevance score > 0.6
+        # Check requirements (relaxed for better coverage):
+        # - At least 1 healthcare domain keyword OR at least 1 ML method keyword
+        # - Domain + ML relevance score > 0.4 (lowered from 0.6)
         healthcare_keywords_found = len(domains) > 0
-        ml_keywords_found = sum(1 for keyword in self.ml_keywords if keyword in cleaned_text.lower()) >= 2
+        ml_keywords_found = sum(1 for keyword in self.ml_keywords if keyword in cleaned_text.lower()) >= 1  # Lowered from 2
         relevance_score = (domain_score * 0.6 + ml_score * 0.4)
         
-        if not (healthcare_keywords_found and ml_keywords_found and relevance_score > 0.6):
+        # Accept if: (healthcare OR ML) AND relevance > 0.4
+        if not ((healthcare_keywords_found or ml_keywords_found) and relevance_score > 0.4):
             return None
         
         self.stats['passed_domain'] += 1

@@ -1018,17 +1018,40 @@ class PipelineOrchestrator:
             pipeline = InferencePipeline(
                 checkpoint_path=latest_checkpoint,
                 tokenizer_path=str(self.tokenizer_model),
-                quantize_int8=inference_config.get('quantize_int8', False)
+                device='cpu',  # Default to CPU for inference export
+                quantize=inference_config.get('quantize_int8', False)  # Map quantize_int8 to quantize
             )
             
             # Precompute embeddings if requested
             if inference_config.get('precompute_embeddings', False) and self.processed_jsonl.exists():
                 logger.info("📊 Precomputing corpus embeddings...")
                 embeddings_path = inference_dir / "corpus_embeddings.npz"
-                pipeline.precompute_corpus_embeddings(
-                    dataset_metadata=str(self.processed_jsonl),
-                    output_path=str(embeddings_path)
-                )
+                
+                # Read corpus texts from JSONL
+                corpus_texts = []
+                metadata_list = []
+                with open(self.processed_jsonl, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            doc = json.loads(line)
+                            text = doc.get('text', '')
+                            if text:
+                                corpus_texts.append(text)
+                                metadata_list.append({
+                                    'arxiv_id': doc.get('arxiv_id', ''),
+                                    'domains': doc.get('domains', []),
+                                    'year': doc.get('year', None)
+                                })
+                
+                if corpus_texts:
+                    pipeline.precompute_corpus_embeddings(
+                        corpus_texts=corpus_texts,
+                        output_path=str(embeddings_path),
+                        metadata=metadata_list if metadata_list else None
+                    )
+                    logger.info(f"✅ Precomputed embeddings for {len(corpus_texts)} documents")
+                else:
+                    logger.warning("⚠️  No texts found in processed dataset, skipping embedding precomputation")
             
             # Export to ONNX if requested
             if inference_config.get('export_onnx', False):
@@ -1051,8 +1074,19 @@ class PipelineOrchestrator:
             self._log_step_end(step_name, True)
             return True
             
+        except FileNotFoundError as e:
+            logger.error(f"❌ Step 8 failed - file not found: {e}")
+            logger.info("💡 Tip: Ensure training completed successfully and checkpoint exists")
+            self._log_step_end(step_name, False)
+            return False
+        except ImportError as e:
+            logger.error(f"❌ Step 8 failed - import error: {e}")
+            logger.info("💡 Tip: Ensure all dependencies are installed (sentencepiece, torch, etc.)")
+            self._log_step_end(step_name, False)
+            return False
         except Exception as e:
             logger.error(f"❌ Step 8 failed: {e}", exc_info=True)
+            logger.error(f"   Full traceback:", exc_info=True)
             self._log_step_end(step_name, False)
             return False
     

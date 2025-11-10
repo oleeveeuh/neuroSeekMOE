@@ -257,11 +257,19 @@ class PipelineOrchestrator:
             logger.info(f"   Target: {collection_config['max_papers']} papers")
             logger.info(f"   Rate limit: {collection_config['rate_limit']} requests/sec")
             
+            # Get batch collection parameters
+            batch_size = collection_config.get('batch_size', 10)
+            ram_target = collection_config.get('ram_target', 50.0)
+            logger.info(f"   Batch size: {batch_size} papers/batch")
+            logger.info(f"   RAM target: <{ram_target}%")
+            
             collect_arxiv_papers(
                 output_dir=str(self.output_dir),
                 max_papers=collection_config['max_papers'],
                 cache_file=collection_config.get('cache_file'),
-                rate_limit_delay=rate_limit_delay
+                rate_limit_delay=rate_limit_delay,
+                batch_size=batch_size,
+                ram_target=ram_target
             )
             
             if not self.metadata_jsonl.exists():

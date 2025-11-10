@@ -82,7 +82,11 @@ python run_pipeline.py --config config.yaml --start-from-step 5
 
 ```bash
 # Step 1: Collect ArXiv papers (30-40k papers)
+# Note: Automatically resumes from checkpoint if interrupted
 python data_pipeline.py collect --max-papers 40000 --output-dir ./data/arxiv
+
+# To enable date filtering (2015-2024), edit data_pipeline.py:
+# Set MIN_YEAR = 2015 and MAX_YEAR = 2024 (around line 207-210)
 
 # Step 2: Extract PDF texts
 python data_pipeline.py extract \
@@ -128,14 +132,87 @@ Collects papers from ArXiv using healthcare+CS+ML queries:
 - `cat:q-bio.NC AND (machine learning)`
 
 **Features**:
-- Streaming to disk (no memory accumulation)
-- Deduplication by `arxiv_id`
-- Rate limiting (3 requests/sec)
-- Checkpointing every 5000 papers
-- Date filtering: 2015-2024
+- **RAM-Efficient Batch Collection**: Collects in small batches (10 papers/batch) to prevent OOM
+- **Streaming to Disk**: No memory accumulation, writes immediately
+- **Deduplication**: By `arxiv_id` (automatic)
+- **Rate Limiting**: 3 requests/sec (configurable)
+- **Checkpointing**: After every batch (fully resumable)
+- **Date Filtering**: Optional date range filtering (disabled by default)
+- **Memory Monitoring**: Automatic batch size adjustment based on RAM usage
 
 ```bash
+# Basic collection (no date filtering, all years)
 python data_pipeline.py collect --max-papers 40000
+
+# With custom batch size and RAM target
+python data_pipeline.py collect \
+    --max-papers 40000 \
+    --batch-size 10 \
+    --ram-target 50.0
+```
+
+**Date Filtering**:
+
+To enable date filtering (e.g., 2015-2024), edit `data_pipeline.py`:
+
+```python
+# In data_pipeline.py, around line 207-210:
+MIN_YEAR = 2015  # Set to None to disable minimum
+MAX_YEAR = 2024  # Set to None to disable maximum
+```
+
+Or use the efficient collector directly:
+
+```python
+from data_pipeline import RAMEfficientArxivCollector
+import os
+
+# Enable date filtering
+MIN_YEAR = 2015
+MAX_YEAR = 2024
+
+collector = RAMEfficientArxivCollector(
+    output_file="./data/arxiv/arxiv_papers.jsonl",
+    checkpoint_file="./data/arxiv/collection_checkpoint.json",
+    batch_size=10,
+    ram_target_percent=50.0
+)
+```
+
+**Resuming from Checkpoint**:
+
+The collector automatically resumes from the last checkpoint:
+
+1. **Automatic Resume**: Simply run the same command again:
+   ```bash
+   python data_pipeline.py collect --max-papers 40000
+   ```
+   The collector will:
+   - Load existing papers from `arxiv_papers.jsonl`
+   - Load checkpoint state from `collection_checkpoint.json`
+   - Continue from where it left off
+
+2. **Checkpoint Files**:
+   - `./data/arxiv/arxiv_papers.jsonl`: All collected papers (main output)
+   - `./data/arxiv/collection_checkpoint.json`: Checkpoint state (for resume)
+
+3. **Manual Checkpoint Management**:
+   - Checkpoints are saved after **every batch** (default: every 10 papers)
+   - To force a fresh start, delete `collection_checkpoint.json`
+   - To keep existing papers but reset checkpoint, keep `arxiv_papers.jsonl` and delete `collection_checkpoint.json`
+
+**Example: Resume After Interruption**:
+
+```bash
+# Collection was interrupted at 5000 papers
+# Simply run again - it will resume automatically:
+python data_pipeline.py collect --max-papers 40000
+
+# Output:
+# 📖 Resuming from checkpoint: 5000 papers
+# 📊 Starting from: 5000 papers
+# 🎯 Target: 40000 papers
+# ... continues from batch 501
 ```
 
 ### Stage 2: PDF Text Extraction
@@ -364,7 +441,11 @@ neuroseek-moe/
 
 **ArXiv Collection**:
 - `--max-papers`: Maximum papers to collect (default: 40000)
+- `--batch-size`: Papers per batch (default: 10, adjust for RAM)
+- `--ram-target`: Target RAM percentage to stay below (default: 50.0)
 - `--rate-limit`: Requests per second (default: 3.0)
+- **Date Filtering**: Edit `MIN_YEAR` and `MAX_YEAR` in `data_pipeline.py` (default: None, all years)
+- **Checkpointing**: Automatic after every batch (resume by running the same command)
 
 **PDF Extraction**:
 - `--workers`: Number of parallel workers (default: 3, choices: 2-4)
@@ -402,7 +483,17 @@ neuroseek-moe/
 ### Memory Efficiency
 - **Streaming I/O**: All stages stream to disk, no full dataset in RAM
 - **IterableDataset**: Streams papers during training (<500MB RAM)
-- **Checkpointing**: Resume capability at every stage
+- **Batch Collection**: Small batches (10 papers) prevent OOM errors
+- **Memory Monitoring**: Automatic batch size adjustment based on RAM usage
+- **Checkpointing**: Resume capability at every stage (automatic resume)
+
+### Checkpointing & Resume
+- **Automatic Checkpoints**: Saved after every batch (default: every 10 papers)
+- **Resume Support**: Simply re-run the same command to resume from last checkpoint
+- **Checkpoint Files**:
+  - `arxiv_papers.jsonl`: Main output (all collected papers)
+  - `collection_checkpoint.json`: Checkpoint state (for resume)
+- **No Data Loss**: Interrupted collections can be resumed without losing progress
 
 ### Performance
 - **Parallel Processing**: Multi-threaded PDF extraction and preprocessing
@@ -421,6 +512,65 @@ neuroseek-moe/
 - **NeMo Curator**: Linux only (will gracefully skip on macOS/Windows)
 - **DeepSpeed**: Linux/Colab only (training falls back to PyTorch on macOS)
 - **All other components**: Cross-platform (macOS, Linux, Windows)
+
+## 🔄 Advanced Usage
+
+### Date Filtering
+
+To collect papers from a specific date range:
+
+1. **Edit `data_pipeline.py`** (around line 207-210):
+   ```python
+   # Target date range (set to None to disable date filtering)
+   MIN_YEAR = 2015  # Minimum year (None = no minimum)
+   MAX_YEAR = 2024  # Maximum year (None = no maximum)
+   ```
+
+2. **Run collection**:
+   ```bash
+   python data_pipeline.py collect --max-papers 40000
+   ```
+
+3. **Date filtering behavior**:
+   - Papers outside the date range are automatically skipped
+   - Progress output shows how many papers were skipped due to date filtering
+   - Set `MIN_YEAR = None` and `MAX_YEAR = None` to disable filtering (collect all years)
+
+### Resuming from Checkpoint
+
+The collection pipeline automatically saves checkpoints and can resume:
+
+1. **Automatic Resume**:
+   ```bash
+   # If collection was interrupted, simply run again:
+   python data_pipeline.py collect --max-papers 40000
+   # Output: "📖 Resuming from checkpoint: 5000 papers"
+   ```
+
+2. **Checkpoint Location**:
+   - Main output: `./data/arxiv/arxiv_papers.jsonl`
+   - Checkpoint state: `./data/arxiv/collection_checkpoint.json`
+
+3. **Manual Checkpoint Management**:
+   ```bash
+   # Force fresh start (delete checkpoint, keep existing papers):
+   rm ./data/arxiv/collection_checkpoint.json
+   
+   # Complete reset (delete both checkpoint and output):
+   rm ./data/arxiv/arxiv_papers.jsonl
+   rm ./data/arxiv/collection_checkpoint.json
+   ```
+
+4. **Checkpoint Frequency**:
+   - Checkpoints are saved after **every batch** (default: every 10 papers)
+   - This ensures minimal data loss if interrupted
+   - Adjust `--batch-size` to control checkpoint frequency
+
+5. **Resume Behavior**:
+   - Loads existing papers from `arxiv_papers.jsonl`
+   - Loads checkpoint state from `collection_checkpoint.json`
+   - Skips already-collected papers (deduplication)
+   - Continues from the next batch
 
 ## 📄 License
 

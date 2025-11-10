@@ -13,6 +13,8 @@ collection:
   max_papers: 30000  # Target number of papers (for backward compatibility, also in pipeline section)
   rate_limit: 0.33  # Requests per second (3 requests/sec = 0.33 delay)
   retry_max: 5  # Maximum retry attempts with exponential backoff
+  batch_size: 10  # Papers per batch for RAM-efficient collection (default: 10)
+  ram_target: 50.0  # Target RAM percentage to stay below (default: 50.0)
 
 # Step 2: PDF Text Extraction
 extraction:

@@ -19,10 +19,11 @@ import time
 import threading
 import shutil
 import sys
+import gc
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Set, Optional, List
+from typing import Dict, Set, Optional, List, Tuple
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -204,9 +205,10 @@ RATE_LIMIT_DELAY = 1.0 / 3.0  # ~0.33 seconds between requests
 CHECKPOINT_INTERVAL = 5000  # Save checkpoint every 5000 papers
 LOG_INTERVAL = 500  # Log progress every 500 papers
 
-# Target date range
-MIN_YEAR = 2015
-MAX_YEAR = 2024
+# Target date range (set to None to disable date filtering)
+MIN_YEAR = 2016  # None = no minimum (accept all years)
+MAX_YEAR = None  # None = no maximum (accept all years)
+# Alternative: MIN_YEAR = 2015, MAX_YEAR = 2024 for date filtering
 
 # ArXiv search queries
 ARXIV_QUERIES = [
@@ -621,12 +623,22 @@ def paper_to_dict(paper: arxiv.Result) -> Optional[Dict]:
     # Extract year
     year = extract_year_from_date(paper.published)
     
-    # Skip papers outside target date range
-    if year is not None and (year < MIN_YEAR or year > MAX_YEAR):
+    # Skip papers outside target date range (if date filtering is enabled)
+    if MIN_YEAR is not None and year is not None and year < MIN_YEAR:
+        return None
+    if MAX_YEAR is not None and year is not None and year > MAX_YEAR:
         return None
     
-    # Format categories
-    categories = [cat.term for cat in paper.categories] if paper.categories else []
+    # Format categories (handle both string and object formats)
+    categories = []
+    if paper.categories:
+        for cat in paper.categories:
+            if isinstance(cat, str):
+                categories.append(cat)
+            elif hasattr(cat, 'term'):
+                categories.append(cat.term)
+            else:
+                categories.append(str(cat))
     
     # Build minimal metadata dict
     paper_dict = {
@@ -641,6 +653,223 @@ def paper_to_dict(paper: arxiv.Result) -> Optional[Dict]:
     return paper_dict
 
 
+def search_arxiv_query_streaming(
+    query: str,
+    max_results: int,
+    output_file_handle,
+    existing_ids: Set[str],
+    rate_limit_delay: float = RATE_LIMIT_DELAY,
+    per_result_timeout: int = 5,
+    query_timeout: int = 1800
+) -> int:
+    """Search ArXiv and stream results one-at-a-time to disk.
+    
+    Args:
+        query: ArXiv search query
+        max_results: Maximum number of results to fetch
+        output_file_handle: Open file handle for writing (in append mode)
+        existing_ids: Set of IDs to skip (already in cache)
+        rate_limit_delay: Delay between requests (seconds)
+        per_result_timeout: Timeout per result in seconds (default: 5)
+        query_timeout: Total timeout for query in seconds (default: 1800 = 30 min)
+        
+    Returns:
+        Number of papers found and written
+    """
+    if existing_ids is None:
+        existing_ids = set()
+    
+    # Validate query
+    if not query or not query.strip():
+        print(f"   ❌ Error: Empty query")
+        return 0
+    
+    # Timeout handling (Unix only - signal.SIGALRM)
+    use_signal_timeout = False
+    try:
+        import signal
+        if hasattr(signal, 'SIGALRM'):
+            use_signal_timeout = True
+            
+            def timeout_handler(signum, frame):
+                raise TimeoutError("Timed out")
+            
+            signal.signal(signal.SIGALRM, timeout_handler)
+    except (ImportError, AttributeError):
+        print("   ⚠️  Signal-based timeout not available (Windows), using time-based checks only")
+    
+    print(f"\n🔍 Query: {query}")
+    print(f"   Max results: {max_results}")
+    print(f"   Per-result timeout: {per_result_timeout}s")
+    print(f"   Query timeout: {query_timeout}s ({query_timeout/60:.1f} min)")
+    
+    papers_found = 0
+    papers_skipped = 0
+    skipped_no_abstract = 0
+    skipped_date_range = 0
+    skipped_duplicate = 0
+    
+    query_start = time.time()
+    last_progress_time = query_start
+    
+    try:
+        # Create ArXiv client
+        client = arxiv.Client(
+            page_size=100,
+            delay_seconds=rate_limit_delay,
+            num_retries=2
+        )
+        
+        # Search
+        search = arxiv.Search(
+            query=query,
+            max_results=max_results,
+            sort_by=arxiv.SortCriterion.SubmittedDate,
+            sort_order=arxiv.SortOrder.Descending
+        )
+        
+        print(f"   🔄 Fetching results from ArXiv API...")
+        results_iter = client.results(search)
+        
+        # Set query-level timeout
+        if use_signal_timeout:
+            signal.alarm(query_timeout)
+        
+        result_idx = -1
+        for result_idx, result in enumerate(results_iter):
+            # Check query timeout (time-based, works on all platforms)
+            elapsed = time.time() - query_start
+            if elapsed > query_timeout:
+                print(f"   ⏱️  Query timeout ({query_timeout}s), aborting")
+                break
+            
+            # Per-result timeout
+            if use_signal_timeout:
+                signal.alarm(per_result_timeout)
+            
+            result_start = time.time()
+            
+            try:
+                # Process ONE result at a time
+                paper_id = result.entry_id.split('/')[-1]
+                
+                # Skip if already seen
+                if paper_id in existing_ids:
+                    skipped_duplicate += 1
+                    papers_skipped += 1
+                    if use_signal_timeout:
+                        signal.alarm(0)
+                    continue
+                
+                # Convert to dict (fast operation)
+                paper_dict = paper_to_dict(result)
+                if paper_dict is None:
+                    if not result.summary or not result.summary.strip():
+                        skipped_no_abstract += 1
+                    else:
+                        year = extract_year_from_date(result.published)
+                        if MIN_YEAR is not None and year is not None and year < MIN_YEAR:
+                            skipped_date_range += 1
+                        elif MAX_YEAR is not None and year is not None and year > MAX_YEAR:
+                            skipped_date_range += 1
+                    papers_skipped += 1
+                    if use_signal_timeout:
+                        signal.alarm(0)
+                    continue
+                
+                # Write immediately to disk
+                output_file_handle.write(json.dumps(paper_dict, ensure_ascii=False) + '\n')
+                output_file_handle.flush()  # Force immediate write
+                
+                papers_found += 1
+                existing_ids.add(paper_id)
+                
+                # Progress update every 10 results
+                if papers_found % 10 == 0:
+                    elapsed = time.time() - query_start
+                    rate = papers_found / elapsed if elapsed > 0 else 0
+                    print(f"   📊 {papers_found} papers, {elapsed:.0f}s elapsed, {rate:.2f} papers/sec")
+                    last_progress_time = time.time()
+                
+                # Memory check every 100 results
+                if papers_found % 100 == 0:
+                    if PSUTIL_AVAILABLE:
+                        mem_stats = get_memory_usage()
+                        if mem_stats['percent'] is not None and mem_stats['percent'] > 80:
+                            print(f"   ⚠️  RAM at {mem_stats['percent']:.0f}%, stopping to prevent OOM")
+                            break
+                
+                # Check if we've hit max_results
+                if papers_found >= max_results:
+                    break
+                
+                # Cancel alarm after successful processing
+                if use_signal_timeout:
+                    signal.alarm(0)
+                
+                # Rate limiting
+                time.sleep(rate_limit_delay)
+                
+            except TimeoutError:
+                elapsed_result = time.time() - result_start
+                print(f"   ⚠️  Result #{papers_found + 1} took >{per_result_timeout}s, skipping...")
+                papers_skipped += 1
+                if use_signal_timeout:
+                    signal.alarm(0)
+                continue
+            except Exception as e:
+                print(f"   ⚠️  Error processing result: {e}")
+                papers_skipped += 1
+                if use_signal_timeout:
+                    signal.alarm(0)
+                continue
+        
+        # Cancel final alarm
+        if use_signal_timeout:
+            signal.alarm(0)
+        
+        # Final summary
+        elapsed = time.time() - query_start
+        rate = papers_found / elapsed if elapsed > 0 else 0
+        print(f"   ✅ Query complete: {papers_found} papers ({rate:.2f} papers/sec)")
+        if skipped_duplicate > 0:
+            print(f"   ⏭️  Skipped {skipped_duplicate} duplicates")
+        if skipped_no_abstract > 0:
+            print(f"   ⏭️  Skipped {skipped_no_abstract} papers without abstracts")
+        if skipped_date_range > 0:
+            if MIN_YEAR is not None and MAX_YEAR is not None:
+                date_range_str = f"{MIN_YEAR}-{MAX_YEAR}"
+            elif MIN_YEAR is not None:
+                date_range_str = f">={MIN_YEAR}"
+            elif MAX_YEAR is not None:
+                date_range_str = f"<={MAX_YEAR}"
+            else:
+                date_range_str = "all years"
+            print(f"   ⏭️  Skipped {skipped_date_range} papers outside date range ({date_range_str})")
+        
+        if papers_found == 0:
+            if result_idx == -1:
+                print(f"   ⚠️  Warning: No results found for query")
+                print(f"      - Query: {query}")
+                print(f"      - This might indicate query syntax issue or API problem")
+            else:
+                print(f"   ⚠️  Warning: Processed {result_idx + 1} results but none matched criteria")
+        
+    except TimeoutError:
+        elapsed = time.time() - query_start
+        print(f"   ⏱️  Query timed out after {elapsed:.0f}s")
+    except KeyboardInterrupt:
+        print(f"\n   ⏸️  Query interrupted by user")
+        raise
+    except Exception as e:
+        print(f"   ❌ Query error: {e}")
+        import traceback
+        print(f"   Traceback: {traceback.format_exc()}")
+    
+    return papers_found
+
+
+# Backward compatibility alias
 def search_arxiv_query(
     query: str,
     max_results: int = 10000,
@@ -648,143 +877,34 @@ def search_arxiv_query(
     rate_limit_delay: float = RATE_LIMIT_DELAY,
     max_retries: int = 5
 ) -> list[Dict]:
-    """Search ArXiv with retry logic and exponential backoff.
+    """Legacy function - accumulates results in memory. Use search_arxiv_query_streaming() instead."""
+    print("⚠️  Warning: Using legacy search_arxiv_query() which accumulates results in memory.")
+    print("   Consider using search_arxiv_query_streaming() for better memory efficiency.")
     
-    Args:
-        query: ArXiv search query
-        max_results: Maximum number of results to fetch
-        existing_ids: Set of IDs to skip (already in cache)
-        rate_limit_delay: Delay between requests (seconds)
-        max_retries: Maximum number of retry attempts (default: 5)
-        
-    Returns:
-        List of paper dictionaries
-    """
     if existing_ids is None:
         existing_ids = set()
     
     papers = []
-    print(f"\n🔍 Searching ArXiv: {query}")
-    print(f"   Max results: {max_results}")
-    
-    # Validate query syntax
-    if not query or not query.strip():
-        print(f"   ❌ Error: Empty query")
-        return papers
-    
-    # Retry logic with exponential backoff
-    for attempt in range(max_retries):
+    # Use streaming function with temporary file, then read back
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.jsonl', encoding='utf-8') as tmp:
         try:
-            if attempt > 0:
-                # Exponential backoff with jitter
-                base_wait = 2 ** (attempt - 1)  # 1, 2, 4, 8, 16
-                jitter = random.uniform(0, base_wait)
-                wait_time = base_wait + jitter
-                print(f"   ⏳ Retry attempt {attempt}/{max_retries} after {wait_time:.1f}s...")
-                time.sleep(wait_time)
-            
-            # Create ArXiv client with rate limiting
-            client = arxiv.Client(
-                page_size=100,  # Fetch 100 papers per request
-                delay_seconds=rate_limit_delay,
-                num_retries=3
-            )
-            
-            # Search
-            search = arxiv.Search(
+            count = search_arxiv_query_streaming(
                 query=query,
                 max_results=max_results,
-                sort_by=arxiv.SortCriterion.SubmittedDate,
-                sort_order=arxiv.SortOrder.Descending
+                output_file_handle=tmp,
+                existing_ids=existing_ids,
+                rate_limit_delay=rate_limit_delay,
+                per_result_timeout=5,
+                query_timeout=1800
             )
-            
-            # Stream results
-            count = 0
-            skipped_no_abstract = 0
-            skipped_date_range = 0
-            skipped_duplicate = 0
-            
-            print(f"   🔄 Fetching results from ArXiv API (attempt {attempt + 1}/{max_retries})...")
-            results_iter = client.results(search)
-            
-            result_idx = -1
-            for result_idx, result in enumerate(results_iter):
-                # Rate limiting
-                time.sleep(rate_limit_delay)
-                
-                # Check if already in cache
-                paper_id = result.entry_id.split('/')[-1]
-                if paper_id in existing_ids:
-                    skipped_duplicate += 1
-                    continue
-                
-                # Convert to dict
-                paper_dict = paper_to_dict(result)
-                if paper_dict is None:
-                    if not result.summary or not result.summary.strip():
-                        skipped_no_abstract += 1
-                    else:
-                        year = extract_year_from_date(result.published)
-                        if year is not None and (year < MIN_YEAR or year > MAX_YEAR):
-                            skipped_date_range += 1
-                    continue
-                
-                papers.append(paper_dict)
-                count += 1
-                
-                # Log progress every 500 papers
-                if count % LOG_INTERVAL == 0:
-                    print(f"   ✅ Collected {count} new papers from this query...")
-                
-                # Safety limit
-                if count >= max_results:
-                    break
-            
-            # Success - break out of retry loop
-            print(f"   ✅ Query complete: {count} new papers collected")
-            if skipped_duplicate > 0:
-                print(f"   ⏭️  Skipped {skipped_duplicate} duplicates")
-            if skipped_no_abstract > 0:
-                print(f"   ⏭️  Skipped {skipped_no_abstract} papers without abstracts")
-            if skipped_date_range > 0:
-                print(f"   ⏭️  Skipped {skipped_date_range} papers outside date range ({MIN_YEAR}-{MAX_YEAR})")
-            
-            if count == 0:
-                if result_idx == -1:
-                    print(f"   ⚠️  Warning: No results found for query")
-                    print(f"      - Query: {query}")
-                    print(f"      - This might indicate query syntax issue or API problem")
-                else:
-                    print(f"   ⚠️  Warning: Processed {result_idx + 1} results but none matched criteria")
-            
-            break  # Success, exit retry loop
-            
-        except arxiv.UnexpectedEmptyPageError as e:
-            print(f"   ⚠️  ArXiv returned empty page (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                continue
-            else:
-                print(f"   ❌ Failed after {max_retries} attempts")
-                break
-                
-        except arxiv.HTTPError as e:
-            print(f"   ⚠️  HTTP error (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                continue
-            else:
-                print(f"   ❌ Failed after {max_retries} attempts")
-                break
-                
-        except Exception as e:
-            print(f"   ❌ Error in query '{query}' (attempt {attempt + 1}/{max_retries}): {e}")
-            import traceback
-            if attempt == max_retries - 1:
-                print(f"   Full traceback: {traceback.format_exc()}")
-            if attempt < max_retries - 1:
-                continue
-            else:
-                print(f"   ❌ Failed after {max_retries} attempts")
-                break
+            # Read back results (for backward compatibility)
+            tmp.seek(0)
+            for line in tmp:
+                if line.strip():
+                    papers.append(json.loads(line))
+        finally:
+            os.unlink(tmp.name)
     
     return papers
 
@@ -804,192 +924,528 @@ def save_papers_to_jsonl(papers: list[Dict], output_file: str, mode: str = 'a'):
             f.write(json.dumps(paper, ensure_ascii=False) + '\n')
 
 
-def collect_arxiv_papers(
+class RAMEfficientArxivCollector:
+    """Collect ArXiv papers without OOM, with checkpointing."""
+    
+    def __init__(
+        self,
+        output_file: str,
+        checkpoint_file: str,
+        batch_size: int = 10,
+        ram_target_percent: float = 50.0,
+        rate_limit: float = 0.33
+    ):
+        self.output_file = output_file
+        self.checkpoint_file = checkpoint_file
+        self.batch_size = batch_size
+        self.ram_target_percent = ram_target_percent
+        self.rate_limit = rate_limit
+        self.collected_ids = set()
+        self.total_collected = 0
+        
+        # Load checkpoint
+        self._load_checkpoint()
+    
+    def _get_ram_percent(self) -> float:
+        """Get current RAM usage percentage."""
+        if not PSUTIL_AVAILABLE:
+            return 0.0
+        try:
+            return psutil.virtual_memory().percent
+        except:
+            return 0.0
+    
+    def _log_memory(self, prefix: str = ""):
+        """Log current RAM usage."""
+        if not PSUTIL_AVAILABLE:
+            return
+        try:
+            mem = psutil.virtual_memory()
+            percent = mem.percent
+            available_gb = mem.available / (1024**3)
+            used_gb = mem.used / (1024**3)
+            total_gb = mem.total / (1024**3)
+            print(f"   {prefix} 💾 RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({percent:.0f}%)")
+        except:
+            pass
+    
+    def _save_checkpoint(self):
+        """Save checkpoint with current progress."""
+        checkpoint = {
+            'timestamp': time.time(),
+            'total_collected': self.total_collected,
+            'collected_ids': list(self.collected_ids)[:1000],  # Keep last 1000 for dedup
+        }
+        with open(self.checkpoint_file, 'w') as f:
+            json.dump(checkpoint, f)
+        print(f"   💾 Checkpoint saved: {self.total_collected} papers")
+    
+    def _load_checkpoint(self):
+        """Load checkpoint to resume collection."""
+        try:
+            if os.path.exists(self.checkpoint_file):
+                with open(self.checkpoint_file, 'r') as f:
+                    checkpoint = json.load(f)
+                    self.total_collected = checkpoint.get('total_collected', 0)
+                    self.collected_ids = set(checkpoint.get('collected_ids', []))
+                    print(f"📖 Resuming from checkpoint: {self.total_collected} papers")
+            else:
+                # Also check existing output file
+                if os.path.exists(self.output_file):
+                    existing_ids = load_existing_ids(self.output_file)
+                    self.collected_ids = existing_ids
+                    self.total_collected = len(existing_ids)
+                    if self.total_collected > 0:
+                        print(f"📖 Found {self.total_collected} existing papers in output file")
+        except Exception as e:
+            print(f"⚠️  Could not load checkpoint: {e}")
+            print("📝 Starting fresh")
+    
+    def _clear_memory(self):
+        """Aggressively clear memory."""
+        gc.collect()
+        self._log_memory("After gc.collect():")
+    
+    def collect_batch(
+        self,
+        query: str,
+        batch_num: int,
+        batch_size: int
+    ) -> int:
+        """
+        Collect one batch of papers.
+        
+        Returns: Number of papers collected in this batch
+        """
+        print(f"\n   Batch {batch_num}: Collecting up to {batch_size} papers...")
+        self._log_memory("Before batch:")
+        
+        papers_in_batch = 0
+        batch_start = time.time()
+        
+        if not ARXIV_AVAILABLE:
+            print("   ❌ ArXiv package not available")
+            return 0
+        
+        try:
+            client = arxiv.Client(
+                delay_seconds=self.rate_limit,
+                num_retries=2
+            )
+            
+            search = arxiv.Search(
+                query=query,
+                max_results=batch_size,
+                sort_by=arxiv.SortCriterion.SubmittedDate,
+                sort_order=arxiv.SortOrder.Descending
+            )
+            
+            with open(self.output_file, 'a', encoding='utf-8') as f:
+                for result in client.results(search):
+                    paper_id = result.entry_id.split('/')[-1]
+                    
+                    # Skip if already collected
+                    if paper_id in self.collected_ids:
+                        continue
+                    
+                    # Convert to dict (handle categories properly)
+                    categories = []
+                    if result.categories:
+                        for cat in result.categories:
+                            if isinstance(cat, str):
+                                categories.append(cat)
+                            elif hasattr(cat, 'term'):
+                                categories.append(cat.term)
+                            else:
+                                categories.append(str(cat))
+                    
+                    year = None
+                    if result.published:
+                        try:
+                            year = result.published.year
+                        except:
+                            pass
+                    
+                    # Skip if date filtering enabled and outside range
+                    if MIN_YEAR is not None and year is not None and year < MIN_YEAR:
+                        continue
+                    if MAX_YEAR is not None and year is not None and year > MAX_YEAR:
+                        continue
+                    
+                    # Skip if no abstract
+                    if not result.summary or not result.summary.strip():
+                        continue
+                    
+                    paper = {
+                        'id': paper_id,
+                        'title': result.title.strip() if result.title else "",
+                        'abstract': format_abstract(result.summary, max_length=300),
+                        'year': year,
+                        'categories': categories,
+                        'pdf_url': f"https://arxiv.org/pdf/{paper_id}.pdf",
+                    }
+                    
+                    # Write immediately
+                    f.write(json.dumps(paper, ensure_ascii=False) + '\n')
+                    f.flush()
+                    
+                    # Track collected
+                    self.collected_ids.add(paper_id)
+                    self.total_collected += 1
+                    papers_in_batch += 1
+                    
+                    # Check RAM after every 5 papers
+                    if papers_in_batch % 5 == 0:
+                        ram_percent = self._get_ram_percent()
+                        if ram_percent > self.ram_target_percent:
+                            print(f"   ⚠️  RAM at {ram_percent:.0f}%, stopping batch early")
+                            break
+                    
+                    # Rate limiting
+                    time.sleep(self.rate_limit)
+        
+        except Exception as e:
+            print(f"   ⚠️  Batch error: {e}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()}")
+        
+        elapsed = time.time() - batch_start
+        rate = papers_in_batch / elapsed if elapsed > 0 else 0
+        
+        print(f"   ✅ Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec)")
+        self._log_memory("After batch:")
+        
+        return papers_in_batch
+    
+    def collect_query(
+        self,
+        query: str,
+        max_papers: int,
+        query_num: int,
+        total_queries: int
+    ) -> int:
+        """
+        Collect papers for one query, using multiple batches.
+        
+        Uses a single large search and processes results incrementally to avoid
+        getting the same papers in each batch.
+        
+        Returns: Total papers collected for this query
+        """
+        print(f"\n{'='*70}")
+        print(f"Query {query_num}/{total_queries}: {query[:60]}...")
+        print(f"{'='*70}")
+        
+        if not ARXIV_AVAILABLE:
+            print("   ❌ ArXiv package not available")
+            return 0
+        
+        papers_in_query = 0
+        batch_num = 0
+        results_processed = 0
+        max_search_results = max(max_papers * 2, 500)  # Fetch extra for filtering
+        
+        try:
+            client = arxiv.Client(
+                delay_seconds=self.rate_limit,
+                num_retries=2
+            )
+            
+            # Single large search for the entire query
+            search = arxiv.Search(
+                query=query,
+                max_results=max_search_results,
+                sort_by=arxiv.SortCriterion.SubmittedDate,
+                sort_order=arxiv.SortOrder.Descending
+            )
+            
+            results_iter = client.results(search)
+            
+            while papers_in_query < max_papers:
+                batch_num += 1
+                
+                # Adjust batch size based on RAM
+                ram_percent = self._get_ram_percent()
+                if ram_percent > 70:
+                    current_batch_size = max(5, self.batch_size // 2)
+                    print(f"   ⚠️  High RAM ({ram_percent:.0f}%), reducing batch size to {current_batch_size}")
+                elif ram_percent > 50:
+                    current_batch_size = max(5, int(self.batch_size * 0.75))
+                    print(f"   ⚠️  Moderate RAM ({ram_percent:.0f}%), reducing batch size to {current_batch_size}")
+                else:
+                    current_batch_size = self.batch_size
+                
+                # Collect batch from the same iterator
+                papers = self._collect_batch_from_iterator(
+                    results_iter, query, batch_num, current_batch_size
+                )
+                
+                if papers == 0:
+                    print("   No more papers available from this query")
+                    break
+                
+                papers_in_query += papers
+                
+                # Save checkpoint after each batch
+                self._save_checkpoint()
+                
+                # Clear memory
+                self._clear_memory()
+                
+                # Avoid hitting rate limits
+                time.sleep(1)
+        
+        except StopIteration:
+            print("   Reached end of search results")
+        except Exception as e:
+            print(f"   ⚠️  Query error: {e}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()}")
+        
+        print(f"\n✅ Query complete: {papers_in_query} papers")
+        return papers_in_query
+    
+    def _collect_batch_from_iterator(
+        self,
+        results_iter,
+        query: str,
+        batch_num: int,
+        batch_size: int
+    ) -> int:
+        """
+        Collect one batch of papers from an existing results iterator.
+        
+        This avoids restarting the search and getting duplicate results.
+        
+        Returns: Number of papers collected in this batch
+        """
+        print(f"\n   Batch {batch_num}: Collecting up to {batch_size} papers...")
+        self._log_memory("Before batch:")
+        
+        papers_in_batch = 0
+        batch_start = time.time()
+        results_checked = 0
+        
+        try:
+            with open(self.output_file, 'a', encoding='utf-8') as f:
+                for result in results_iter:
+                    results_checked += 1
+                    paper_id = result.entry_id.split('/')[-1]
+                    
+                    # Skip if already collected
+                    if paper_id in self.collected_ids:
+                        continue
+                    
+                    # Convert to dict (handle categories properly)
+                    categories = []
+                    if result.categories:
+                        for cat in result.categories:
+                            if isinstance(cat, str):
+                                categories.append(cat)
+                            elif hasattr(cat, 'term'):
+                                categories.append(cat.term)
+                            else:
+                                categories.append(str(cat))
+                    
+                    year = None
+                    if result.published:
+                        try:
+                            year = result.published.year
+                        except:
+                            pass
+                    
+                    # Skip if date filtering enabled and outside range
+                    if MIN_YEAR is not None and year is not None and year < MIN_YEAR:
+                        continue
+                    if MAX_YEAR is not None and year is not None and year > MAX_YEAR:
+                        continue
+                    
+                    # Skip if no abstract
+                    if not result.summary or not result.summary.strip():
+                        continue
+                    
+                    paper = {
+                        'id': paper_id,
+                        'title': result.title.strip() if result.title else "",
+                        'abstract': format_abstract(result.summary, max_length=300),
+                        'year': year,
+                        'categories': categories,
+                        'pdf_url': f"https://arxiv.org/pdf/{paper_id}.pdf",
+                    }
+                    
+                    # Write immediately
+                    f.write(json.dumps(paper, ensure_ascii=False) + '\n')
+                    f.flush()
+                    
+                    # Track collected
+                    self.collected_ids.add(paper_id)
+                    self.total_collected += 1
+                    papers_in_batch += 1
+                    
+                    # Stop when we've collected enough for this batch
+                    if papers_in_batch >= batch_size:
+                        break
+                    
+                    # Check RAM after every 5 papers
+                    if papers_in_batch % 5 == 0:
+                        ram_percent = self._get_ram_percent()
+                        if ram_percent > self.ram_target_percent:
+                            print(f"   ⚠️  RAM at {ram_percent:.0f}%, stopping batch early")
+                            break
+                    
+                    # Rate limiting
+                    time.sleep(self.rate_limit)
+        
+        except StopIteration:
+            # End of results
+            pass
+        except Exception as e:
+            print(f"   ⚠️  Batch error: {e}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()}")
+        
+        elapsed = time.time() - batch_start
+        rate = papers_in_batch / elapsed if elapsed > 0 else 0
+        
+        print(f"   ✅ Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec, checked {results_checked} results)")
+        self._log_memory("After batch:")
+        
+        return papers_in_batch
+    
+    def collect_all(
+        self,
+        queries: List[Tuple[str, int]],
+        total_target: int
+    ):
+        """
+        Collect papers from multiple queries.
+        
+        Args:
+            queries: List of (query_str, max_papers_per_query) tuples
+            total_target: Total papers to collect
+        """
+        print("\n" + "="*70)
+        print("🚀 RAM-Efficient ArXiv Collection")
+        print("="*70)
+        print(f"📊 Starting from: {self.total_collected} papers")
+        print(f"🎯 Target: {total_target} papers")
+        print(f"📦 Batch size: {self.batch_size} papers/batch")
+        print(f"💾 RAM target: <{self.ram_target_percent:.0f}%")
+        if MIN_YEAR is not None or MAX_YEAR is not None:
+            date_range = f"{MIN_YEAR or 'any'}-{MAX_YEAR or 'any'}"
+            print(f"📅 Date range: {date_range}")
+        else:
+            print(f"📅 Date range: All years (no filtering)")
+        print()
+        
+        try:
+            for query_num, (query, max_per_query) in enumerate(queries, 1):
+                if self.total_collected >= total_target:
+                    print(f"\n✅ Reached target of {total_target} papers")
+                    break
+                
+                # Adjust max for this query
+                remaining = total_target - self.total_collected
+                max_for_query = min(max_per_query, remaining)
+                
+                # Collect query
+                papers = self.collect_query(
+                    query=query,
+                    max_papers=max_for_query,
+                    query_num=query_num,
+                    total_queries=len(queries)
+                )
+        
+        except KeyboardInterrupt:
+            print("\n⏸️  Collection paused by user")
+        
+        finally:
+            self._save_checkpoint()
+            print(f"\n✅ Total collected: {self.total_collected} papers")
+            self._log_memory("Final:")
+
+
+def collect_arxiv_efficient(
     output_dir: str = "./data/arxiv",
-    max_papers: int = 40000,
-    cache_file: str = None,
-    rate_limit_delay: float = RATE_LIMIT_DELAY
+    total_target: int = 10000,
+    batch_size: int = 10,
+    ram_target: float = 50.0,
+    rate_limit: float = 0.33
 ):
-    """Main function to collect ArXiv papers.
+    """
+    Collect ArXiv papers efficiently without OOM.
     
     Args:
-        output_dir: Directory to save output files
-        max_papers: Maximum total papers to collect
-        cache_file: Path to cache file (default: output_dir/arxiv_papers.jsonl)
-        rate_limit_delay: Delay between API requests (seconds)
+        output_dir: Output directory
+        total_target: Total papers to collect
+        batch_size: Papers per batch (adjust for RAM)
+        ram_target: Target RAM percentage to stay below
+        rate_limit: Delay between requests (seconds)
     """
     if not ARXIV_AVAILABLE:
         error_msg = "❌ Error: arxiv package not available. Install with: pip install arxiv"
         print(error_msg)
         raise ImportError(error_msg)
     
-    # Setup paths
     os.makedirs(output_dir, exist_ok=True)
+    
+    output_file = os.path.join(output_dir, "arxiv_papers.jsonl")
+    checkpoint_file = os.path.join(output_dir, "collection_checkpoint.json")
+    
+    # Initialize collector
+    collector = RAMEfficientArxivCollector(
+        output_file=output_file,
+        checkpoint_file=checkpoint_file,
+        batch_size=batch_size,
+        ram_target_percent=ram_target,
+        rate_limit=rate_limit
+    )
+    
+    # Define queries
+    queries = [
+        ("cat:cs.LG AND healthcare", 3000),
+        ("cat:cs.AI AND (neurodegeneration OR disease)", 3000),
+        ("cat:q-bio.NC AND (machine learning)", 2000),
+        ("cat:stat.ML AND medical", 2000),
+    ]
+    
+    # Collect
+    collector.collect_all(queries, total_target)
+    
+    print(f"\n📁 Papers saved to: {output_file}")
+    print(f"💾 Checkpoint saved to: {checkpoint_file}")
+    print(f"📖 To resume: Run collect_arxiv_efficient() again")
+
+
+def collect_arxiv_papers(
+    output_dir: str = "./data/arxiv",
+    max_papers: int = 40000,
+    cache_file: str = None,
+    rate_limit_delay: float = RATE_LIMIT_DELAY,
+    batch_size: int = 10,
+    ram_target: float = 50.0
+):
+    """Main function to collect ArXiv papers using RAM-efficient batch collection.
+    
+    Args:
+        output_dir: Directory to save output files
+        max_papers: Maximum total papers to collect
+        cache_file: Path to cache file (default: output_dir/arxiv_papers.jsonl)
+        rate_limit_delay: Delay between API requests (seconds)
+        batch_size: Papers per batch (default: 10 for RAM efficiency)
+        ram_target: Target RAM percentage to stay below (default: 50%)
+    """
     if cache_file is None:
         cache_file = os.path.join(output_dir, "arxiv_papers.jsonl")
     
-    checkpoint_file = os.path.join(output_dir, "checkpoint.json")
-    
-    print("=" * 60)
-    print("📚 ArXiv Paper Collector")
-    print("=" * 60)
-    print(f"📁 Output directory: {output_dir}")
-    print(f"📄 Cache file: {cache_file}")
-    print(f"🎯 Target: {max_papers} papers")
-    print(f"📅 Date range: {MIN_YEAR}-{MAX_YEAR}")
-    print(f"⏱️  Rate limit: {1.0/rate_limit_delay:.1f} requests/sec")
-    print()
-    
-    # Load existing cache
-    existing_ids = load_existing_ids(cache_file)
-    total_collected = len(existing_ids)
-    
-    if total_collected >= max_papers:
-        print(f"✅ Already have {total_collected} papers (target: {max_papers})")
-        print("   Collection complete!")
-        return
-    
-    # If cache file exists but is empty, reset it
-    if total_collected == 0 and os.path.exists(cache_file):
-        print(f"⚠️  Cache file exists but is empty. Starting fresh collection...")
-        # Open in write mode to clear it, then switch to append mode
-        with open(cache_file, 'w', encoding='utf-8') as f:
-            pass  # Clear the file
-        existing_ids = set()
-        total_collected = 0
-    
-    print(f"📊 Starting collection: {total_collected}/{max_papers} papers already cached")
-    print()
-    
-    # Open cache file for streaming writes
-    cache_file_handle = open(cache_file, 'a', encoding='utf-8')
-    
-    # Track statistics
-    total_new_papers = 0
-    papers_by_query = defaultdict(int)
-    checkpoint_counter = 0
-    
-    try:
-        for query_idx, query in enumerate(ARXIV_QUERIES, 1):
-            if total_collected + total_new_papers >= max_papers:
-                print(f"\n✅ Target reached! Collected {total_collected + total_new_papers} papers")
-                break
-            
-            # Calculate how many more papers we need
-            remaining = max_papers - (total_collected + total_new_papers)
-            query_max = min(remaining * 2, 15000)  # Fetch extra to account for deduplication
-            
-            # Search this query
-            print(f"\n🔍 Processing query {query_idx}/{len(ARXIV_QUERIES)}: {query}")
-            query_papers = search_arxiv_query(
-                query=query,
-                max_results=query_max,
-                existing_ids=existing_ids,
-                rate_limit_delay=rate_limit_delay
-            )
-            
-            if not query_papers:
-                print(f"   ⚠️  No papers returned from query. Skipping...")
-                papers_by_query[query] = 0
-                continue
-            
-            print(f"   📊 Received {len(query_papers)} papers from query")
-            
-            # Stream papers to disk immediately (deduplicate and write)
-            seen_in_query = set()
-            query_paper_count = 0
-            
-            for paper in query_papers:
-                paper_id = paper['id']
-                
-                # Skip if already seen
-                if paper_id in seen_in_query or paper_id in existing_ids:
-                    continue
-                
-                # Mark as seen
-                seen_in_query.add(paper_id)
-                existing_ids.add(paper_id)
-                
-                # Stream to disk immediately
-                cache_file_handle.write(json.dumps(paper, ensure_ascii=False) + '\n')
-                cache_file_handle.flush()  # Ensure immediate write
-                
-                query_paper_count += 1
-                total_new_papers += 1
-                checkpoint_counter += 1
-                
-                # Log progress every 500 papers
-                if total_new_papers % LOG_INTERVAL == 0:
-                    print(f"   📊 Progress: {total_new_papers} new papers collected...")
-                
-                # Checkpoint: save metadata every CHECKPOINT_INTERVAL papers
-                if checkpoint_counter >= CHECKPOINT_INTERVAL:
-                    checkpoint_data = {
-                        'timestamp': datetime.now().isoformat(),
-                        'total_papers': total_collected + total_new_papers,
-                        'new_papers': total_new_papers,
-                        'queries_completed': query_idx,
-                    }
-                    with open(checkpoint_file, 'w') as f:
-                        json.dump(checkpoint_data, f, indent=2)
-                    
-                    print(f"\n💾 Checkpoint: {total_new_papers} papers written to disk")
-                    checkpoint_counter = 0
-                
-                # Check if target reached
-                if total_collected + total_new_papers >= max_papers:
-                    break
-            
-            papers_by_query[query] = query_paper_count
-            print(f"   📊 Query {query_idx}/{len(ARXIV_QUERIES)}: {query_paper_count} unique papers")
-            print(f"   📊 Total new papers: {total_new_papers}")
-    
-    finally:
-        # Close file handle
-        cache_file_handle.close()
-        
-        # Final checkpoint
-        if checkpoint_counter > 0:
-            checkpoint_data = {
-                'timestamp': datetime.now().isoformat(),
-                'total_papers': total_collected + total_new_papers,
-                'new_papers': total_new_papers,
-                'queries_completed': len(ARXIV_QUERIES),
-            }
-            with open(checkpoint_file, 'w') as f:
-                json.dump(checkpoint_data, f, indent=2)
-            print(f"\n💾 Final checkpoint: {total_new_papers} papers written to disk")
-    
-    # Final statistics
-    final_count = load_existing_ids(cache_file)
-    print(f"\n" + "=" * 60)
-    print("✅ Collection Complete!")
-    print("=" * 60)
-    print(f"📊 Total papers collected: {len(final_count)}")
-    print(f"📁 Output file: {cache_file}")
-    
-    # Print breakdown by query
-    print(f"\n📊 Breakdown by query:")
-    for query, papers in papers_by_query.items():
-        print(f"   {query[:50]}...: {len(papers)} papers")
-    
-    # Print year distribution
-    print(f"\n📅 Loading year distribution...")
-    year_counts = defaultdict(int)
-    with open(cache_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                try:
-                    paper = json.loads(line)
-                    year = paper.get('year')
-                    if year:
-                        year_counts[year] += 1
-                except:
-                    continue
-    
-    print(f"📅 Year distribution:")
-    for year in sorted(year_counts.keys()):
-        print(f"   {year}: {year_counts[year]} papers")
+    # Use the efficient collector
+    collect_arxiv_efficient(
+        output_dir=output_dir,
+        total_target=max_papers,
+        batch_size=batch_size,
+        ram_target=ram_target,
+        rate_limit=rate_limit_delay
+    )
 
 
 # PDF Extraction Constants
@@ -4593,6 +5049,18 @@ Examples:
         default=3.0,
         help='Rate limit in requests per second (default: 3.0)'
     )
+    collect_parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=10,
+        help='Papers per batch for RAM-efficient collection (default: 10)'
+    )
+    collect_parser.add_argument(
+        '--ram-target',
+        type=float,
+        default=50.0,
+        help='Target RAM percentage to stay below (default: 50.0)'
+    )
     
     # Extract command
     extract_parser = subparsers.add_parser('extract', help='Extract text from PDFs')
@@ -4755,7 +5223,9 @@ Examples:
             output_dir=args.output_dir,
             max_papers=args.max_papers,
             cache_file=args.cache_file,
-            rate_limit_delay=rate_limit_delay
+            rate_limit_delay=rate_limit_delay,
+            batch_size=args.batch_size,
+            ram_target=args.ram_target
         )
     elif args.command == 'extract':
         extract_pdf_texts(

@@ -274,7 +274,9 @@ def load_config(config_path: str = "config.yaml") -> Dict:
         'collection': {
             'max_papers': 30000,  # For backward compatibility
             'rate_limit': 0.33,  # requests per second
-            'retry_max': 5
+            'retry_max': 5,
+            'batch_size': 25,  # Optimized for time efficiency (24% faster than 10, minimal RAM impact)
+            'ram_target': 50.0  # Target RAM percentage to stay below
         },
         'extraction': {
             'workers': 2,  # Colab safe

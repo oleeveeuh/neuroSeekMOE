@@ -3633,7 +3633,27 @@ def curate_with_nemo(
     print(f"🎯 Min relevance score: {min_relevance_score}")
     print(f"🔧 GPU deduplication: {use_gpu}")
     print(f"🔧 Skip deduplication: {skip_dedup}")
+    print(f"🔍 NEMO_CURATOR_AVAILABLE: {NEMO_CURATOR_AVAILABLE}")
     print()
+    
+    # Verify inputs exist
+    if not os.path.exists(text_dir):
+        error_msg = f"❌ Text directory does not exist: {text_dir}"
+        print(error_msg)
+        raise FileNotFoundError(error_msg)
+    
+    if not os.path.exists(metadata_jsonl):
+        error_msg = f"❌ Metadata file does not exist: {metadata_jsonl}"
+        print(error_msg)
+        raise FileNotFoundError(error_msg)
+    
+    text_files = [f for f in os.listdir(text_dir) if f.endswith('.txt')]
+    print(f"📊 Found {len(text_files)} text files in {text_dir}")
+    
+    if len(text_files) == 0:
+        error_msg = f"❌ No text files found in {text_dir}"
+        print(error_msg)
+        raise ValueError(error_msg)
     
     # Initialize Dask client for parallelization
     try:
@@ -4041,9 +4061,22 @@ def curate_with_nemo(
     
     # Close Dask client
     try:
-        client.close()
-    except:
-        pass
+        if client is not None:
+            client.close()
+            print("✅ Dask client closed")
+    except Exception as e:
+        print(f"⚠️  Error closing Dask client: {e}")
+    
+    # Final confirmation
+    print("\n" + "=" * 60)
+    print("✅ curate_with_nemo() completed successfully!")
+    print(f"📁 Output file: {output_jsonl}")
+    if os.path.exists(output_jsonl):
+        file_size = os.path.getsize(output_jsonl) / (1024 * 1024)  # MB
+        count = sum(1 for _ in open(output_jsonl))
+        print(f"📊 Output file size: {file_size:.2f} MB")
+        print(f"📊 Documents in output: {count}")
+    print("=" * 60)
 
 
 def process_curated_dataset(

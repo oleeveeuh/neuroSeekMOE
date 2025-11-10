@@ -228,19 +228,21 @@ class PipelineOrchestrator:
         step_name = "Collect Papers"
         self._log_step_start(step_name, 1, 8)
         
-        # Check if already complete (verify file is non-empty)
-        if self._check_step_complete(step_name, [self.metadata_jsonl], check_non_empty=True):
-            # Double-check: count papers to ensure it's actually valid
-            if self.metadata_jsonl.exists():
-                count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
-                if count > 0:
-                    logger.info(f"📊 Found {count} papers in existing metadata file")
-                    self._log_step_end(step_name, True)
-                    return True
-                else:
-                    logger.warning(f"⚠️  Metadata file exists but is empty. Re-running collection...")
+        # Check if already complete - must have reached target count
+        collection_config = self.config['collection']
+        target_papers = collection_config['max_papers']
+        
+        if self.metadata_jsonl.exists():
+            count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
+            if count >= target_papers:
+                logger.info(f"📊 Found {count} papers (target: {target_papers}) - collection already complete")
+                self._log_step_end(step_name, True)
+                return True
+            elif count > 0:
+                logger.info(f"📊 Found {count} papers (target: {target_papers}) - continuing collection...")
+                # Continue to collection below
             else:
-                logger.warning(f"⚠️  Metadata file check passed but file doesn't exist. Re-running collection...")
+                logger.warning(f"⚠️  Metadata file exists but is empty. Re-running collection...")
         
         try:
             # If file exists but is empty, delete it to force re-collection

@@ -390,47 +390,34 @@ class PipelineOrchestrator:
         try:
             nemo_config = self.config.get('nemo_curator', {})
             
-            # Check if we should use the new Pipeline API or legacy function
-            use_pipeline_api = nemo_config.get('use_pipeline_api', True)
+            # Check if text files already exist (from extraction step)
+            # If so, use legacy function to process existing files
+            # Otherwise, use Pipeline API to download from scratch
+            text_files_exist = self.text_dir.exists() and any(self.text_dir.glob("*.txt"))
             
-            if use_pipeline_api:
-                # Use new NeMo Curator Pipeline API (FREE, no AWS needed)
-                logger.info("🔬 Using NeMo Curator Pipeline API with FREE download_arxiv()")
+            if text_files_exist:
+                # Use legacy curate_with_nemo function (processes existing text files)
+                logger.info("🔬 Using NeMo Curator to process existing extracted text files")
+                logger.info(f"   Found text files in: {self.text_dir}")
                 
-                raw_data_path = nemo_config.get('raw_data_path', str(self.output_dir / "arxiv_raw_data"))
-                raw_output_path = nemo_config.get('raw_output_path', str(self.output_dir / "arxiv_raw_output.jsonl"))
-                filter_query = nemo_config.get('filter_query', "cs.LG OR cs.AI OR q-bio.NC")
-                max_workers = nemo_config.get('max_workers', 1)  # Colab safe
-                use_gpu = nemo_config.get('use_gpu', False)
-                max_papers = nemo_config.get('max_papers', 40000)
-                batch_size = nemo_config.get('batch_size', 5000)
-                checkpoint_interval = nemo_config.get('checkpoint_interval', 1000)
-                resume = nemo_config.get('resume', True)
+                # Check if NeMo Curator is available
+                from data_pipeline import NEMO_CURATOR_AVAILABLE
+                if not NEMO_CURATOR_AVAILABLE:
+                    error_msg = (
+                        "❌ NeMo Curator not available.\n"
+                        "   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'\n"
+                        "   Note: NeMo Curator only supports Linux systems\n"
+                        "   On non-Linux systems, you can skip this step and use the preprocess command instead"
+                    )
+                    logger.error(error_msg)
+                    raise RuntimeError("NeMo Curator not available")
                 
-                result = run_nemo_curator_pipeline(
-                    output_path=str(self.curated_jsonl),
-                    raw_data_path=raw_data_path,
-                    raw_output_path=raw_output_path,
-                    filter_query=filter_query,
-                    max_workers=max_workers,
-                    use_gpu=use_gpu,
-                    batch_size=batch_size,
-                    checkpoint_interval=checkpoint_interval,
-                    max_papers=max_papers,
-                    resume=resume
-                )
-                
-                if result is None:
-                    raise RuntimeError("NeMo Curator pipeline failed")
-                
-            else:
-                # Use legacy curate_with_nemo function (requires text_dir and metadata)
-                logger.info("🔬 Using legacy NeMo Curator curation function")
-                
-                if not self.text_dir.exists() or not any(self.text_dir.iterdir()):
-                    raise FileNotFoundError(f"Text directory not found or empty: {self.text_dir}")
                 if not self.metadata_jsonl.exists():
                     raise FileNotFoundError(f"Metadata file not found: {self.metadata_jsonl}")
+                
+                # Count text files
+                text_file_count = len(list(self.text_dir.glob("*.txt")))
+                logger.info(f"   Processing {text_file_count} text files")
                 
                 curate_with_nemo(
                     text_dir=str(self.text_dir),
@@ -440,6 +427,52 @@ class PipelineOrchestrator:
                     skip_dedup=nemo_config.get('skip_dedup', False),
                     min_relevance_score=nemo_config.get('min_relevance_score', 0.5)
                 )
+                
+                # Verify curate_with_nemo actually created output (it returns None on error)
+                if not self.curated_jsonl.exists():
+                    raise RuntimeError(
+                        "NeMo Curator curation completed but no output file was created.\n"
+                        "   This may indicate NeMo Curator is not properly installed or configured."
+                    )
+                
+            else:
+                # Use new NeMo Curator Pipeline API to download from ArXiv
+                use_pipeline_api = nemo_config.get('use_pipeline_api', True)
+                
+                if use_pipeline_api:
+                    logger.info("🔬 Using NeMo Curator Pipeline API with FREE download_arxiv()")
+                    logger.info("   No existing text files found - will download from ArXiv")
+                    
+                    raw_data_path = nemo_config.get('raw_data_path', str(self.output_dir / "arxiv_raw_data"))
+                    raw_output_path = nemo_config.get('raw_output_path', str(self.output_dir / "arxiv_raw_output.jsonl"))
+                    filter_query = nemo_config.get('filter_query', "cs.LG OR cs.AI OR q-bio.NC")
+                    max_workers = nemo_config.get('max_workers', 1)  # Colab safe
+                    use_gpu = nemo_config.get('use_gpu', False)
+                    max_papers = nemo_config.get('max_papers', 40000)
+                    batch_size = nemo_config.get('batch_size', 5000)
+                    checkpoint_interval = nemo_config.get('checkpoint_interval', 1000)
+                    resume = nemo_config.get('resume', True)
+                    
+                    result = run_nemo_curator_pipeline(
+                        output_path=str(self.curated_jsonl),
+                        raw_data_path=raw_data_path,
+                        raw_output_path=raw_output_path,
+                        filter_query=filter_query,
+                        max_workers=max_workers,
+                        use_gpu=use_gpu,
+                        batch_size=batch_size,
+                        checkpoint_interval=checkpoint_interval,
+                        max_papers=max_papers,
+                        resume=resume
+                    )
+                    
+                    if result is None:
+                        raise RuntimeError("NeMo Curator pipeline failed")
+                else:
+                    raise FileNotFoundError(
+                        f"Text directory not found: {self.text_dir}\n"
+                        f"   Either run extraction step first, or enable use_pipeline_api to download from ArXiv"
+                    )
             
             if not self.curated_jsonl.exists():
                 raise FileNotFoundError(f"Curated dataset not created: {self.curated_jsonl}")
@@ -483,12 +516,20 @@ class PipelineOrchestrator:
             if not self.curated_jsonl.exists():
                 raise FileNotFoundError(f"Curated dataset not found: {self.curated_jsonl}")
             
-            processing_config = self.config['processing']
+            # Get processing config (check both 'processing' and 'preprocessing' keys)
+            processing_config = self.config.get('processing', self.config.get('preprocessing', {}))
+            
+            num_workers = processing_config.get('workers', processing_config.get('num_workers', 4))
+            
+            logger.info(f"🔬 Starting healthcare-specific processing...")
+            logger.info(f"   Input: {self.curated_jsonl}")
+            logger.info(f"   Output: {self.processed_jsonl}")
+            logger.info(f"   Workers: {num_workers}")
             
             process_curated_dataset(
                 input_jsonl=str(self.curated_jsonl),
                 output_jsonl=str(self.processed_jsonl),
-                num_workers=processing_config['num_workers']
+                num_workers=num_workers
             )
             
             if not self.processed_jsonl.exists():

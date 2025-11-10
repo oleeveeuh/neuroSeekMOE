@@ -3407,10 +3407,13 @@ def run_nemo_curator_pipeline(
         Path to output file if successful, None otherwise
     """
     if not NEMO_CURATOR_AVAILABLE:
-        print("❌ Error: NeMo Curator not available.")
-        print("   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
-        print("   Note: NeMo Curator only supports Linux systems")
-        return None
+        error_msg = (
+            "❌ Error: NeMo Curator not available.\n"
+            "   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'\n"
+            "   Note: NeMo Curator only supports Linux systems"
+        )
+        print(error_msg)
+        raise RuntimeError("NeMo Curator not available. Install with: pip install 'nemo-curator[text]'")
     
     if not download_arxiv_AVAILABLE:
         print("❌ Error: download_arxiv() function not available.")
@@ -3613,10 +3616,13 @@ def curate_with_nemo(
         min_relevance_score: Minimum domain relevance score to keep
     """
     if not NEMO_CURATOR_AVAILABLE:
-        print("❌ Error: NeMo Curator not available.")
-        print("   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
-        print("   Note: NeMo Curator only supports Linux systems")
-        return
+        error_msg = (
+            "❌ Error: NeMo Curator not available.\n"
+            "   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'\n"
+            "   Note: NeMo Curator only supports Linux systems"
+        )
+        print(error_msg)
+        raise RuntimeError("NeMo Curator not available. Install with: pip install 'nemo-curator[text]'")
     
     print("=" * 60)
     print("🔬 NeMo Curator Text Curation Pipeline")

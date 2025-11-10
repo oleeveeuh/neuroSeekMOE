@@ -79,83 +79,78 @@ except ImportError:
     print("⚠️  sentencepiece package not available. Install with: pip install sentencepiece")
 
 # NeMo Curator imports (optional, Linux only)
-# Use CORRECT imports as specified:
-# - from nemo_curator.datasets import DocumentDataset
-# - from nemo_curator.modifiers import DocumentModifier
-# - from nemo_curator.filters import DocumentFilter
-# - from nemo_curator.utils.decorators import log_stage
+# Use CORRECT imports based on official NeMo Curator API:
+# - from nemo_curator.pipeline import Pipeline
+# - from nemo_curator.stages.text.io.reader import JsonlReader
+# - from nemo_curator.stages.text.modules import ScoreFilter
+# - from nemo_curator.stages.text.filters import WordCountFilter
 try:
     import platform
     if platform.system() == 'Linux':
-        # Core NeMo Curator imports (CORRECT paths)
-        from nemo_curator.datasets import DocumentDataset
-        from nemo_curator.modifiers import DocumentModifier
-        from nemo_curator.filters import DocumentFilter
-        from nemo_curator.utils.decorators import log_stage
+        # Core Pipeline API (CORRECT path)
+        try:
+            from nemo_curator.pipeline import Pipeline
+            Pipeline_AVAILABLE = True
+        except ImportError:
+            Pipeline = None
+            Pipeline_AVAILABLE = False
         
-        # Additional components (try multiple import paths for compatibility)
+        # Text processing stages (CORRECT paths)
+        JsonlReader = None
+        JsonlWriter = None
         ScoreFilter = None
         WordCountFilter = None
         AlphanumericFilter = None
         LanguageFilter = None
         RepeatedLineFilter = None
-        FuzzyDedup = None
-        get_client = None
         
-        # Try to import additional filters
         try:
-            from nemo_curator.filters import (
-                ScoreFilter, WordCountFilter, AlphanumericFilter,
-                LanguageFilter, RepeatedLineFilter
+            from nemo_curator.stages.text.io.reader import JsonlReader
+            JsonlReader_AVAILABLE = True
+        except ImportError:
+            JsonlReader_AVAILABLE = False
+        
+        try:
+            from nemo_curator.stages.text.io.writer import JsonlWriter
+            JsonlWriter_AVAILABLE = True
+        except ImportError:
+            try:
+                from nemo_curator.stages.text.io import JsonlWriter
+                JsonlWriter_AVAILABLE = True
+            except ImportError:
+                JsonlWriter_AVAILABLE = False
+        
+        try:
+            from nemo_curator.stages.text.modules import ScoreFilter
+            ScoreFilter_AVAILABLE = True
+        except ImportError:
+            ScoreFilter_AVAILABLE = False
+        
+        try:
+            from nemo_curator.stages.text.filters import (
+                WordCountFilter,
+                AlphanumericFilter,
+                LanguageFilter,
+                RepeatedLineFilter
             )
+            Filters_AVAILABLE = True
         except ImportError:
-            try:
-                # Alternative import path
-                from nemo_curator import (
-                    ScoreFilter, WordCountFilter, AlphanumericFilter,
-                    LanguageFilter, RepeatedLineFilter
-                )
-            except ImportError:
-                pass  # Use None, will fall back to custom implementations
+            Filters_AVAILABLE = False
         
-        # Try to import deduplication
+        # Try to import ProcessingStage for custom stages
+        ProcessingStage = None
+        Stage = None
         try:
-            from nemo_curator.dedup import FuzzyDedup
-        except ImportError:
-            try:
-                from nemo_curator import FuzzyDedup
-            except ImportError:
-                pass  # Use None, will skip deduplication
-        
-        # Try to import Dask client utility
-        try:
-            from nemo_curator.utils.distributed_utils import get_client
-        except ImportError:
-            try:
-                from dask.distributed import Client
-                # Create a wrapper function
-                def get_client():
-                    try:
-                        from dask.distributed import get_client as dask_get_client
-                        return dask_get_client()
-                    except:
-                        return Client(processes=False, threads_per_worker=2)
-            except ImportError:
-                pass  # Will create client manually
-        
-        # Try to import ProcessingStage and Stage for custom stages
-        try:
-            from nemo_curator.stages import ProcessingStage, Stage
+            from nemo_curator.stages.text import ProcessingStage, Stage
             ProcessingStage_AVAILABLE = True
             Stage_AVAILABLE = True
         except ImportError:
-            ProcessingStage = None
-            ProcessingStage_AVAILABLE = False
             try:
-                from nemo_curator.stages import Stage
+                from nemo_curator.stages import ProcessingStage, Stage
+                ProcessingStage_AVAILABLE = True
                 Stage_AVAILABLE = True
             except ImportError:
-                Stage = None
+                ProcessingStage_AVAILABLE = False
                 Stage_AVAILABLE = False
         
         # Try to import download_arxiv function (FREE, no AWS needed)
@@ -166,36 +161,72 @@ try:
             download_arxiv = None
             download_arxiv_AVAILABLE = False
         
-        # Try to import ArxivDownloadExtractStage and JsonlWriter (S3-based, requires AWS)
+        # Try to import Dask client utility
         try:
-            from nemo_curator.stages import ArxivDownloadExtractStage
-            ArxivDownloadExtractStage_AVAILABLE = True
+            from nemo_curator.utils.distributed_utils import get_client
+            get_client_AVAILABLE = True
         except ImportError:
-            ArxivDownloadExtractStage = None
-            ArxivDownloadExtractStage_AVAILABLE = False
+            try:
+                from dask.distributed import Client
+                # Create a wrapper function
+                def get_client():
+                    try:
+                        from dask.distributed import get_client as dask_get_client
+                        return dask_get_client()
+                    except:
+                        return Client(processes=False, threads_per_worker=2)
+                get_client_AVAILABLE = True
+            except ImportError:
+                get_client = None
+                get_client_AVAILABLE = False
+        
+        # Legacy imports (for backward compatibility with old code)
+        DocumentDataset = None
+        DocumentModifier = None
+        DocumentFilter = None
+        try:
+            from nemo_curator.datasets import DocumentDataset
+        except ImportError:
+            pass
         
         try:
-            from nemo_curator.stages import JsonlWriter
-            JsonlWriter_AVAILABLE = True
+            from nemo_curator.modifiers import DocumentModifier
         except ImportError:
-            JsonlWriter = None
-            JsonlWriter_AVAILABLE = False
+            pass
         
         try:
-            from nemo_curator import Pipeline
-            Pipeline_AVAILABLE = True
+            from nemo_curator.filters import DocumentFilter
         except ImportError:
-            Pipeline = None
-            Pipeline_AVAILABLE = False
+            pass
         
         import dask
         NEMO_CURATOR_AVAILABLE = True
         print("✅ NeMo Curator imported successfully")
+        print(f"   Pipeline: {Pipeline_AVAILABLE}")
+        print(f"   JsonlReader: {JsonlReader_AVAILABLE}")
+        print(f"   ScoreFilter: {ScoreFilter_AVAILABLE}")
+        print(f"   Filters: {Filters_AVAILABLE}")
     else:
         NEMO_CURATOR_AVAILABLE = False
+        Pipeline_AVAILABLE = False
+        JsonlReader_AVAILABLE = False
+        ScoreFilter_AVAILABLE = False
+        Filters_AVAILABLE = False
+        ProcessingStage_AVAILABLE = False
+        Stage_AVAILABLE = False
+        download_arxiv_AVAILABLE = False
+        get_client_AVAILABLE = False
         print("⚠️  NeMo Curator only supports Linux systems (current: {})".format(platform.system()))
 except (ImportError, ValueError) as e:
     NEMO_CURATOR_AVAILABLE = False
+    Pipeline_AVAILABLE = False
+    JsonlReader_AVAILABLE = False
+    ScoreFilter_AVAILABLE = False
+    Filters_AVAILABLE = False
+    ProcessingStage_AVAILABLE = False
+    Stage_AVAILABLE = False
+    download_arxiv_AVAILABLE = False
+    get_client_AVAILABLE = False
     print("⚠️  nemo-curator package not available. Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
     print(f"   Error: {e}")
 
@@ -3369,7 +3400,7 @@ def save_download_checkpoint(checkpoint_file: str, downloaded_ids: Set[str], tot
 def run_nemo_curator_pipeline(
     output_path: str = "./curated_dataset.jsonl",
     raw_data_path: str = "./arxiv_raw_data",
-    raw_output_path: str = "./arxiv_raw_output",
+    raw_output_path: str = "./arxiv_raw_output.jsonl",
     filter_query: str = "cs.LG OR cs.AI OR q-bio.NC",
     max_workers: int = 1,
     use_gpu: bool = False,
@@ -3381,10 +3412,12 @@ def run_nemo_curator_pipeline(
     """Run complete NeMo Curator pipeline with custom healthcare stages.
     
     This function uses NeMo Curator's FREE download_arxiv() function (no AWS needed):
-    - download_arxiv(): Downloads papers directly from ArXiv (FREE, no AWS charges)
-    - HealthcareFilterStage: Text cleaning, quality filtering, domain classification
-    - HealthcareQualityFilterStage: Deduplication and quality verification
-    - HealthcareJsonlWriter: Formats and writes final curated dataset
+    1. download_arxiv(): Downloads papers directly from ArXiv (FREE, no AWS charges)
+    2. Pipeline API: Processes downloaded JSONL files using:
+       - JsonlReader: Reads raw ArXiv JSONL files
+       - HealthcareFilterStage: Text cleaning, quality filtering, domain classification
+       - HealthcareQualityFilterStage: Deduplication and quality verification
+       - JsonlWriter: Writes final curated dataset
     
     Features:
     - Checkpointing: Saves progress every N papers (default: 1000)
@@ -3414,6 +3447,11 @@ def run_nemo_curator_pipeline(
         )
         print(error_msg)
         raise RuntimeError("NeMo Curator not available. Install with: pip install 'nemo-curator[text]'")
+    
+    if not Pipeline_AVAILABLE:
+        error_msg = "❌ Error: Pipeline class not available. Check NeMo Curator installation."
+        print(error_msg)
+        raise RuntimeError(error_msg)
     
     if not download_arxiv_AVAILABLE:
         print("❌ Error: download_arxiv() function not available.")
@@ -3553,34 +3591,79 @@ def run_nemo_curator_pipeline(
             save_download_checkpoint(checkpoint_file, downloaded_ids, total_downloaded)
             raise
         
-        # Stage 2: Healthcare filtering and classification
-        print("\n🔍 Stage 2: Healthcare Filtering & Classification")
-        print("   Using HealthcareFilterStage...")
+        # Stage 2: Process downloaded JSONL using Pipeline API
+        print("\n🔍 Stage 2: Processing with NeMo Curator Pipeline API")
+        print("   Creating pipeline with custom healthcare stages...")
         
-        # Load raw output for processing
-        print("   📖 Loading raw data from {}...".format(raw_output_path))
-        raw_documents = []
-        with open(raw_output_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        doc = json.loads(line)
-                        raw_documents.append(doc)
-                    except json.JSONDecodeError:
-                        continue
-        
-        print(f"   ✅ Loaded {len(raw_documents)} documents for processing")
-        filtered_dataset = HealthcareFilterStage()(raw_documents)
-        
-        # Stage 3: Quality filtering and deduplication
-        print("\n✨ Stage 3: Quality Filtering & Deduplication")
-        print("   Using HealthcareQualityFilterStage...")
-        quality_filtered_dataset = HealthcareQualityFilterStage()(filtered_dataset)
-        
-        # Stage 4: Write curated dataset
-        print("\n💾 Stage 4: Writing Curated Dataset")
-        print("   Using HealthcareJsonlWriter...")
-        final_output = HealthcareJsonlWriter(output_path=output_path)(quality_filtered_dataset)
+        if JsonlReader_AVAILABLE and ProcessingStage_AVAILABLE:
+            # Use Pipeline API (preferred method)
+            print("   ✅ Using NeMo Curator Pipeline API")
+            
+            # Create pipeline
+            pipeline = Pipeline(name="healthcare_curation_pipeline")
+            
+            # Step 1: Read JSONL files
+            print("   📖 Adding JsonlReader stage...")
+            reader = JsonlReader(
+                file_paths=raw_output_path,
+                files_per_partition=4,
+                fields=["text", "file_name"]  # Read text and filename fields
+            )
+            pipeline.add_stage(reader)
+            
+            # Step 2: Healthcare filtering and classification
+            print("   🔍 Adding HealthcareFilterStage...")
+            healthcare_filter = HealthcareFilterStage()
+            pipeline.add_stage(healthcare_filter)
+            
+            # Step 3: Quality filtering and deduplication
+            print("   ✨ Adding HealthcareQualityFilterStage...")
+            quality_filter = HealthcareQualityFilterStage()
+            pipeline.add_stage(quality_filter)
+            
+            # Step 4: Write curated dataset
+            print("   💾 Adding JsonlWriter stage...")
+            if JsonlWriter_AVAILABLE:
+                writer = JsonlWriter(path=output_path)
+                pipeline.add_stage(writer)
+            else:
+                # Fallback: use custom writer
+                print("   ⚠️  JsonlWriter not available, using custom writer...")
+                custom_writer = HealthcareJsonlWriter(output_path=output_path)
+                pipeline.add_stage(custom_writer)
+            
+            # Execute pipeline
+            print("\n   🚀 Executing pipeline...")
+            results = pipeline.run()
+            print("   ✅ Pipeline execution complete!")
+            
+        else:
+            # Fallback: manual processing (if Pipeline API not available)
+            print("   ⚠️  Pipeline API not fully available, falling back to manual processing...")
+            raw_documents = []
+            with open(raw_output_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            doc = json.loads(line)
+                            raw_documents.append(doc)
+                        except json.JSONDecodeError:
+                            continue
+            
+            print(f"   ✅ Loaded {len(raw_documents)} documents for processing")
+            
+            # Process with custom stages
+            filtered_dataset = HealthcareFilterStage()(raw_documents)
+            
+            # Quality filtering and deduplication
+            print("\n✨ Stage 3: Quality Filtering & Deduplication")
+            print("   Using HealthcareQualityFilterStage...")
+            quality_filtered_dataset = HealthcareQualityFilterStage()(filtered_dataset)
+            
+            # Write curated dataset
+            print("\n💾 Stage 4: Writing Curated Dataset")
+            print("   Using HealthcareJsonlWriter...")
+            final_output = HealthcareJsonlWriter(output_path=output_path)(quality_filtered_dataset)
         
         print("\n✅ Pipeline completed successfully!")
         print(f"📁 Final curated dataset: {output_path}")

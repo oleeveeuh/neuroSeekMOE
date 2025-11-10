@@ -371,46 +371,88 @@ class PipelineOrchestrator:
             True if successful, False otherwise
         """
         step_name = "NeMo Curator Curation"
-        self._log_step_start(step_name, 3, 8)
         
-        # Check if already complete (verify file is non-empty)
-        if self._check_step_complete(step_name, [self.curated_jsonl], check_non_empty=True):
-            # Double-check: count curated papers
-            if self.curated_jsonl.exists():
-                count = sum(1 for line in open(self.curated_jsonl) if line.strip())
-                if count > 0:
-                    logger.info(f"📊 Found {count} papers in existing curated dataset")
-                    self._log_step_end(step_name, True)
-                    return True
-                else:
-                    logger.warning(f"⚠️  Curated file exists but is empty. Re-running curation...")
-            else:
-                logger.warning(f"⚠️  Curated file check passed but doesn't exist. Re-running curation...")
+        # Force immediate output - CRITICAL for Colab visibility
+        import sys
+        print(f"\n{'='*80}", flush=True)
+        print(f"📦 Step 3: {step_name}", flush=True)
+        print(f"{'='*80}", flush=True)
+        print(f"⏰ Starting at: {datetime.now().isoformat()}", flush=True)
+        sys.stdout.flush()
         
         try:
+            self._log_step_start(step_name, 3, 8)
+        except Exception as e:
+            print(f"⚠️  Error in _log_step_start: {e}", flush=True)
+        
+        # Check if already complete (verify file is non-empty)
+        print(f"🔍 Checking if step already complete...", flush=True)
+        try:
+            is_complete = self._check_step_complete(step_name, [self.curated_jsonl], check_non_empty=True)
+            print(f"   Step complete check: {is_complete}", flush=True)
+        except Exception as e:
+            print(f"⚠️  Error checking step completion: {e}", flush=True)
+            is_complete = False
+        
+        if is_complete:
+            # Double-check: count curated papers
+            print(f"   Checking existing curated file...", flush=True)
+            if self.curated_jsonl.exists():
+                try:
+                    count = sum(1 for line in open(self.curated_jsonl) if line.strip())
+                    print(f"   Found {count} papers in existing file", flush=True)
+                    if count > 0:
+                        print(f"✅ Step already complete with {count} papers", flush=True)
+                        logger.info(f"📊 Found {count} papers in existing curated dataset")
+                        self._log_step_end(step_name, True)
+                        return True
+                    else:
+                        print(f"⚠️  Curated file exists but is empty. Re-running curation...", flush=True)
+                        logger.warning(f"⚠️  Curated file exists but is empty. Re-running curation...")
+                except Exception as e:
+                    print(f"⚠️  Error reading curated file: {e}", flush=True)
+            else:
+                print(f"⚠️  Curated file check passed but doesn't exist. Re-running curation...", flush=True)
+                logger.warning(f"⚠️  Curated file check passed but doesn't exist. Re-running curation...")
+        
+        print(f"🚀 Starting NeMo Curator curation...", flush=True)
+        sys.stdout.flush()
+        
+        try:
+            print(f"📋 Loading NeMo Curator config from config.yaml...", flush=True)
             nemo_config = self.config.get('nemo_curator', {})
+            if not nemo_config:
+                print(f"⚠️  Warning: 'nemo_curator' section not found in config, using defaults", flush=True)
+            print(f"   Config loaded: {list(nemo_config.keys())}", flush=True)
+            sys.stdout.flush()
             
             # Check if text files already exist (from extraction step)
             # If so, use legacy function to process existing files
             # Otherwise, use Pipeline API to download from scratch
             text_files_exist = self.text_dir.exists() and any(self.text_dir.glob("*.txt"))
             
-            print(f"\n🔍 Debug: Checking NeMo Curator step...")
-            print(f"   Text files exist: {text_files_exist}")
-            print(f"   Text directory: {self.text_dir}")
-            print(f"   Metadata file: {self.metadata_jsonl}")
-            print(f"   Output file: {self.curated_jsonl}")
+            print(f"\n🔍 Debug: Checking NeMo Curator step...", flush=True)
+            print(f"   Text files exist: {text_files_exist}", flush=True)
+            print(f"   Text directory: {self.text_dir}", flush=True)
+            print(f"   Metadata file: {self.metadata_jsonl}", flush=True)
+            print(f"   Output file: {self.curated_jsonl}", flush=True)
+            sys.stdout.flush()
             
             if text_files_exist:
                 # Use legacy curate_with_nemo function (processes existing text files)
-                print("🔬 Using NeMo Curator to process existing extracted text files")
+                print("🔬 Using NeMo Curator to process existing extracted text files", flush=True)
                 logger.info("🔬 Using NeMo Curator to process existing extracted text files")
-                print(f"   Found text files in: {self.text_dir}")
+                print(f"   Found text files in: {self.text_dir}", flush=True)
                 logger.info(f"   Found text files in: {self.text_dir}")
                 
                 # Check if NeMo Curator is available
-                from data_pipeline import NEMO_CURATOR_AVAILABLE
-                print(f"   NeMo Curator available: {NEMO_CURATOR_AVAILABLE}")
+                print(f"   Checking NeMo Curator availability...", flush=True)
+                try:
+                    from data_pipeline import NEMO_CURATOR_AVAILABLE
+                    print(f"   NeMo Curator available: {NEMO_CURATOR_AVAILABLE}", flush=True)
+                except Exception as e:
+                    print(f"❌ Error importing NEMO_CURATOR_AVAILABLE: {e}", flush=True)
+                    raise
                 
                 if not NEMO_CURATOR_AVAILABLE:
                     error_msg = (
@@ -419,22 +461,25 @@ class PipelineOrchestrator:
                         "   Note: NeMo Curator only supports Linux systems\n"
                         "   On non-Linux systems, you can skip this step and use the preprocess command instead"
                     )
-                    print(error_msg)
+                    print(error_msg, flush=True)
                     logger.error(error_msg)
+                    sys.stdout.flush()
                     raise RuntimeError("NeMo Curator not available")
                 
                 if not self.metadata_jsonl.exists():
                     error_msg = f"Metadata file not found: {self.metadata_jsonl}"
-                    print(f"❌ {error_msg}")
+                    print(f"❌ {error_msg}", flush=True)
                     logger.error(error_msg)
+                    sys.stdout.flush()
                     raise FileNotFoundError(error_msg)
                 
                 # Count text files
                 text_file_count = len(list(self.text_dir.glob("*.txt")))
-                print(f"   Processing {text_file_count} text files")
+                print(f"   Processing {text_file_count} text files", flush=True)
                 logger.info(f"   Processing {text_file_count} text files")
                 
-                print(f"\n🚀 Calling curate_with_nemo()...")
+                print(f"\n🚀 Calling curate_with_nemo()...", flush=True)
+                sys.stdout.flush()
                 try:
                     curate_with_nemo(
                         text_dir=str(self.text_dir),
@@ -444,11 +489,13 @@ class PipelineOrchestrator:
                         skip_dedup=nemo_config.get('skip_dedup', False),
                         min_relevance_score=nemo_config.get('min_relevance_score', 0.5)
                     )
-                    print(f"✅ curate_with_nemo() completed")
+                    print(f"✅ curate_with_nemo() completed", flush=True)
+                    sys.stdout.flush()
                 except Exception as e:
-                    print(f"❌ curate_with_nemo() failed with error: {e}")
+                    print(f"❌ curate_with_nemo() failed with error: {e}", flush=True)
                     import traceback
-                    print(f"   Full traceback:\n{traceback.format_exc()}")
+                    print(f"   Full traceback:\n{traceback.format_exc()}", flush=True)
+                    sys.stdout.flush()
                     raise
                 
                 # Verify curate_with_nemo actually created output (it returns None on error)
@@ -457,22 +504,26 @@ class PipelineOrchestrator:
                         "NeMo Curator curation completed but no output file was created.\n"
                         "   This may indicate NeMo Curator is not properly installed or configured."
                     )
-                    print(f"❌ {error_msg}")
+                    print(f"❌ {error_msg}", flush=True)
                     logger.error(error_msg)
+                    sys.stdout.flush()
                     raise RuntimeError(error_msg)
                 else:
-                    print(f"✅ Output file created: {self.curated_jsonl}")
+                    print(f"✅ Output file created: {self.curated_jsonl}", flush=True)
+                    sys.stdout.flush()
                 
             else:
                 # Use new NeMo Curator Pipeline API to download from ArXiv
                 use_pipeline_api = nemo_config.get('use_pipeline_api', True)
-                print(f"   use_pipeline_api: {use_pipeline_api}")
+                print(f"   use_pipeline_api: {use_pipeline_api}", flush=True)
+                sys.stdout.flush()
                 
                 if use_pipeline_api:
-                    print("🔬 Using NeMo Curator Pipeline API with FREE download_arxiv()")
+                    print("🔬 Using NeMo Curator Pipeline API with FREE download_arxiv()", flush=True)
                     logger.info("🔬 Using NeMo Curator Pipeline API with FREE download_arxiv()")
-                    print("   No existing text files found - will download from ArXiv")
+                    print("   No existing text files found - will download from ArXiv", flush=True)
                     logger.info("   No existing text files found - will download from ArXiv")
+                    sys.stdout.flush()
                     
                     raw_data_path = nemo_config.get('raw_data_path', str(self.output_dir / "arxiv_raw_data"))
                     raw_output_path = nemo_config.get('raw_output_path', str(self.output_dir / "arxiv_raw_output.jsonl"))
@@ -484,12 +535,13 @@ class PipelineOrchestrator:
                     checkpoint_interval = nemo_config.get('checkpoint_interval', 1000)
                     resume = nemo_config.get('resume', True)
                     
-                    print(f"\n🚀 Calling run_nemo_curator_pipeline()...")
-                    print(f"   Output path: {self.curated_jsonl}")
-                    print(f"   Raw data path: {raw_data_path}")
-                    print(f"   Filter query: {filter_query}")
-                    print(f"   Max workers: {max_workers}")
-                    print(f"   Max papers: {max_papers}")
+                    print(f"\n🚀 Calling run_nemo_curator_pipeline()...", flush=True)
+                    print(f"   Output path: {self.curated_jsonl}", flush=True)
+                    print(f"   Raw data path: {raw_data_path}", flush=True)
+                    print(f"   Filter query: {filter_query}", flush=True)
+                    print(f"   Max workers: {max_workers}", flush=True)
+                    print(f"   Max papers: {max_papers}", flush=True)
+                    sys.stdout.flush()
                     
                     try:
                         result = run_nemo_curator_pipeline(
@@ -504,17 +556,20 @@ class PipelineOrchestrator:
                             max_papers=max_papers,
                             resume=resume
                         )
-                        print(f"✅ run_nemo_curator_pipeline() returned: {result}")
+                        print(f"✅ run_nemo_curator_pipeline() returned: {result}", flush=True)
+                        sys.stdout.flush()
                     except Exception as e:
-                        print(f"❌ run_nemo_curator_pipeline() failed with error: {e}")
+                        print(f"❌ run_nemo_curator_pipeline() failed with error: {e}", flush=True)
                         import traceback
-                        print(f"   Full traceback:\n{traceback.format_exc()}")
+                        print(f"   Full traceback:\n{traceback.format_exc()}", flush=True)
+                        sys.stdout.flush()
                         raise
                     
                     if result is None:
                         error_msg = "NeMo Curator pipeline failed (returned None)"
-                        print(f"❌ {error_msg}")
+                        print(f"❌ {error_msg}", flush=True)
                         logger.error(error_msg)
+                        sys.stdout.flush()
                         raise RuntimeError(error_msg)
                 else:
                     raise FileNotFoundError(
@@ -523,22 +578,43 @@ class PipelineOrchestrator:
                     )
             
             if not self.curated_jsonl.exists():
-                raise FileNotFoundError(f"Curated dataset not created: {self.curated_jsonl}")
+                error_msg = f"Curated dataset not created: {self.curated_jsonl}"
+                print(f"❌ {error_msg}", flush=True)
+                logger.error(error_msg)
+                sys.stdout.flush()
+                raise FileNotFoundError(error_msg)
             
             # Count curated papers
-            count = sum(1 for _ in open(self.curated_jsonl))
-            logger.info(f"📊 Curated {count} papers")
+            print(f"📊 Counting curated papers...", flush=True)
+            try:
+                count = sum(1 for _ in open(self.curated_jsonl))
+                print(f"✅ Curated {count} papers", flush=True)
+                logger.info(f"📊 Curated {count} papers")
+            except Exception as e:
+                print(f"⚠️  Error counting papers: {e}", flush=True)
+                count = 0
             
+            print(f"✅ Step 3 completed successfully!", flush=True)
+            sys.stdout.flush()
             self._log_step_end(step_name, True)
             return True
             
         except Exception as e:
-            error_msg = f"❌ Step 3 failed: {e}"
-            print(f"\n{error_msg}")
-            logger.error(error_msg, exc_info=True)
+            import sys
             import traceback
-            print(f"\n📋 Full error traceback:")
-            print(traceback.format_exc())
+            
+            error_msg = f"❌ Step 3 failed: {e}"
+            print(f"\n{'='*80}", flush=True)
+            print(f"{error_msg}", flush=True)
+            print(f"{'='*80}", flush=True)
+            
+            full_traceback = traceback.format_exc()
+            print(f"\n📋 Full error traceback:", flush=True)
+            print(full_traceback, flush=True)
+            
+            logger.error(error_msg, exc_info=True)
+            sys.stdout.flush()
+            
             self._log_step_end(step_name, False)
             return False
     

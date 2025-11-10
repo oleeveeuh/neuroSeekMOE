@@ -4352,7 +4352,54 @@ def extract_texts_from_jsonl(input_jsonl: str, output_txt: str):
                 text = record.get('text', '')
                 
                 if text and text.strip():
-                    f_out.write(text + '\n\n')  # Add double newline between papers
+                    # Split long texts into chunks to avoid SentencePiece max length issues
+                    # Each chunk should be <= 15000 chars to stay well under the 20000 limit
+                    max_chunk_size = 15000
+                    if len(text) > max_chunk_size:
+                        # Split by sentences (period + space/newline) or by paragraphs
+                        chunks = []
+                        current_chunk = ""
+                        
+                        # Try to split by paragraphs first (double newline)
+                        paragraphs = text.split('\n\n')
+                        for para in paragraphs:
+                            if len(current_chunk) + len(para) + 2 <= max_chunk_size:
+                                current_chunk += para + '\n\n'
+                            else:
+                                if current_chunk:
+                                    chunks.append(current_chunk.strip())
+                                current_chunk = para + '\n\n'
+                        
+                        # Add remaining chunk
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                        
+                        # If still too long, split by sentences
+                        final_chunks = []
+                        for chunk in chunks:
+                            if len(chunk) <= max_chunk_size:
+                                final_chunks.append(chunk)
+                            else:
+                                # Split by sentences
+                                sentences = chunk.replace('. ', '.\n').split('\n')
+                                current = ""
+                                for sent in sentences:
+                                    if len(current) + len(sent) + 1 <= max_chunk_size:
+                                        current += sent + ' '
+                                    else:
+                                        if current:
+                                            final_chunks.append(current.strip())
+                                        current = sent + ' '
+                                if current:
+                                    final_chunks.append(current.strip())
+                        
+                        # Write chunks as separate "sentences"
+                        for chunk in final_chunks:
+                            if chunk.strip():
+                                f_out.write(chunk.strip() + '\n')
+                    else:
+                        f_out.write(text + '\n\n')  # Add double newline between papers
+                    
                     total_papers += 1
                     total_chars += len(text)
                 
@@ -4425,6 +4472,7 @@ def train_tokenizer(
         'shrinking_factor': 0.75,
         'num_threads': 4,
         'num_sub_iterations': 2,
+        'max_sentence_length': 20000,  # Allow longer sentences (default is 4192)
     }
     
     # Add special tokens

@@ -1,25 +1,92 @@
-# NeuroSeek-MoE: Healthcare+ML Paper Training Pipeline
+# NeuroSeek-MoE: Healthcare Language Model Training Pipeline
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A complete data pipeline and training system for training language models on healthcare+ML papers from ArXiv. Features efficient streaming datasets, NeMo Curator integration, and Colab-optimized training.
+A full-stack machine learning project for training specialized language models on healthcare and neuroscience research papers. This project demonstrates end-to-end ML engineering: from data collection and curation to model training and deployment.
 
-## 🧠 Overview
+## About This Project
 
-Complete pipeline for training language models on healthcare+ML literature:
-- **ArXiv Paper Collection**: Collect 30-40k papers with RAM-efficient batch processing
-- **PDF Text Extraction**: Extract text from ArXiv PDFs (first 6 pages, 12k chars max)
-- **NeMo Curator Integration**: Advanced text curation with quality filtering and domain classification
-- **Healthcare-Specific Preprocessing**: Section extraction, medical term preservation
-- **Tokenizer Training**: SentencePiece BPE tokenizer optimized for healthcare terminology
-- **Streaming Dataset**: Memory-efficient IterableDataset (<500MB RAM)
-- **Training Pipeline**: Colab-optimized with mixed precision, gradient accumulation
-- **Evaluation & Inference**: Comprehensive metrics and production inference
+This project was built to explore how specialized language models can be trained on domain-specific scientific literature. The goal was to create a complete pipeline that could process tens of thousands of ArXiv papers, curate high-quality healthcare and ML research, and train a model capable of understanding medical terminology and research contexts.
 
-## 🚀 Quick Start
+**Key Challenge**: Building a memory-efficient pipeline that could handle 30-40k papers without running out of RAM, while maintaining data quality through intelligent filtering and domain classification.
 
-### Installation
+## What I Built
+
+A complete ML training pipeline with the following components:
+
+### Data Collection & Processing
+- **ArXiv Paper Collector**: RAM-efficient batch collection system that processes papers in small batches (25 papers/batch) to prevent memory issues
+- **PDF Text Extraction**: Parallel extraction of text from research papers with resume capability
+- **NeMo Curator Integration**: Advanced text curation using NVIDIA's NeMo Curator for quality filtering and deduplication
+- **Healthcare-Specific Preprocessing**: Custom text processing that preserves medical terminology and extracts research sections
+
+### Model Training Infrastructure
+- **Mixture of Experts (MoE) Architecture**: DeepSeek-MoE style architecture with shared and routed experts for efficient scaling
+- **Streaming Dataset**: Custom PyTorch IterableDataset that streams data from disk, keeping memory usage under 500MB regardless of corpus size
+- **Colab-Optimized Training**: Training loop designed for Google Colab's GPU constraints with mixed precision, gradient accumulation, and checkpointing
+- **Domain-Aware Loss Weighting**: Custom loss function that gives higher weight to neurodegeneration and neuroscience papers
+
+### Evaluation & Deployment
+- **Comprehensive Evaluation**: Metrics including perplexity, domain classification accuracy, and relevance ranking
+- **Production Inference Pipeline**: Fast inference system with embedding generation, similarity search, and domain classification
+
+## Technical Highlights
+
+### Memory Efficiency
+One of the main challenges was handling large datasets without running out of memory. I solved this by:
+- Implementing streaming I/O at every stage (no full dataset in RAM)
+- Batch-based collection with automatic memory monitoring
+- Custom IterableDataset that streams papers during training
+- Aggressive garbage collection and memory cleanup
+
+### Data Quality & Domain Adaptation
+NeMo Curator enables effective domain-adaptive pretraining through:
+- **Quality Filtering**: Removes low-quality content (short texts, high noise, non-English)
+- **Domain Classification**: Identifies and scores healthcare subdomains (neurodegeneration, neuroscience, medical imaging, clinical, drug discovery)
+- **Relevance Scoring**: Combines healthcare domain keywords with ML method keywords to ensure domain-specific relevance
+- **Medical Term Preservation**: Maintains critical terminology (disease names, abbreviations, scientific terms)
+- **Section Extraction**: Preserves research paper structure (Abstract, Introduction, Methods, Results, Discussion)
+- **Deduplication**: Fuzzy deduplication removes near-duplicate papers, ensuring diverse training data
+
+This curation process creates a domain-specific dataset that enables the model to learn healthcare-specific patterns, terminology, and research contexts, effectively performing domain-adaptive pretraining.
+
+### Scalability
+The pipeline is designed to scale:
+- Processes 30-40k papers efficiently
+- Resume capability at every stage (no data loss on interruption)
+- Parallel processing where possible (PDF extraction, text processing)
+- Configurable via YAML for easy experimentation
+
+## Project Structure
+
+```
+neuroseek-moe/
+├── data_pipeline.py          # Complete data pipeline (collect, extract, curate, process, tokenize)
+├── arxiv_dataset.py          # Streaming IterableDataset for training
+├── training_adapter.py       # Model adapter (connects dataset to model)
+├── train_colab.py            # Colab-optimized training loop
+├── train_real.py             # Model implementation (SimpleMoEModel)
+├── evaluate.py               # Evaluation utilities
+├── inference.py              # Production inference pipeline
+├── run_pipeline.py           # Pipeline orchestration
+├── config.yaml               # Configuration file
+└── notebooks/
+    └── ArXiv_Pipeline_Colab.ipynb  # Colab notebook for easy execution
+```
+
+## Getting Started
+
+### Quick Start (Google Colab)
+
+The easiest way to run this project is using the provided Colab notebook and connecting to a hosted GPU runtime:
+
+1. Open `notebooks/ArXiv_Pipeline_Colab.ipynb` in Google Colab
+2. Run all cells sequentially
+3. The notebook handles all setup, configuration, and execution automatically
+
+
+### Local Installation
 
 ```bash
 git clone https://github.com/your-username/neuroseek-moe.git
@@ -31,233 +98,238 @@ pip install -r requirements.txt
 # pip install "nemo-curator[text_cuda12]"  # CUDA 12 version
 ```
 
-### Option 1: Google Colab (Recommended)
+### Running the Pipeline
 
-1. Open `notebooks/ArXiv_Pipeline_Colab.ipynb` in Google Colab
-2. Run all cells sequentially
-3. The notebook handles all setup, configuration, and execution
-
-**Features**: Automatic environment setup, GPU detection, progress monitoring, resume capability
-
-### Option 2: Complete Pipeline (Local/Linux)
-
-Run the entire pipeline with a single command:
-
+**Option 1: Complete Pipeline (Recommended)**
 ```bash
-# Run complete pipeline
 python run_pipeline.py --config config.yaml
-
-# Resume from a specific step
-python run_pipeline.py --config config.yaml --start-from-step 5
 ```
 
-**Configuration**: Edit `config.yaml` to customize all parameters.
-
-### Option 3: Manual Step-by-Step
-
+**Option 2: Step-by-Step**
 ```bash
-# Step 1: Collect ArXiv papers
-python data_pipeline.py collect --max-papers 40000 --output-dir ./data/arxiv
+# Collect papers
+python data_pipeline.py collect --max-papers 40000
 
-# Step 2: Extract PDF texts
-python data_pipeline.py extract \
-    --input ./data/arxiv/arxiv_papers.jsonl \
-    --output-dir ./data/arxiv/texts \
-    --workers 4
+# Extract PDF texts
+python data_pipeline.py extract --input ./data/arxiv/arxiv_papers.jsonl --output-dir ./data/arxiv/texts
 
-# Step 3: Curate with NeMo Curator (Linux only)
-python data_pipeline.py curate \
-    --text-dir ./data/arxiv/texts \
-    --metadata ./data/arxiv/arxiv_papers.jsonl \
-    --output ./data/arxiv/curated_dataset.jsonl
+# Curate with NeMo Curator (Linux only)
+python data_pipeline.py curate --text-dir ./data/arxiv/texts --metadata ./data/arxiv/arxiv_papers.jsonl --output ./data/arxiv/curated_dataset.jsonl
 
-# Step 4: Process curated dataset
-python data_pipeline.py process \
-    --input ./data/arxiv/curated_dataset.jsonl \
-    --output ./data/arxiv/processed_dataset.jsonl
+# Process and train tokenizer
+python data_pipeline.py process --input ./data/arxiv/curated_dataset.jsonl --output ./data/arxiv/processed_dataset.jsonl
+python data_pipeline.py tokenize --input ./data/arxiv/processed_dataset.jsonl --output-dir ./data/arxiv
 
-# Step 5: Train tokenizer
-python data_pipeline.py tokenize \
-    --input ./data/arxiv/processed_dataset.jsonl \
-    --output-dir ./data/arxiv \
-    --vocab-size 50000
-
-# Step 6: Train model
+# Train model
 python train_colab.py \
     --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
     --dataset-text-dir ./data/arxiv/texts \
     --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
     --checkpoint-dir ./checkpoints \
     --batch-size 6 \
-    --gradient-accumulation-steps 4 \
     --max-steps 50000
 ```
 
-## 📊 Data Pipeline
+## Mixture of Experts (MoE) Architecture
 
-### ArXiv Paper Collection
+The model uses a DeepSeek-MoE inspired architecture that efficiently scales to large models while maintaining computational efficiency.
 
-**Features**:
-- RAM-efficient batch collection (default: 25 papers/batch)
-- Streaming to disk (no memory accumulation)
-- Automatic deduplication by `arxiv_id`
-- Rate limiting (3 requests/sec)
-- Checkpointing after every batch (fully resumable)
-- Memory monitoring with automatic batch size adjustment
+### Architecture Overview
 
-**Diverse Query Strategy**: Uses 21 different ML+healthcare/neuroscience query combinations for broad coverage.
+The MoE model consists of two types of experts:
 
-```bash
-# Basic collection
-python data_pipeline.py collect --max-papers 40000
+**1. Shared Experts (Always Active)**
+- **Purpose**: Provide baseline functionality for all tokens
+- **Count**: 2 experts (default)
+- **Activation**: Always process all tokens, regardless of routing decisions
+- **Role**: Ensure all tokens receive processing, act as fallback for unprocessed tokens
 
-# Custom batch size and RAM target
-python data_pipeline.py collect \
-    --max-papers 40000 \
-    --batch-size 25 \
-    --ram-target 50.0
-```
+**2. Routed Experts (Dynamically Selected)**
+- **Purpose**: Specialize on different patterns and domains
+- **Count**: 4 experts (default, scalable to 60+ for larger models)
+- **Activation**: Selected via Expert Choice routing
+- **Role**: Each expert selects top_k tokens to process based on routing scores
 
-**Date Filtering**: Edit `MIN_YEAR` and `MAX_YEAR` in `data_pipeline.py` (around line 240-242).
+### Expert Choice Routing
 
-**Resume**: Automatically resumes from checkpoint. Simply re-run the same command.
+Unlike traditional Token Choice routing (where tokens choose experts), this implementation uses **Expert Choice routing** where experts select tokens:
 
-### PDF Text Extraction
+1. **Routing Gate**: Computes logits for each token-expert pair
+2. **Expert Selection**: Each routed expert selects top_k tokens (default: k=2) with highest scores
+3. **Capacity Control**: Enforces sparsity via capacity factor (default: 1.5x average load)
+4. **Load Balancing**: Auxiliary loss encourages uniform expert utilization
+5. **Fail-safe**: Tokens not selected by routed experts fall back to shared experts
 
-Extracts first 6 pages, max 12k characters, with parallel processing and resume capability.
+### Key Advantages
 
-### NeMo Curator Curation (Linux only)
+- **Efficiency**: Only activates a subset of experts per token, reducing computation
+- **Specialization**: Routed experts can specialize on different healthcare subdomains
+- **Scalability**: Can scale to 60+ experts without proportional increase in computation
+- **Robustness**: Shared experts ensure all tokens are processed even if routing fails
 
-Advanced text curation:
-- Text cleaning (URLs, emails, citations)
-- Quality filtering (word count, alphanumeric ratio, language)
-- Domain classification (healthcare relevance scoring)
-- Fuzzy deduplication (MinHash similarity 0.95)
+### Training Dynamics
 
-### Healthcare-Specific Preprocessing
+The model learns to route tokens to appropriate experts through:
+- **Load Balance Loss**: Encourages uniform expert utilization
+- **Z-Loss**: Prevents extreme routing confidence, maintains exploration
+- **Capacity Loss**: Enforces sparsity constraints
+- **Temperature Scheduling**: Gradually reduces routing noise during training
 
-- Section extraction (Abstract, Introduction, Methods, Results, Discussion)
-- Medical term preservation (MMSE, MRI, EEG, etc.)
-- Citation normalization
-- Medical term detection by domain
+### Domain Specialization
 
-### Tokenizer Training
+Through training on curated healthcare data, routed experts naturally specialize:
+- Some experts focus on neurodegeneration terminology
+- Others specialize in medical imaging or clinical language
+- Shared experts maintain general language understanding
+- The routing mechanism learns to match tokens to domain-appropriate experts
 
-SentencePiece BPE tokenizer:
-- Vocabulary: 50,000
-- Special tokens: `[DISEASE]`, `[PROTEIN]`, `[DRUG]`, `[GENE]`
-- Case preservation (identity normalization)
+## NeMo Curator: Domain-Adaptive Pretraining
 
-## 🎯 Training
+NeMo Curator plays a crucial role in enabling effective domain-adaptive pretraining by creating a high-quality, domain-specific dataset tailored for healthcare language modeling.
 
-### Streaming Dataset
+### How NeMo Curator Enables Domain Adaptation
 
-Memory-efficient `IterableDataset`:
-- Streams from disk (<500MB RAM)
-- Worker-aware distribution
-- Shuffling with buffer
-- Variable-length sequences
+**1. Quality-Based Filtering**
+- Removes low-quality content (short texts, high noise ratio, non-English)
+- Ensures minimum content quality (100-5000 tokens, >40% alphanumeric)
+- Filters out boilerplate and repeated content
+- Result: Only high-quality research content reaches the model
 
-### Colab Training
+**2. Domain-Specific Classification**
+- Identifies healthcare subdomains: neurodegeneration, neuroscience, medical imaging, clinical, drug discovery
+- Scores domain relevance using keyword matching and ML method detection
+- Filters papers to ensure healthcare+ML relevance (relevance score > 0.4)
+- Result: Training data is specifically curated for healthcare domain
 
-Optimized for Colab GPU (~12GB VRAM):
-- Mixed precision training
-- Gradient accumulation
-- Cosine annealing with warmup
-- Checkpointing every 5000 steps
+**3. Medical Terminology Preservation**
+- Preserves critical medical terms (disease names, abbreviations, scientific terms)
+- Maintains case sensitivity for proper nouns (Alzheimer, Parkinson, etc.)
+- Extracts and tags medical terms by domain
+- Result: Model learns domain-specific vocabulary and terminology
 
-## 📊 Evaluation & Inference
+**4. Research Structure Maintenance**
+- Extracts section boundaries (Abstract, Introduction, Methods, Results, Discussion)
+- Preserves scientific paper structure
+- Normalizes citations while maintaining context
+- Result: Model learns research paper structure and scientific writing patterns
 
-### Evaluation
+**5. Deduplication & Diversity**
+- Fuzzy deduplication removes near-duplicate papers (MinHash similarity 0.95)
+- Ensures diverse training examples
+- Prevents overfitting to repeated content
+- Result: Diverse, high-quality training corpus
 
-```bash
-python evaluate.py \
-    --model-checkpoint ./checkpoints/step_50000.pt \
-    --dataset-text-dir ./data/arxiv/texts \
-    --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
-    --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
-    --output-dir ./evaluations
-```
+### Domain-Adaptive Pretraining Process
 
-**Metrics**: Perplexity, domain classification accuracy, MRR@20, section classification accuracy
+The curation pipeline effectively performs domain-adaptive pretraining by:
 
-### Inference
+1. **Data Selection**: Filters 30-40k papers to only high-quality, healthcare-relevant content
+2. **Domain Enrichment**: Ensures each paper has both healthcare domain keywords and ML method keywords
+3. **Terminology Focus**: Preserves and highlights medical terminology throughout preprocessing
+4. **Structure Learning**: Maintains research paper structure so model learns scientific writing patterns
+5. **Quality Assurance**: Multi-stage filtering ensures only the best examples reach training
 
-```bash
-# Generate embedding
-python inference.py \
-    --checkpoint ./checkpoints/step_50000.pt \
-    --tokenizer ./data/arxiv/healthcare_tokenizer.model \
-    embed \
-    --text "Alzheimer disease and tau protein aggregation"
+**Result**: The model is pretrained on a curated, domain-specific dataset rather than generic text, enabling it to:
+- Understand medical terminology and context
+- Recognize healthcare subdomains
+- Generate domain-appropriate text
+- Perform better on healthcare-specific tasks
 
-# Domain classification
-python inference.py \
-    --checkpoint ./checkpoints/step_50000.pt \
-    --tokenizer ./data/arxiv/healthcare_tokenizer.model \
-    classify \
-    --text "Clinical trial results for Alzheimer's disease treatment"
-```
+This is effectively **domain-adaptive pretraining** - the model learns healthcare-specific patterns, terminology, and research contexts from the very beginning of training, rather than being fine-tuned from a general-purpose model.
 
-## 📁 Project Structure
+## Key Features
 
-```
-neuroseek-moe/
-├── data_pipeline.py          # Complete data pipeline
-├── arxiv_dataset.py          # Streaming IterableDataset
-├── training_adapter.py       # Model adapter
-├── train_colab.py            # Colab-optimized training
-├── train_real.py             # Model implementation
-├── evaluate.py               # Evaluation utilities
-├── inference.py              # Production inference
-├── run_pipeline.py           # Pipeline orchestration
-├── config.yaml               # Configuration file
-├── requirements.txt          # Dependencies
-├── notebooks/
-│   └── ArXiv_Pipeline_Colab.ipynb  # Colab notebook
-└── data/arxiv/               # Data directory (excluded from Git)
-```
+### Data Pipeline
+- **RAM-Efficient Collection**: Batch processing (25 papers/batch) with automatic memory monitoring
+- **21 Diverse Query Combinations**: ML+healthcare/neuroscience queries for broad coverage
+- **Streaming to Disk**: No memory accumulation, writes immediately
+- **Automatic Checkpointing**: Resume capability at every stage
+- **Quality Filtering**: Word count, alphanumeric ratio, language detection, domain relevance
 
-## 🔧 Configuration
+### Training
+- **Memory-Efficient Streaming**: <500MB RAM during training regardless of corpus size
+- **Colab-Optimized**: Mixed precision, gradient accumulation, dynamic batch sizing
+- **Domain-Aware Loss**: Weighted loss for neurodegeneration and neuroscience papers
+- **Checkpointing**: Saves every 5000 steps with resume capability
 
-Edit `config.yaml` to customize:
+### Evaluation & Inference
+- **Comprehensive Metrics**: Perplexity, domain accuracy, MRR@20, section classification
+- **Fast Inference**: <100ms per paper on CPU
+- **Embedding Generation**: For similarity search and literature review
+- **Domain Classification**: Automatic healthcare subdomain detection
+
+## Configuration
+
+All parameters are configurable via `config.yaml`:
 - Number of papers to collect
 - NeMo Curator filter thresholds
-- Training hyperparameters
+- Training hyperparameters (batch size, learning rate, etc.)
 - Evaluation settings
 - Inference export options
 
-See `config.yaml` for all available options.
+## Challenges & Solutions
 
-## 📚 Key Features
+### Challenge 1: Memory Management
+**Problem**: Processing 30-40k papers would exhaust RAM on most systems.
 
-- **Memory Efficiency**: Streaming I/O, batch collection, <500MB RAM during training
-- **Checkpointing**: Automatic checkpoints, resume capability, no data loss
-- **Performance**: Parallel processing, GPU support, >1000 samples/sec
-- **Healthcare-Specific**: Medical term preservation, domain classification, special tokens
+**Solution**: Implemented streaming I/O at every stage, batch-based collection with memory monitoring, and a custom IterableDataset that streams from disk during training.
 
-## ⚠️ Platform Compatibility
+### Challenge 2: Data Quality
+**Problem**: Raw ArXiv papers include low-quality content, duplicates, and non-English text.
 
-- **NeMo Curator**: Linux only (gracefully skips on macOS/Windows)
-- **DeepSpeed**: Linux/Colab only (falls back to PyTorch on macOS)
-- **All other components**: Cross-platform
+**Solution**: Multi-stage filtering pipeline using NeMo Curator for quality checks, domain relevance scoring, and fuzzy deduplication.
 
-## 📖 Additional Documentation
+### Challenge 3: Colab Constraints
+**Problem**: Google Colab has limited GPU memory (~12GB) and runtime limits.
 
-- `EVALUATION_REQUIREMENTS.md`: Files needed for evaluation and visualization
-- `GIT_GUIDELINES.md`: Git repository guidelines and data storage strategies
+**Solution**: Optimized training loop with mixed precision, gradient accumulation, frequent checkpointing, and automatic resume capability.
 
-## 📄 License
+## Technologies Used
 
-MIT License
+- **Python 3.8+**: Core language
+- **PyTorch**: Deep learning framework
+- **NeMo Curator**: Text curation (Linux only)
+- **SentencePiece**: Tokenization
+- **ArXiv API**: Paper collection
+- **Dask**: Parallel processing for NeMo Curator
+- **scikit-learn**: Evaluation metrics
 
-## 🙏 Acknowledgments
+## Results
+
+The pipeline successfully:
+- Collects and processes 30-40k healthcare+ML papers
+- Trains a specialized tokenizer with 50k vocabulary
+- Trains a language model optimized for healthcare literature
+- Achieves >1000 samples/sec throughput on Colab GPU
+- Maintains <500MB RAM usage during training
+
+## Future Improvements
+
+- [ ] Add support for multimodal data (images, diagrams)
+- [ ] Implement fine-tuning on specific healthcare subdomains
+- [ ] Add interactive visualization for training progress
+- [ ] Create a web interface for literature review
+- [ ] Expand to other scientific domains
+
+## Learnings
+
+This project taught me:
+- How to build memory-efficient data pipelines for large-scale ML
+- The importance of data quality in domain-specific models
+- Techniques for optimizing training on resource-constrained systems
+- End-to-end ML engineering from data collection to deployment
+
+## License
+
+MIT License - feel free to use this project for learning or as a starting point for your own work.
+
+## Acknowledgments
 
 - **ArXiv** for open access to research papers
-- **NeMo Curator** for advanced text curation
+- **NeMo Curator** for advanced text curation tools
 - **SentencePiece** for efficient tokenization
-- **PyTorch** for deep learning framework
+- **PyTorch** team for the excellent deep learning framework
 
 ---
 
-**NeuroSeek-MoE**: Training language models on healthcare+ML literature 🧠✨
+**Note**: This is a personal project demonstrating full-stack ML engineering. The code is provided as-is for educational purposes.

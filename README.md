@@ -403,11 +403,45 @@ Production inference pipeline:
 - Optional: INT8 quantization, ONNX export
 
 ```bash
+# Generate embedding for a single text
 python inference.py \
-    --model-checkpoint ./checkpoints/step_50000.pt \
-    --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
-    --mode embed \
+    --checkpoint ./checkpoints/step_50000.pt \
+    --tokenizer ./data/arxiv/healthcare_tokenizer.model \
+    embed \
     --text "Alzheimer disease and tau protein aggregation"
+
+# Batch encode multiple texts
+python inference.py \
+    --checkpoint ./checkpoints/step_50000.pt \
+    --tokenizer ./data/arxiv/healthcare_tokenizer.model \
+    batch \
+    --texts input_texts.txt \
+    --output embeddings.npy
+
+# Literature review (similarity search)
+python inference.py \
+    --checkpoint ./checkpoints/step_50000.pt \
+    --tokenizer ./data/arxiv/healthcare_tokenizer.model \
+    review \
+    --query "neurodegeneration and machine learning" \
+    --corpus corpus_embeddings.npz \
+    --top-k 10
+
+# Domain classification
+python inference.py \
+    --checkpoint ./checkpoints/step_50000.pt \
+    --tokenizer ./data/arxiv/healthcare_tokenizer.model \
+    classify \
+    --text "Clinical trial results for Alzheimer's disease treatment"
+
+# Precompute corpus embeddings
+python inference.py \
+    --checkpoint ./checkpoints/step_50000.pt \
+    --tokenizer ./data/arxiv/healthcare_tokenizer.model \
+    precompute \
+    --corpus corpus_texts.txt \
+    --output corpus_embeddings.npz \
+    --batch-size 32
 ```
 
 ## 📁 Project Structure

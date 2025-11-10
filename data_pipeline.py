@@ -1012,25 +1012,32 @@ class RAMEfficientArxivCollector:
         print(f"   💾 Checkpoint saved: {self.total_collected} papers")
     
     def _load_checkpoint(self):
-        """Load checkpoint to resume collection."""
+        """Load checkpoint to resume collection.
+        
+        Always loads ALL IDs from the output file to ensure accurate deduplication.
+        The checkpoint file is only used for the count, but we verify against the actual file.
+        """
         try:
+            # Always load from output file first (most accurate source of truth)
+            if os.path.exists(self.output_file):
+                existing_ids = load_existing_ids(self.output_file)
+                self.collected_ids = existing_ids
+                self.total_collected = len(existing_ids)
+                if self.total_collected > 0:
+                    print(f"📖 Found {self.total_collected} existing papers in output file")
+            
+            # Also check checkpoint file for count verification
             if os.path.exists(self.checkpoint_file):
                 with open(self.checkpoint_file, 'r') as f:
                     checkpoint = json.load(f)
-                    self.total_collected = checkpoint.get('total_collected', 0)
-                    self.collected_ids = set(checkpoint.get('collected_ids', []))
-                    print(f"📖 Resuming from checkpoint: {self.total_collected} papers")
-            else:
-                # Also check existing output file
-                if os.path.exists(self.output_file):
-                    existing_ids = load_existing_ids(self.output_file)
-                    self.collected_ids = existing_ids
-                    self.total_collected = len(existing_ids)
-                    if self.total_collected > 0:
-                        print(f"📖 Found {self.total_collected} existing papers in output file")
+                    checkpoint_count = checkpoint.get('total_collected', 0)
+                    if checkpoint_count != self.total_collected:
+                        print(f"⚠️  Checkpoint count ({checkpoint_count}) differs from file count ({self.total_collected}), using file count")
+                    # Note: We don't use checkpoint's collected_ids since we loaded all from file
         except Exception as e:
             print(f"⚠️  Could not load checkpoint: {e}")
-            print("📝 Starting fresh")
+            if self.total_collected == 0:
+                print("📝 Starting fresh")
     
     def _clear_memory(self):
         """Aggressively clear memory."""
@@ -1173,10 +1180,13 @@ class RAMEfficientArxivCollector:
         
         papers_in_query = 0
         batch_num = 0
-        results_processed = 0
+        total_results_checked = 0  # Track across all batches
+        consecutive_empty_batches = 0  # Track consecutive batches with 0 papers
+        
         # Fetch many more results to account for filtering (no abstract, date range, etc.)
         # ArXiv API allows up to 300,000 results, so we can request a large number
-        max_search_results = max(max_papers * 5, 10000)  # Fetch 5x target to account for filtering
+        # Use a much larger window to ensure we can find enough papers
+        max_search_results = max(max_papers * 10, 50000)  # Fetch 10x target to account for filtering
         
         try:
             client = arxiv.Client(
@@ -1209,13 +1219,32 @@ class RAMEfficientArxivCollector:
                     current_batch_size = self.batch_size
                 
                 # Collect batch from the same iterator
-                papers = self._collect_batch_from_iterator(
+                papers, results_checked = self._collect_batch_from_iterator(
                     results_iter, query, batch_num, current_batch_size
                 )
                 
+                total_results_checked += results_checked
+                
                 if papers == 0:
-                    print("   No more papers available from this query")
-                    break
+                    consecutive_empty_batches += 1
+                    print(f"   ⚠️  Batch returned 0 papers (checked {results_checked} results, total checked: {total_results_checked})")
+                    
+                    # If we've checked many results with no new papers, move to next query
+                    if consecutive_empty_batches >= 3:
+                        print(f"   ⚠️  {consecutive_empty_batches} consecutive empty batches, moving to next query")
+                        break
+                    elif total_results_checked > 5000 and papers_in_query == 0:
+                        print(f"   ⚠️  Query returned no papers after checking {total_results_checked} results, moving to next query")
+                        break
+                    elif total_results_checked > 10000:
+                        print(f"   ⚠️  Query exhausted after checking {total_results_checked} results, moving to next query")
+                        break
+                    # Otherwise, try one more batch in case of temporary issues
+                    time.sleep(2)  # Brief pause before retry
+                    continue
+                else:
+                    # Reset counter if we got papers
+                    consecutive_empty_batches = 0
                 
                 papers_in_query += papers
                 
@@ -1244,13 +1273,13 @@ class RAMEfficientArxivCollector:
         query: str,
         batch_num: int,
         batch_size: int
-    ) -> int:
+    ) -> Tuple[int, int]:
         """
         Collect one batch of papers from an existing results iterator.
         
         This avoids restarting the search and getting duplicate results.
         
-        Returns: Number of papers collected in this batch
+        Returns: Tuple of (number of papers collected, number of results checked)
         """
         print(f"\n   Batch {batch_num}: Collecting up to {batch_size} papers...")
         self._log_memory("Before batch:")
@@ -1343,7 +1372,7 @@ class RAMEfficientArxivCollector:
         print(f"   ✅ Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec, checked {results_checked} results)")
         self._log_memory("After batch:")
         
-        return papers_in_batch
+        return papers_in_batch, results_checked
     
     def collect_all(
         self,
@@ -1436,7 +1465,8 @@ def collect_arxiv_efficient(
     
     # Define queries with higher limits to reach target
     # Each query can contribute up to its limit, but we'll continue until total_target is reached
-    query_limit_per_query = max(total_target // 4, 5000)  # Distribute target across queries
+    # Use larger per-query limits to ensure we can reach the target
+    query_limit_per_query = max(total_target // 3, 10000)  # Distribute target across queries with larger limits
     queries = [
         ("cat:cs.LG AND healthcare", query_limit_per_query),
         ("cat:cs.AI AND (neurodegeneration OR disease)", query_limit_per_query),
@@ -1445,6 +1475,9 @@ def collect_arxiv_efficient(
         # Additional broader queries to help reach target
         ("cat:cs.LG AND (medical OR clinical OR health)", query_limit_per_query),
         ("cat:cs.AI AND (disease OR diagnosis OR treatment)", query_limit_per_query),
+        # Even broader queries as fallback
+        ("cat:cs.LG AND (health OR medicine)", query_limit_per_query),
+        ("cat:cs.AI AND health", query_limit_per_query),
     ]
     
     # Collect

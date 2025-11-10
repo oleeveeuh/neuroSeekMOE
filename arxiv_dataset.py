@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import os
 import random
-from collections import deque
 from typing import Dict, Iterator, Optional, List, Tuple
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
@@ -282,7 +281,8 @@ class ArXivStreamingDataset(IterableDataset):
         random.shuffle(file_order)
         
         # Shuffle buffer for paper-level shuffling
-        shuffle_buffer = deque(maxlen=self.shuffle_buffer)
+        # Use list instead of deque for easier index-based removal
+        shuffle_buffer = []
         
         for arxiv_id, file_path in file_order:
             # Process paper
@@ -299,12 +299,12 @@ class ArXivStreamingDataset(IterableDataset):
                 # Randomly yield one from buffer
                 idx = random.randint(0, len(shuffle_buffer) - 1)
                 yield shuffle_buffer[idx]
-                shuffle_buffer.remove(shuffle_buffer[idx])
+                # Remove by index (avoid tensor comparison issues)
+                shuffle_buffer.pop(idx)
         
         # Yield remaining items from buffer
-        remaining = list(shuffle_buffer)
-        random.shuffle(remaining)
-        for sample in remaining:
+        random.shuffle(shuffle_buffer)
+        for sample in shuffle_buffer:
             yield sample
     
     def __len__(self) -> int:

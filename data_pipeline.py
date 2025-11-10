@@ -33,7 +33,7 @@ try:
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
-    print("⚠️  yaml package not available. Install with: pip install pyyaml")
+    print("yaml package not available. Install with: pip install pyyaml")
 
 # Memory monitoring
 try:
@@ -41,14 +41,14 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    print("⚠️  psutil package not available. Install with: pip install psutil")
+    print("psutil package not available. Install with: pip install psutil")
 
 try:
     import arxiv
     ARXIV_AVAILABLE = True
 except ImportError:
     ARXIV_AVAILABLE = False
-    print("⚠️  arxiv package not available. Install with: pip install arxiv")
+    print("arxiv package not available. Install with: pip install arxiv")
 
 try:
     import PyPDF2
@@ -62,21 +62,21 @@ except ImportError:
     except ImportError:
         PDF_AVAILABLE = False
         USE_PDFPLUMBER = False
-        print("⚠️  PDF library not available. Install with: pip install PyPDF2 or pip install pdfplumber")
+        print("PDF library not available. Install with: pip install PyPDF2 or pip install pdfplumber")
 
 try:
     import requests
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
-    print("⚠️  requests package not available. Install with: pip install requests")
+    print("requests package not available. Install with: pip install requests")
 
 try:
     import sentencepiece as spm
     SENTENCEPIECE_AVAILABLE = True
 except ImportError:
     SENTENCEPIECE_AVAILABLE = False
-    print("⚠️  sentencepiece package not available. Install with: pip install sentencepiece")
+    print("sentencepiece package not available. Install with: pip install sentencepiece")
 
 # NeMo Curator imports (optional, Linux only)
 # Use CORRECT imports based on official NeMo Curator API:
@@ -201,7 +201,7 @@ try:
         
         import dask
         NEMO_CURATOR_AVAILABLE = True
-        print("✅ NeMo Curator imported successfully")
+        print("NeMo Curator imported successfully")
         print(f"   Pipeline: {Pipeline_AVAILABLE}")
         print(f"   JsonlReader: {JsonlReader_AVAILABLE}")
         print(f"   ScoreFilter: {ScoreFilter_AVAILABLE}")
@@ -216,7 +216,7 @@ try:
         Stage_AVAILABLE = False
         download_arxiv_AVAILABLE = False
         get_client_AVAILABLE = False
-        print("⚠️  NeMo Curator only supports Linux systems (current: {})".format(platform.system()))
+        print("NeMo Curator only supports Linux systems (current: {})".format(platform.system()))
 except (ImportError, ValueError) as e:
     NEMO_CURATOR_AVAILABLE = False
     Pipeline_AVAILABLE = False
@@ -227,7 +227,7 @@ except (ImportError, ValueError) as e:
     Stage_AVAILABLE = False
     download_arxiv_AVAILABLE = False
     get_client_AVAILABLE = False
-    print("⚠️  nemo-curator package not available. Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
+    print("nemo-curator package not available. Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
     print(f"   Error: {e}")
 
 
@@ -303,7 +303,7 @@ def load_config(config_path: str = "config.yaml") -> Dict:
     }
     
     if not YAML_AVAILABLE:
-        print("⚠️  YAML not available, using defaults")
+        print("YAML not available, using defaults")
         return defaults
     
     if os.path.exists(config_path):
@@ -328,10 +328,10 @@ def load_config(config_path: str = "config.yaml") -> Dict:
                     config['pipeline'] = {}
                 config['pipeline']['max_papers'] = config['collection']['max_papers']
             
-            print(f"✅ Loaded config from {config_path}")
+            print(f"Loaded config from {config_path}")
             return config
         except Exception as e:
-            print(f"⚠️  Error loading config: {e}, using defaults")
+            print(f"Error loading config: {e}, using defaults")
             return defaults
     else:
         # Create default config file
@@ -340,7 +340,7 @@ def load_config(config_path: str = "config.yaml") -> Dict:
                 yaml.dump(defaults, f, default_flow_style=False, sort_keys=False)
             print(f"📝 Created default config file: {config_path}")
         except Exception as e:
-            print(f"⚠️  Could not create config file: {e}")
+            print(f"Could not create config file: {e}")
         return defaults
 
 
@@ -352,15 +352,15 @@ def save_config(config: Dict, config_path: str = "config.yaml"):
         config_path: Path to config.yaml file
     """
     if not YAML_AVAILABLE:
-        print("⚠️  YAML not available, cannot save config")
+        print("YAML not available, cannot save config")
         return
     
     try:
         with open(config_path, 'w') as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-        print(f"✅ Saved config to {config_path}")
+        print(f"Saved config to {config_path}")
     except Exception as e:
-        print(f"⚠️  Error saving config: {e}")
+        print(f"Error saving config: {e}")
 
 
 # ============================================================================
@@ -403,7 +403,7 @@ def check_memory_usage(warning_threshold: float = 80.0) -> bool:
     mem_stats = get_memory_usage()
     if mem_stats['percent'] is not None:
         if mem_stats['percent'] > warning_threshold:
-            print(f"⚠️  Memory usage: {mem_stats['percent']:.1f}% (threshold: {warning_threshold}%)")
+            print(f"Memory usage: {mem_stats['percent']:.1f}% (threshold: {warning_threshold}%)")
             print(f"   Available: {mem_stats['available'] / (1024**3):.2f} GB")
             return False
     return True
@@ -420,7 +420,7 @@ def log_memory_stats(interval: int = 1000):
     
     mem_stats = get_memory_usage()
     if mem_stats['percent'] is not None:
-        print(f"   💾 Memory: {mem_stats['percent']:.1f}% used, {mem_stats['available'] / (1024**3):.2f} GB available")
+        print(f"   Memory: {mem_stats['percent']:.1f}% used, {mem_stats['available'] / (1024**3):.2f} GB available")
 
 
 # ============================================================================
@@ -434,7 +434,7 @@ def check_arxiv_connection() -> bool:
         True if accessible, False otherwise
     """
     if not ARXIV_AVAILABLE:
-        print("❌ ArXiv package not available")
+        print("ArXiv package not available")
         return False
     
     try:
@@ -442,13 +442,13 @@ def check_arxiv_connection() -> bool:
         search = arxiv.Search(query="cat:cs.LG", max_results=1)
         result = next(client.results(search), None)
         if result:
-            print("✅ ArXiv API is accessible")
+            print("ArXiv API is accessible")
             return True
         else:
-            print("⚠️  ArXiv API returned no results (might be temporary)")
+            print("ArXiv API returned no results (might be temporary)")
             return False
     except Exception as e:
-        print(f"❌ ArXiv API connection failed: {e}")
+        print(f"ArXiv API connection failed: {e}")
         return False
 
 
@@ -466,16 +466,16 @@ def check_disk_space(path: str, required_gb: float = 50.0) -> bool:
         if PSUTIL_AVAILABLE:
             stat = shutil.disk_usage(path)
             available_gb = stat.free / (1024**3)
-            print(f"💾 Disk space: {available_gb:.2f} GB available (required: {required_gb:.2f} GB)")
+            print(f"Disk space: {available_gb:.2f} GB available (required: {required_gb:.2f} GB)")
             if available_gb < required_gb:
-                print(f"⚠️  Warning: Insufficient disk space")
+                print(f"Warning: Insufficient disk space")
                 return False
             return True
         else:
-            print("⚠️  psutil not available, cannot check disk space")
+            print("psutil not available, cannot check disk space")
             return True  # Assume OK
     except Exception as e:
-        print(f"⚠️  Could not check disk space: {e}")
+        print(f"Could not check disk space: {e}")
         return True  # Assume OK
 
 
@@ -494,10 +494,10 @@ def check_output_directory(path: str) -> bool:
         with open(test_file, 'w') as f:
             f.write('test')
         os.remove(test_file)
-        print(f"✅ Output directory is writable: {path}")
+        print(f"Output directory is writable: {path}")
         return True
     except Exception as e:
-        print(f"❌ Output directory not writable: {path} - {e}")
+        print(f"Output directory not writable: {path} - {e}")
         return False
 
 
@@ -529,7 +529,7 @@ def print_diagnostics(config: Dict):
         config: Configuration dictionary
     """
     print("=" * 60)
-    print("🔍 Pipeline Diagnostics")
+    print("Pipeline Diagnostics")
     print("=" * 60)
     
     # Check ArXiv connection
@@ -561,12 +561,12 @@ def print_diagnostics(config: Dict):
     
     # Package availability
     print("\n6. Package Availability:")
-    print(f"   ArXiv: {'✅' if ARXIV_AVAILABLE else '❌'}")
-    print(f"   PDF: {'✅' if PDF_AVAILABLE else '❌'}")
-    print(f"   NeMo Curator: {'✅' if NEMO_CURATOR_AVAILABLE else '❌'}")
-    print(f"   SentencePiece: {'✅' if SENTENCEPIECE_AVAILABLE else '❌'}")
-    print(f"   YAML: {'✅' if YAML_AVAILABLE else '❌'}")
-    print(f"   psutil: {'✅' if PSUTIL_AVAILABLE else '❌'}")
+    print(f"   ArXiv: {'' if ARXIV_AVAILABLE else ''}")
+    print(f"   PDF: {'' if PDF_AVAILABLE else ''}")
+    print(f"   NeMo Curator: {'' if NEMO_CURATOR_AVAILABLE else ''}")
+    print(f"   SentencePiece: {'' if SENTENCEPIECE_AVAILABLE else ''}")
+    print(f"   YAML: {'' if YAML_AVAILABLE else ''}")
+    print(f"   psutil: {'' if PSUTIL_AVAILABLE else ''}")
     
     print("\n" + "=" * 60)
     
@@ -584,7 +584,7 @@ def load_existing_ids(cache_file: str) -> Set[str]:
     """
     existing_ids = set()
     if os.path.exists(cache_file):
-        print(f"📖 Loading existing cache from {cache_file}...")
+        print(f"Loading existing cache from {cache_file}...")
         try:
             with open(cache_file, 'r', encoding='utf-8') as f:
                 for line_num, line in enumerate(f, 1):
@@ -594,11 +594,11 @@ def load_existing_ids(cache_file: str) -> Set[str]:
                             if 'id' in paper:
                                 existing_ids.add(paper['id'])
                         except json.JSONDecodeError as e:
-                            print(f"⚠️  Warning: Skipping invalid JSON on line {line_num}: {e}")
+                            print(f"Warning: Skipping invalid JSON on line {line_num}: {e}")
                             continue
-            print(f"   ✅ Found {len(existing_ids)} existing papers in cache")
+            print(f"   Found {len(existing_ids)} existing papers in cache")
         except Exception as e:
-            print(f"⚠️  Warning: Error reading cache file: {e}")
+            print(f"Warning: Error reading cache file: {e}")
             print("   Starting fresh...")
     else:
         print(f"📝 No existing cache found. Starting fresh collection...")
@@ -717,7 +717,7 @@ def search_arxiv_query_streaming(
     
     # Validate query
     if not query or not query.strip():
-        print(f"   ❌ Error: Empty query")
+        print(f"   Error: Empty query")
         return 0
     
     # Timeout handling (Unix only - signal.SIGALRM)
@@ -732,9 +732,9 @@ def search_arxiv_query_streaming(
             
             signal.signal(signal.SIGALRM, timeout_handler)
     except (ImportError, AttributeError):
-        print("   ⚠️  Signal-based timeout not available (Windows), using time-based checks only")
+        print("   Signal-based timeout not available (Windows), using time-based checks only")
     
-    print(f"\n🔍 Query: {query}")
+    print(f"\nQuery: {query}")
     print(f"   Max results: {max_results}")
     print(f"   Per-result timeout: {per_result_timeout}s")
     print(f"   Query timeout: {query_timeout}s ({query_timeout/60:.1f} min)")
@@ -764,7 +764,7 @@ def search_arxiv_query_streaming(
             sort_order=arxiv.SortOrder.Descending
         )
         
-        print(f"   🔄 Fetching results from ArXiv API...")
+        print(f"   Fetching results from ArXiv API...")
         results_iter = client.results(search)
         
         # Set query-level timeout
@@ -776,7 +776,7 @@ def search_arxiv_query_streaming(
             # Check query timeout (time-based, works on all platforms)
             elapsed = time.time() - query_start
             if elapsed > query_timeout:
-                print(f"   ⏱️  Query timeout ({query_timeout}s), aborting")
+                print(f"   Query timeout ({query_timeout}s), aborting")
                 break
             
             # Per-result timeout
@@ -824,7 +824,7 @@ def search_arxiv_query_streaming(
                 if papers_found % 10 == 0:
                     elapsed = time.time() - query_start
                     rate = papers_found / elapsed if elapsed > 0 else 0
-                    print(f"   📊 {papers_found} papers, {elapsed:.0f}s elapsed, {rate:.2f} papers/sec")
+                    print(f"   {papers_found} papers, {elapsed:.0f}s elapsed, {rate:.2f} papers/sec")
                     last_progress_time = time.time()
                 
                 # Memory check every 100 results
@@ -832,7 +832,7 @@ def search_arxiv_query_streaming(
                     if PSUTIL_AVAILABLE:
                         mem_stats = get_memory_usage()
                         if mem_stats['percent'] is not None and mem_stats['percent'] > 80:
-                            print(f"   ⚠️  RAM at {mem_stats['percent']:.0f}%, stopping to prevent OOM")
+                            print(f"   RAM at {mem_stats['percent']:.0f}%, stopping to prevent OOM")
                             break
                 
                 # Check if we've hit max_results
@@ -848,13 +848,13 @@ def search_arxiv_query_streaming(
                 
             except TimeoutError:
                 elapsed_result = time.time() - result_start
-                print(f"   ⚠️  Result #{papers_found + 1} took >{per_result_timeout}s, skipping...")
+                print(f"   Result #{papers_found + 1} took >{per_result_timeout}s, skipping...")
                 papers_skipped += 1
                 if use_signal_timeout:
                     signal.alarm(0)
                 continue
             except Exception as e:
-                print(f"   ⚠️  Error processing result: {e}")
+                print(f"   Error processing result: {e}")
                 papers_skipped += 1
                 if use_signal_timeout:
                     signal.alarm(0)
@@ -867,11 +867,11 @@ def search_arxiv_query_streaming(
         # Final summary
         elapsed = time.time() - query_start
         rate = papers_found / elapsed if elapsed > 0 else 0
-        print(f"   ✅ Query complete: {papers_found} papers ({rate:.2f} papers/sec)")
+        print(f"   Query complete: {papers_found} papers ({rate:.2f} papers/sec)")
         if skipped_duplicate > 0:
-            print(f"   ⏭️  Skipped {skipped_duplicate} duplicates")
+            print(f"   Skipped {skipped_duplicate} duplicates")
         if skipped_no_abstract > 0:
-            print(f"   ⏭️  Skipped {skipped_no_abstract} papers without abstracts")
+            print(f"   Skipped {skipped_no_abstract} papers without abstracts")
         if skipped_date_range > 0:
             if MIN_YEAR is not None and MAX_YEAR is not None:
                 date_range_str = f"{MIN_YEAR}-{MAX_YEAR}"
@@ -881,24 +881,24 @@ def search_arxiv_query_streaming(
                 date_range_str = f"<={MAX_YEAR}"
             else:
                 date_range_str = "all years"
-            print(f"   ⏭️  Skipped {skipped_date_range} papers outside date range ({date_range_str})")
+            print(f"   Skipped {skipped_date_range} papers outside date range ({date_range_str})")
         
         if papers_found == 0:
             if result_idx == -1:
-                print(f"   ⚠️  Warning: No results found for query")
+                print(f"   Warning: No results found for query")
                 print(f"      - Query: {query}")
                 print(f"      - This might indicate query syntax issue or API problem")
             else:
-                print(f"   ⚠️  Warning: Processed {result_idx + 1} results but none matched criteria")
+                print(f"   Warning: Processed {result_idx + 1} results but none matched criteria")
         
     except TimeoutError:
         elapsed = time.time() - query_start
-        print(f"   ⏱️  Query timed out after {elapsed:.0f}s")
+        print(f"   Query timed out after {elapsed:.0f}s")
     except KeyboardInterrupt:
-        print(f"\n   ⏸️  Query interrupted by user")
+        print(f"\n   Query interrupted by user")
         raise
     except Exception as e:
-        print(f"   ❌ Query error: {e}")
+        print(f"   Query error: {e}")
         import traceback
         print(f"   Traceback: {traceback.format_exc()}")
     
@@ -914,7 +914,7 @@ def search_arxiv_query(
     max_retries: int = 5
 ) -> list[Dict]:
     """Legacy function - accumulates results in memory. Use search_arxiv_query_streaming() instead."""
-    print("⚠️  Warning: Using legacy search_arxiv_query() which accumulates results in memory.")
+    print("Warning: Using legacy search_arxiv_query() which accumulates results in memory.")
     print("   Consider using search_arxiv_query_streaming() for better memory efficiency.")
     
     if existing_ids is None:
@@ -1001,7 +1001,7 @@ class RAMEfficientArxivCollector:
             available_gb = mem.available / (1024**3)
             used_gb = mem.used / (1024**3)
             total_gb = mem.total / (1024**3)
-            print(f"   {prefix} 💾 RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({percent:.0f}%)")
+            print(f"   {prefix} RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({percent:.0f}%)")
         except:
             pass
     
@@ -1014,7 +1014,7 @@ class RAMEfficientArxivCollector:
         }
         with open(self.checkpoint_file, 'w') as f:
             json.dump(checkpoint, f)
-        print(f"   💾 Checkpoint saved: {self.total_collected} papers")
+        print(f"   Checkpoint saved: {self.total_collected} papers")
     
     def _load_checkpoint(self):
         """Load checkpoint to resume collection.
@@ -1029,7 +1029,7 @@ class RAMEfficientArxivCollector:
                 self.collected_ids = existing_ids
                 self.total_collected = len(existing_ids)
                 if self.total_collected > 0:
-                    print(f"📖 Found {self.total_collected} existing papers in output file")
+                    print(f"Found {self.total_collected} existing papers in output file")
             
             # Also check checkpoint file for count verification
             if os.path.exists(self.checkpoint_file):
@@ -1037,10 +1037,10 @@ class RAMEfficientArxivCollector:
                     checkpoint = json.load(f)
                     checkpoint_count = checkpoint.get('total_collected', 0)
                     if checkpoint_count != self.total_collected:
-                        print(f"⚠️  Checkpoint count ({checkpoint_count}) differs from file count ({self.total_collected}), using file count")
+                        print(f"Checkpoint count ({checkpoint_count}) differs from file count ({self.total_collected}), using file count")
                     # Note: We don't use checkpoint's collected_ids since we loaded all from file
         except Exception as e:
-            print(f"⚠️  Could not load checkpoint: {e}")
+            print(f"Could not load checkpoint: {e}")
             if self.total_collected == 0:
                 print("📝 Starting fresh")
     
@@ -1067,7 +1067,7 @@ class RAMEfficientArxivCollector:
         batch_start = time.time()
         
         if not ARXIV_AVAILABLE:
-            print("   ❌ ArXiv package not available")
+            print("   ArXiv package not available")
             return 0
         
         try:
@@ -1141,21 +1141,21 @@ class RAMEfficientArxivCollector:
                     if papers_in_batch % 5 == 0:
                         ram_percent = self._get_ram_percent()
                         if ram_percent > self.ram_target_percent:
-                            print(f"   ⚠️  RAM at {ram_percent:.0f}%, stopping batch early")
+                            print(f"   RAM at {ram_percent:.0f}%, stopping batch early")
                             break
                     
                     # Rate limiting
                     time.sleep(self.rate_limit)
         
         except Exception as e:
-            print(f"   ⚠️  Batch error: {e}")
+            print(f"   Batch error: {e}")
             import traceback
             print(f"   Traceback: {traceback.format_exc()}")
         
         elapsed = time.time() - batch_start
         rate = papers_in_batch / elapsed if elapsed > 0 else 0
         
-        print(f"   ✅ Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec)")
+        print(f"   Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec)")
         self._log_memory("After batch:")
         
         return papers_in_batch
@@ -1180,7 +1180,7 @@ class RAMEfficientArxivCollector:
         print(f"{'='*70}")
         
         if not ARXIV_AVAILABLE:
-            print("   ❌ ArXiv package not available")
+            print("   ArXiv package not available")
             return 0
         
         papers_in_query = 0
@@ -1216,10 +1216,10 @@ class RAMEfficientArxivCollector:
                 ram_percent = self._get_ram_percent()
                 if ram_percent > 70:
                     current_batch_size = max(5, self.batch_size // 2)
-                    print(f"   ⚠️  High RAM ({ram_percent:.0f}%), reducing batch size to {current_batch_size}")
+                    print(f"   High RAM ({ram_percent:.0f}%), reducing batch size to {current_batch_size}")
                 elif ram_percent > 50:
                     current_batch_size = max(5, int(self.batch_size * 0.75))
-                    print(f"   ⚠️  Moderate RAM ({ram_percent:.0f}%), reducing batch size to {current_batch_size}")
+                    print(f"   Moderate RAM ({ram_percent:.0f}%), reducing batch size to {current_batch_size}")
                 else:
                     current_batch_size = self.batch_size
                 
@@ -1232,17 +1232,17 @@ class RAMEfficientArxivCollector:
                 
                 if papers == 0:
                     consecutive_empty_batches += 1
-                    print(f"   ⚠️  Batch returned 0 papers (checked {results_checked} results, total checked: {total_results_checked})")
+                    print(f"   Batch returned 0 papers (checked {results_checked} results, total checked: {total_results_checked})")
                     
                     # If we've checked many results with no new papers, move to next query
                     if consecutive_empty_batches >= 3:
-                        print(f"   ⚠️  {consecutive_empty_batches} consecutive empty batches, moving to next query")
+                        print(f"   {consecutive_empty_batches} consecutive empty batches, moving to next query")
                         break
                     elif total_results_checked > 5000 and papers_in_query == 0:
-                        print(f"   ⚠️  Query returned no papers after checking {total_results_checked} results, moving to next query")
+                        print(f"   Query returned no papers after checking {total_results_checked} results, moving to next query")
                         break
                     elif total_results_checked > 50000:  # Increased from 10000 to allow more results
-                        print(f"   ⚠️  Query exhausted after checking {total_results_checked} results, moving to next query")
+                        print(f"   Query exhausted after checking {total_results_checked} results, moving to next query")
                         break
                     # Otherwise, try one more batch in case of temporary issues
                     time.sleep(2)  # Brief pause before retry
@@ -1265,11 +1265,11 @@ class RAMEfficientArxivCollector:
         except StopIteration:
             print("   Reached end of search results")
         except Exception as e:
-            print(f"   ⚠️  Query error: {e}")
+            print(f"   Query error: {e}")
             import traceback
             print(f"   Traceback: {traceback.format_exc()}")
         
-        print(f"\n✅ Query complete: {papers_in_query} papers")
+        print(f"\nQuery complete: {papers_in_query} papers")
         return papers_in_query
     
     def _collect_batch_from_iterator(
@@ -1357,7 +1357,7 @@ class RAMEfficientArxivCollector:
                     if papers_in_batch % 5 == 0:
                         ram_percent = self._get_ram_percent()
                         if ram_percent > self.ram_target_percent:
-                            print(f"   ⚠️  RAM at {ram_percent:.0f}%, stopping batch early")
+                            print(f"   RAM at {ram_percent:.0f}%, stopping batch early")
                             break
                     
                     # Rate limiting
@@ -1367,14 +1367,14 @@ class RAMEfficientArxivCollector:
             # End of results
             pass
         except Exception as e:
-            print(f"   ⚠️  Batch error: {e}")
+            print(f"   Batch error: {e}")
             import traceback
             print(f"   Traceback: {traceback.format_exc()}")
         
         elapsed = time.time() - batch_start
         rate = papers_in_batch / elapsed if elapsed > 0 else 0
         
-        print(f"   ✅ Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec, checked {results_checked} results)")
+        print(f"   Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec, checked {results_checked} results)")
         self._log_memory("After batch:")
         
         return papers_in_batch, results_checked
@@ -1392,30 +1392,30 @@ class RAMEfficientArxivCollector:
             total_target: Total papers to collect
         """
         print("\n" + "="*70)
-        print("🚀 RAM-Efficient ArXiv Collection")
+        print("RAM-Efficient ArXiv Collection")
         print("="*70)
-        print(f"📊 Starting from: {self.total_collected} papers")
-        print(f"🎯 Target: {total_target} papers")
-        print(f"📦 Batch size: {self.batch_size} papers/batch")
-        print(f"💾 RAM target: <{self.ram_target_percent:.0f}%")
+        print(f"Starting from: {self.total_collected} papers")
+        print(f"Target: {total_target} papers")
+        print(f"Batch size: {self.batch_size} papers/batch")
+        print(f"RAM target: <{self.ram_target_percent:.0f}%")
         if MIN_YEAR is not None or MAX_YEAR is not None:
             date_range = f"{MIN_YEAR or 'any'}-{MAX_YEAR or 'any'}"
-            print(f"📅 Date range: {date_range}")
+            print(f"Date range: {date_range}")
         else:
-            print(f"📅 Date range: All years (no filtering)")
+            print(f"Date range: All years (no filtering)")
         print()
         
         try:
             for query_num, (query, max_per_query) in enumerate(queries, 1):
                 if self.total_collected >= total_target:
-                    print(f"\n✅ Reached target of {total_target} papers")
+                    print(f"\nReached target of {total_target} papers")
                     break
                 
                 # Adjust max for this query
                 remaining = total_target - self.total_collected
                 max_for_query = min(max_per_query, remaining)
                 
-                print(f"\n📋 Query {query_num}/{len(queries)}: {query}")
+                print(f"\nQuery {query_num}/{len(queries)}: {query}")
                 print(f"   Target: {max_for_query} papers (remaining: {remaining})")
                 
                 # Collect query
@@ -1428,14 +1428,14 @@ class RAMEfficientArxivCollector:
                 
                 # If we got papers but haven't reached target, continue to next query
                 if papers > 0 and self.total_collected < total_target:
-                    print(f"   ✅ Collected {papers} papers from this query, continuing...")
+                    print(f"   Collected {papers} papers from this query, continuing...")
         
         except KeyboardInterrupt:
-            print("\n⏸️  Collection paused by user")
+            print("\nCollection paused by user")
         
         finally:
             self._save_checkpoint()
-            print(f"\n✅ Total collected: {self.total_collected} papers")
+            print(f"\nTotal collected: {self.total_collected} papers")
             self._log_memory("Final:")
 
 
@@ -1457,7 +1457,7 @@ def collect_arxiv_efficient(
         rate_limit: Delay between requests (seconds)
     """
     if not ARXIV_AVAILABLE:
-        error_msg = "❌ Error: arxiv package not available. Install with: pip install arxiv"
+        error_msg = "Error: arxiv package not available. Install with: pip install arxiv"
         print(error_msg)
         raise ImportError(error_msg)
     
@@ -1522,9 +1522,9 @@ def collect_arxiv_efficient(
     # Collect
     collector.collect_all(queries, total_target)
     
-    print(f"\n📁 Papers saved to: {output_file}")
-    print(f"💾 Checkpoint saved to: {checkpoint_file}")
-    print(f"📖 To resume: Run collect_arxiv_efficient() again")
+    print(f"\nPapers saved to: {output_file}")
+    print(f"Checkpoint saved to: {checkpoint_file}")
+    print(f"To resume: Run collect_arxiv_efficient() again")
 
 
 def collect_arxiv_papers(
@@ -1745,18 +1745,18 @@ def extract_pdf_texts(
         rate_limit_delay: Delay between PDF downloads (default: 0.4 seconds)
     """
     if not PDF_AVAILABLE:
-        print("❌ Error: PDF library not available.")
+        print("Error: PDF library not available.")
         print("   Install with: pip install PyPDF2 or pip install pdfplumber")
         return
     
     if not REQUESTS_AVAILABLE:
-        print("❌ Error: requests package not available.")
+        print("Error: requests package not available.")
         print("   Install with: pip install requests")
         return
     
     # Validate num_workers
     if num_workers < 2 or num_workers > 4:
-        print(f"⚠️  Warning: num_workers={num_workers} not in recommended range (2-4)")
+        print(f"Warning: num_workers={num_workers} not in recommended range (2-4)")
         print("   Adjusting to 3...")
         num_workers = 3
     
@@ -1765,7 +1765,7 @@ def extract_pdf_texts(
     
     # Load already processed IDs (from files and checkpoint)
     processed_ids = load_processed_ids(output_dir)
-    print(f"📖 Found {len(processed_ids)} already processed papers")
+    print(f"Found {len(processed_ids)} already processed papers")
     
     # Load checkpoint if exists
     checkpoint_file = os.path.join(output_dir, 'pdf_extraction_checkpoint.json')
@@ -1775,12 +1775,12 @@ def extract_pdf_texts(
             with open(checkpoint_file, 'r') as f:
                 checkpoint_data = json.load(f)
                 checkpoint_stats = checkpoint_data.get('stats', {})
-                print(f"📖 Resuming from checkpoint: {checkpoint_stats.get('success', 0)} successful, {checkpoint_stats.get('failed', 0)} failed")
+                print(f"Resuming from checkpoint: {checkpoint_stats.get('success', 0)} successful, {checkpoint_stats.get('failed', 0)} failed")
         except Exception as e:
-            print(f"⚠️  Could not load checkpoint: {e}")
+            print(f"Could not load checkpoint: {e}")
     
     # Load papers from JSONL (stream, don't load all in memory)
-    print(f"📚 Loading papers from {input_jsonl}...")
+    print(f"Loading papers from {input_jsonl}...")
     papers_to_process = []
     total_papers = 0
     
@@ -1805,16 +1805,16 @@ def extract_pdf_texts(
                 papers_to_process.append(paper)
                 
             except json.JSONDecodeError:
-                print(f"⚠️  Warning: Invalid JSON on line {line_num}")
+                print(f"Warning: Invalid JSON on line {line_num}")
                 continue
     
-    print(f"📊 Total papers in file: {total_papers}")
-    print(f"📊 Already processed: {len(processed_ids)}")
-    print(f"📊 Remaining to process: {len(papers_to_process)}")
+    print(f"Total papers in file: {total_papers}")
+    print(f"Already processed: {len(processed_ids)}")
+    print(f"Remaining to process: {len(papers_to_process)}")
     print()
     
     if not papers_to_process:
-        print("✅ All papers already processed!")
+        print("All papers already processed!")
         return
     
     # Statistics
@@ -1826,8 +1826,8 @@ def extract_pdf_texts(
     }
     
     # Process papers with thread pool
-    print(f"🚀 Starting extraction with {num_workers} workers...")
-    print(f"⏱️  Rate limit: {1.0/rate_limit_delay:.1f} requests/sec")
+    print(f"Starting extraction with {num_workers} workers...")
+    print(f"Rate limit: {1.0/rate_limit_delay:.1f} requests/sec")
     print()
     
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -1856,18 +1856,18 @@ def extract_pdf_texts(
                 
                 # Log progress
                 if completed % 50 == 0:
-                    print(f"   📊 Progress: {completed}/{len(papers_to_process)} "
-                          f"(✓ {stats['success']} success, ✗ {stats['failed']} failed)")
+                    print(f"   Progress: {completed}/{len(papers_to_process)} "
+                          f"(OK {stats['success']} success, FAIL {stats['failed']} failed)")
                 
                 # Checkpoint
                 if completed % CHECKPOINT_INTERVAL_PDF == 0:
                     save_checkpoint(output_dir, processed_ids, stats)
-                    print(f"   💾 Checkpoint saved: {completed} papers processed")
+                    print(f"   Checkpoint saved: {completed} papers processed")
             
             except Exception as e:
                 stats['failed'] += 1
                 stats['errors'][f"Exception: {str(e)}"] += 1
-                print(f"   ⚠️  Unexpected error processing paper: {e}")
+                print(f"   Unexpected error processing paper: {e}")
     
     # Final checkpoint
     save_checkpoint(output_dir, processed_ids, stats)
@@ -1875,15 +1875,15 @@ def extract_pdf_texts(
     # Print summary
     print()
     print("=" * 60)
-    print("✅ PDF Extraction Complete!")
+    print("PDF Extraction Complete!")
     print("=" * 60)
-    print(f"📊 Total processed: {stats['total']}")
-    print(f"✅ Success: {stats['success']}")
-    print(f"❌ Failed: {stats['failed']}")
-    print(f"📁 Output directory: {output_dir}")
+    print(f"Total processed: {stats['total']}")
+    print(f"Success: {stats['success']}")
+    print(f"Failed: {stats['failed']}")
+    print(f"Output directory: {output_dir}")
     
     if stats['errors']:
-        print(f"\n⚠️  Error breakdown:")
+        print(f"\nError breakdown:")
         for error, count in sorted(stats['errors'].items(), key=lambda x: x[1], reverse=True):
             print(f"   {error}: {count}")
 
@@ -2093,16 +2093,16 @@ def preprocess_and_classify(
         num_workers: Number of parallel workers
     """
     print("=" * 60)
-    print("🔬 Domain Classifier & Text Preprocessor")
+    print("Domain Classifier & Text Preprocessor")
     print("=" * 60)
-    print(f"📁 Metadata file: {metadata_jsonl}")
-    print(f"📁 Text directory: {text_dir}")
-    print(f"📁 Output file: {output_jsonl}")
-    print(f"👷 Workers: {num_workers}")
+    print(f"Metadata file: {metadata_jsonl}")
+    print(f"Text directory: {text_dir}")
+    print(f"Output file: {output_jsonl}")
+    print(f"Workers: {num_workers}")
     print()
     
     # Load metadata
-    print("📚 Loading metadata...")
+    print("Loading metadata...")
     metadata_by_id = {}
     total_papers = 0
     
@@ -2122,10 +2122,10 @@ def preprocess_and_classify(
                 total_papers += 1
                 
             except json.JSONDecodeError:
-                print(f"⚠️  Warning: Invalid JSON on line {line_num}")
+                print(f"Warning: Invalid JSON on line {line_num}")
                 continue
     
-    print(f"   ✅ Loaded {total_papers} papers from metadata")
+    print(f"   Loaded {total_papers} papers from metadata")
     
     # Find text files
     print(f"\n📂 Scanning text directory...")
@@ -2136,7 +2136,7 @@ def preprocess_and_classify(
                 arxiv_id = filename[:-4]  # Remove .txt extension
                 text_files[arxiv_id] = os.path.join(text_dir, filename)
     
-    print(f"   ✅ Found {len(text_files)} text files")
+    print(f"   Found {len(text_files)} text files")
     
     # Match metadata with text files
     papers_to_process = []
@@ -2144,11 +2144,11 @@ def preprocess_and_classify(
         if arxiv_id in text_files:
             papers_to_process.append((arxiv_id, text_files[arxiv_id], metadata))
     
-    print(f"   ✅ {len(papers_to_process)} papers ready to process")
+    print(f"   {len(papers_to_process)} papers ready to process")
     print()
     
     if not papers_to_process:
-        print("❌ No papers to process!")
+        print("No papers to process!")
         return
     
     # Clear output file if it exists
@@ -2169,7 +2169,7 @@ def preprocess_and_classify(
     file_lock = threading.Lock()
     
     # Process papers with thread pool
-    print(f"🚀 Starting preprocessing and classification...")
+    print(f"Starting preprocessing and classification...")
     print()
     
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -2207,16 +2207,16 @@ def preprocess_and_classify(
                 
                 # Log progress
                 if completed % 500 == 0:
-                    print(f"   📊 Progress: {completed}/{len(papers_to_process)} "
-                          f"(✓ {stats['success']} success, ✗ {stats['failed']} failed)")
+                    print(f"   Progress: {completed}/{len(papers_to_process)} "
+                          f"(OK {stats['success']} success, FAIL {stats['failed']} failed)")
             
             except Exception as e:
                 stats['failed'] += 1
                 stats['errors'][f"Exception: {str(e)}"] += 1
-                print(f"   ⚠️  Unexpected error processing {arxiv_id}: {e}")
+                print(f"   Unexpected error processing {arxiv_id}: {e}")
     
     # Final statistics pass (read output file to get domain counts)
-    print(f"\n📊 Computing final statistics...")
+    print(f"\nComputing final statistics...")
     domain_counts = defaultdict(int)
     neurodegeneration_count = 0
     
@@ -2239,28 +2239,28 @@ def preprocess_and_classify(
     # Print summary
     print()
     print("=" * 60)
-    print("✅ Preprocessing & Classification Complete!")
+    print("Preprocessing & Classification Complete!")
     print("=" * 60)
-    print(f"📊 Total processed: {stats['total']}")
-    print(f"✅ Success: {stats['success']}")
-    print(f"❌ Failed: {stats['failed']}")
-    print(f"📁 Output file: {output_jsonl}")
+    print(f"Total processed: {stats['total']}")
+    print(f"Success: {stats['success']}")
+    print(f"Failed: {stats['failed']}")
+    print(f"Output file: {output_jsonl}")
     
-    print(f"\n📊 Domain distribution:")
+    print(f"\nDomain distribution:")
     for domain, count in sorted(stats['domain_counts'].items(), key=lambda x: x[1], reverse=True):
         print(f"   {domain}: {count} papers")
     
-    print(f"\n🧠 Neurodegeneration papers: {stats['neurodegeneration_count']}")
+    print(f"\nNeurodegeneration papers: {stats['neurodegeneration_count']}")
     
     if stats['errors']:
-        print(f"\n⚠️  Error breakdown:")
+        print(f"\nError breakdown:")
         for error, count in sorted(stats['errors'].items(), key=lambda x: x[1], reverse=True)[:10]:
             print(f"   {error}: {count}")
     
     # Estimate file size
     if os.path.exists(output_jsonl):
         file_size_mb = os.path.getsize(output_jsonl) / (1024 * 1024)
-        print(f"\n💾 Output file size: {file_size_mb:.2f} MB")
+        print(f"\nOutput file size: {file_size_mb:.2f} MB")
 
 
 # NeMo Curator Pipeline
@@ -3042,7 +3042,7 @@ class HealthcareFilterStage(ProcessingStage if (NEMO_CURATOR_AVAILABLE and Proce
                 processed_docs.append(processed)
         
         # Log stats
-        print(f"📊 HealthcareFilterStage Statistics:")
+        print(f"HealthcareFilterStage Statistics:")
         print(f"   Total in: {self.stats['total_in']}")
         print(f"   Passed quality: {self.stats['passed_quality']}")
         print(f"   Passed domain: {self.stats['passed_domain']}")
@@ -3224,7 +3224,7 @@ class HealthcareQualityFilterStage(ProcessingStage if (NEMO_CURATOR_AVAILABLE an
                 processed_docs.append(processed)
         
         # Log stats
-        print(f"📊 HealthcareQualityFilterStage Statistics:")
+        print(f"HealthcareQualityFilterStage Statistics:")
         print(f"   Total in: {self.stats['total_in']}")
         print(f"   Duplicates removed: {self.stats['duplicates_removed']}")
         print(f"   Language filter out: {self.stats['language_filter_out']}")
@@ -3355,14 +3355,14 @@ class HealthcareJsonlWriter(Stage if (NEMO_CURATOR_AVAILABLE and Stage_AVAILABLE
     def _log_final_stats(self):
         """Log final statistics."""
         print("\n" + "=" * 60)
-        print("📊 HealthcareJsonlWriter Final Statistics")
+        print("HealthcareJsonlWriter Final Statistics")
         print("=" * 60)
         
-        print(f"\n📄 Total documents processed: {self.stats['total_processed']}")
+        print(f"\nTotal documents processed: {self.stats['total_processed']}")
         
         # Domain distribution
         if self.stats['domain_counts']:
-            print(f"\n🏷️  Domain distribution:")
+            print(f"\nDomain distribution:")
             for domain, count in sorted(
                 self.stats['domain_counts'].items(),
                 key=lambda x: x[1],
@@ -3373,7 +3373,7 @@ class HealthcareJsonlWriter(Stage if (NEMO_CURATOR_AVAILABLE and Stage_AVAILABLE
         
         # Year distribution
         if self.stats['year_counts']:
-            print(f"\n📅 Year distribution:")
+            print(f"\nYear distribution:")
             for year in sorted(self.stats['year_counts'].keys()):
                 count = self.stats['year_counts'][year]
                 percentage = (count / self.stats['total_processed']) * 100
@@ -3395,7 +3395,7 @@ class HealthcareJsonlWriter(Stage if (NEMO_CURATOR_AVAILABLE and Stage_AVAILABLE
             print(f"   Mean: {sum(quality_scores) / len(quality_scores):.3f}")
             print(f"   Median: {sorted(quality_scores)[len(quality_scores) // 2]:.3f}")
         
-        print(f"\n💾 Output file: {self.output_path}")
+        print(f"\nOutput file: {self.output_path}")
         print("=" * 60)
     
     def __call__(self, dataset):
@@ -3459,7 +3459,7 @@ def load_download_checkpoint(checkpoint_file: str) -> Dict:
             with open(checkpoint_file, 'r') as f:
                 return json.load(f)
         except Exception as e:
-            print(f"⚠️  Could not load checkpoint: {e}")
+            print(f"Could not load checkpoint: {e}")
     return {}
 
 
@@ -3525,7 +3525,7 @@ def run_nemo_curator_pipeline(
     """
     if not NEMO_CURATOR_AVAILABLE:
         error_msg = (
-            "❌ Error: NeMo Curator not available.\n"
+            "Error: NeMo Curator not available.\n"
             "   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'\n"
             "   Note: NeMo Curator only supports Linux systems"
         )
@@ -3533,27 +3533,27 @@ def run_nemo_curator_pipeline(
         raise RuntimeError("NeMo Curator not available. Install with: pip install 'nemo-curator[text]'")
     
     if not Pipeline_AVAILABLE:
-        error_msg = "❌ Error: Pipeline class not available. Check NeMo Curator installation."
+        error_msg = "Error: Pipeline class not available. Check NeMo Curator installation."
         print(error_msg)
         raise RuntimeError(error_msg)
     
     if not download_arxiv_AVAILABLE:
-        print("❌ Error: download_arxiv() function not available.")
+        print("Error: download_arxiv() function not available.")
         print("   This requires NeMo Curator with download support")
         return None
     
     print("=" * 60)
-    print("🔬 NeMo Curator Healthcare Pipeline (FREE - No AWS Required)")
+    print("NeMo Curator Healthcare Pipeline (FREE - No AWS Required)")
     print("=" * 60)
-    print(f"📁 Raw data directory: {raw_data_path}")
-    print(f"📁 Raw output file: {raw_output_path}")
-    print(f"📁 Final curated output: {output_path}")
-    print(f"🔍 Filter query: {filter_query}")
-    print(f"👷 Max workers: {max_workers}")
-    print(f"📦 Batch size: {batch_size} papers per batch")
-    print(f"💾 Checkpoint interval: {checkpoint_interval} papers")
-    print(f"🎯 Max papers: {max_papers}")
-    print(f"💰 Cost: FREE (direct ArXiv access, no AWS charges)")
+    print(f"Raw data directory: {raw_data_path}")
+    print(f"Raw output file: {raw_output_path}")
+    print(f"Final curated output: {output_path}")
+    print(f"Filter query: {filter_query}")
+    print(f"Max workers: {max_workers}")
+    print(f"Batch size: {batch_size} papers per batch")
+    print(f"Checkpoint interval: {checkpoint_interval} papers")
+    print(f"Max papers: {max_papers}")
+    print(f"Cost: FREE (direct ArXiv access, no AWS charges)")
     print()
     
     # Setup checkpointing
@@ -3568,20 +3568,20 @@ def run_nemo_curator_pipeline(
         if checkpoint:
             downloaded_ids = set(checkpoint.get('downloaded_ids', []))
             total_downloaded = checkpoint.get('total_downloaded', 0)
-            print(f"📖 Resuming from checkpoint: {total_downloaded} papers already downloaded")
+            print(f"Resuming from checkpoint: {total_downloaded} papers already downloaded")
             print(f"   Found {len(downloaded_ids)} unique paper IDs in checkpoint")
     
     try:
         # Initialize Dask client
-        print("🔧 Initializing Dask client...")
+        print("Initializing Dask client...")
         try:
             client = get_client(cluster_type="cpu")
-            print(f"   ✅ Dask client initialized: {client}")
+            print(f"   Dask client initialized: {client}")
         except:
             # Fallback: create local client
             from dask.distributed import Client
             client = Client(processes=False, threads_per_worker=max_workers)
-            print(f"   ✅ Created local Dask client: {client}")
+            print(f"   Created local Dask client: {client}")
         
         # Stage 1: Download ArXiv papers with checkpointing and batching
         print("\n📥 Stage 1: Downloading ArXiv Papers (FREE)")
@@ -3600,7 +3600,7 @@ def run_nemo_curator_pipeline(
         try:
             # Download papers using download_arxiv()
             # Note: download_arxiv() may download all at once, but we'll process in batches
-            print(f"   🔄 Starting download (target: {max_papers} papers)...")
+            print(f"   Starting download (target: {max_papers} papers)...")
             
             dataset = download_arxiv(
                 output_path=raw_data_path,
@@ -3609,7 +3609,7 @@ def run_nemo_curator_pipeline(
             )
             
             # Process dataset in batches with checkpointing
-            print(f"   📊 Processing downloaded dataset in batches of {batch_size}...")
+            print(f"   Processing downloaded dataset in batches of {batch_size}...")
             
             batch_count = 0
             papers_in_batch = 0
@@ -3623,7 +3623,7 @@ def run_nemo_curator_pipeline(
             for doc in dataset_iter:
                 # Check if we've reached max papers
                 if total_downloaded >= max_papers:
-                    print(f"\n   ✅ Reached target of {max_papers} papers")
+                    print(f"\n   Reached target of {max_papers} papers")
                     break
                 
                 # Extract paper ID (try different field names)
@@ -3645,17 +3645,17 @@ def run_nemo_curator_pipeline(
                 
                 # Log progress
                 if total_downloaded % 100 == 0:
-                    print(f"   📊 Progress: {total_downloaded}/{max_papers} papers downloaded...")
+                    print(f"   Progress: {total_downloaded}/{max_papers} papers downloaded...")
                 
                 # Checkpoint every N papers
                 if total_downloaded % checkpoint_interval == 0:
                     save_download_checkpoint(checkpoint_file, downloaded_ids, total_downloaded)
-                    print(f"   💾 Checkpoint saved: {total_downloaded} papers downloaded")
+                    print(f"   Checkpoint saved: {total_downloaded} papers downloaded")
                 
                 # Process batch if full
                 if papers_in_batch >= batch_size:
                     batch_count += 1
-                    print(f"   ✅ Batch {batch_count} complete: {papers_in_batch} papers")
+                    print(f"   Batch {batch_count} complete: {papers_in_batch} papers")
                     papers_in_batch = 0
                     
                     # Save checkpoint after each batch
@@ -3665,29 +3665,29 @@ def run_nemo_curator_pipeline(
             save_download_checkpoint(checkpoint_file, downloaded_ids, total_downloaded)
             raw_output_handle.close()
             
-            print(f"\n   ✅ Download complete: {total_downloaded} papers downloaded")
-            print(f"   💾 Final checkpoint saved")
+            print(f"\n   Download complete: {total_downloaded} papers downloaded")
+            print(f"   Final checkpoint saved")
             
         except Exception as e:
             raw_output_handle.close()
-            print(f"   ⚠️  Download interrupted: {e}")
-            print(f"   💾 Saving checkpoint with {total_downloaded} papers...")
+            print(f"   Download interrupted: {e}")
+            print(f"   Saving checkpoint with {total_downloaded} papers...")
             save_download_checkpoint(checkpoint_file, downloaded_ids, total_downloaded)
             raise
         
         # Stage 2: Process downloaded JSONL using Pipeline API
-        print("\n🔍 Stage 2: Processing with NeMo Curator Pipeline API")
+        print("\nStage 2: Processing with NeMo Curator Pipeline API")
         print("   Creating pipeline with custom healthcare stages...")
         
         if JsonlReader_AVAILABLE and ProcessingStage_AVAILABLE:
             # Use Pipeline API (preferred method)
-            print("   ✅ Using NeMo Curator Pipeline API")
+            print("   Using NeMo Curator Pipeline API")
             
             # Create pipeline
             pipeline = Pipeline(name="healthcare_curation_pipeline")
             
             # Step 1: Read JSONL files
-            print("   📖 Adding JsonlReader stage...")
+            print("   Adding JsonlReader stage...")
             reader = JsonlReader(
                 file_paths=raw_output_path,
                 files_per_partition=4,
@@ -3696,34 +3696,34 @@ def run_nemo_curator_pipeline(
             pipeline.add_stage(reader)
             
             # Step 2: Healthcare filtering and classification
-            print("   🔍 Adding HealthcareFilterStage...")
+            print("   Adding HealthcareFilterStage...")
             healthcare_filter = HealthcareFilterStage()
             pipeline.add_stage(healthcare_filter)
             
             # Step 3: Quality filtering and deduplication
-            print("   ✨ Adding HealthcareQualityFilterStage...")
+            print("   Adding HealthcareQualityFilterStage...")
             quality_filter = HealthcareQualityFilterStage()
             pipeline.add_stage(quality_filter)
             
             # Step 4: Write curated dataset
-            print("   💾 Adding JsonlWriter stage...")
+            print("   Adding JsonlWriter stage...")
             if JsonlWriter_AVAILABLE:
                 writer = JsonlWriter(path=output_path)
                 pipeline.add_stage(writer)
             else:
                 # Fallback: use custom writer
-                print("   ⚠️  JsonlWriter not available, using custom writer...")
+                print("   JsonlWriter not available, using custom writer...")
                 custom_writer = HealthcareJsonlWriter(output_path=output_path)
                 pipeline.add_stage(custom_writer)
             
             # Execute pipeline
-            print("\n   🚀 Executing pipeline...")
+            print("\n   Executing pipeline...")
             results = pipeline.run()
-            print("   ✅ Pipeline execution complete!")
+            print("   Pipeline execution complete!")
             
         else:
             # Fallback: manual processing (if Pipeline API not available)
-            print("   ⚠️  Pipeline API not fully available, falling back to manual processing...")
+            print("   Pipeline API not fully available, falling back to manual processing...")
             raw_documents = []
             with open(raw_output_path, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -3734,33 +3734,33 @@ def run_nemo_curator_pipeline(
                         except json.JSONDecodeError:
                             continue
             
-            print(f"   ✅ Loaded {len(raw_documents)} documents for processing")
+            print(f"   Loaded {len(raw_documents)} documents for processing")
             
             # Process with custom stages
             filtered_dataset = HealthcareFilterStage()(raw_documents)
             
             # Quality filtering and deduplication
-            print("\n✨ Stage 3: Quality Filtering & Deduplication")
+            print("\nStage 3: Quality Filtering & Deduplication")
             print("   Using HealthcareQualityFilterStage...")
             quality_filtered_dataset = HealthcareQualityFilterStage()(filtered_dataset)
             
             # Write curated dataset
-            print("\n💾 Stage 4: Writing Curated Dataset")
+            print("\nStage 4: Writing Curated Dataset")
             print("   Using HealthcareJsonlWriter...")
             final_output = HealthcareJsonlWriter(output_path=output_path)(quality_filtered_dataset)
         
-        print("\n✅ Pipeline completed successfully!")
-        print(f"📁 Final curated dataset: {output_path}")
-        print(f"📁 Raw data (for reference): {raw_output_path}")
-        print(f"📊 Total papers downloaded: {total_downloaded}")
+        print("\nPipeline completed successfully!")
+        print(f"Final curated dataset: {output_path}")
+        print(f"Raw data (for reference): {raw_output_path}")
+        print(f"Total papers downloaded: {total_downloaded}")
         
         return output_path
         
     except Exception as e:
-        print(f"\n❌ Pipeline failed: {e}")
+        print(f"\nPipeline failed: {e}")
         import traceback
         print(traceback.format_exc())
-        print(f"\n💾 Checkpoint saved - you can resume by running again with resume=True")
+        print(f"\nCheckpoint saved - you can resume by running again with resume=True")
         return None
 
 
@@ -3784,7 +3784,7 @@ def curate_with_nemo(
     """
     if not NEMO_CURATOR_AVAILABLE:
         error_msg = (
-            "❌ Error: NeMo Curator not available.\n"
+            "Error: NeMo Curator not available.\n"
             "   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'\n"
             "   Note: NeMo Curator only supports Linux systems"
         )
@@ -3792,33 +3792,33 @@ def curate_with_nemo(
         raise RuntimeError("NeMo Curator not available. Install with: pip install 'nemo-curator[text]'")
     
     print("=" * 60)
-    print("🔬 NeMo Curator Text Curation Pipeline")
+    print("NeMo Curator Text Curation Pipeline")
     print("=" * 60)
-    print(f"📁 Text directory: {text_dir}")
-    print(f"📁 Metadata file: {metadata_jsonl}")
-    print(f"📁 Output file: {output_jsonl}")
-    print(f"🎯 Min relevance score: {min_relevance_score}")
-    print(f"🔧 GPU deduplication: {use_gpu}")
-    print(f"🔧 Skip deduplication: {skip_dedup}")
-    print(f"🔍 NEMO_CURATOR_AVAILABLE: {NEMO_CURATOR_AVAILABLE}")
+    print(f"Text directory: {text_dir}")
+    print(f"Metadata file: {metadata_jsonl}")
+    print(f"Output file: {output_jsonl}")
+    print(f"Min relevance score: {min_relevance_score}")
+    print(f"GPU deduplication: {use_gpu}")
+    print(f"Skip deduplication: {skip_dedup}")
+    print(f"NEMO_CURATOR_AVAILABLE: {NEMO_CURATOR_AVAILABLE}")
     print()
     
     # Verify inputs exist
     if not os.path.exists(text_dir):
-        error_msg = f"❌ Text directory does not exist: {text_dir}"
+        error_msg = f"Text directory does not exist: {text_dir}"
         print(error_msg)
         raise FileNotFoundError(error_msg)
     
     if not os.path.exists(metadata_jsonl):
-        error_msg = f"❌ Metadata file does not exist: {metadata_jsonl}"
+        error_msg = f"Metadata file does not exist: {metadata_jsonl}"
         print(error_msg)
         raise FileNotFoundError(error_msg)
     
     text_files = [f for f in os.listdir(text_dir) if f.endswith('.txt')]
-    print(f"📊 Found {len(text_files)} text files in {text_dir}")
+    print(f"Found {len(text_files)} text files in {text_dir}")
     
     if len(text_files) == 0:
-        error_msg = f"❌ No text files found in {text_dir}"
+        error_msg = f"No text files found in {text_dir}"
         print(error_msg)
         raise ValueError(error_msg)
     
@@ -3827,24 +3827,24 @@ def curate_with_nemo(
         if get_client is not None:
             try:
                 client = get_client()
-                print(f"✅ Dask client initialized: {client}")
+                print(f"Dask client initialized: {client}")
             except:
                 # Create local Dask client
                 from dask.distributed import Client
                 client = Client(processes=False, threads_per_worker=2)
-                print(f"✅ Created local Dask client: {client}")
+                print(f"Created local Dask client: {client}")
         else:
             # Create local Dask client manually
             from dask.distributed import Client
             client = Client(processes=False, threads_per_worker=2)
-            print(f"✅ Created local Dask client: {client}")
+            print(f"Created local Dask client: {client}")
     except Exception as e:
-        print(f"⚠️  Dask client creation failed: {e}")
+        print(f"Dask client creation failed: {e}")
         print("   Continuing without Dask (will use sequential processing)")
         client = None
     
     # Load metadata
-    print("📚 Loading metadata...")
+    print("Loading metadata...")
     metadata_map = {}
     with open(metadata_jsonl, 'r', encoding='utf-8') as f:
         for line in f:
@@ -3856,7 +3856,7 @@ def curate_with_nemo(
                         metadata_map[arxiv_id] = paper
                 except:
                     continue
-    print(f"   ✅ Loaded {len(metadata_map)} metadata entries")
+    print(f"   Loaded {len(metadata_map)} metadata entries")
     
     # Stage 1: Load and prepare documents
     print("\n" + "=" * 60)
@@ -3888,10 +3888,10 @@ def curate_with_nemo(
             }
             documents.append(document)
         except Exception as e:
-            print(f"   ⚠️  Error loading {filename}: {e}")
+            print(f"   Error loading {filename}: {e}")
             continue
     
-    print(f"   ✅ Loaded {len(documents)} documents")
+    print(f"   Loaded {len(documents)} documents")
     initial_count = len(documents)
     
     # Create DocumentDataset (NeMo Curator format)
@@ -3899,13 +3899,13 @@ def curate_with_nemo(
     if NEMO_CURATOR_AVAILABLE:
         try:
             dataset = DocumentDataset(documents)
-            print("   ✅ Using NeMo Curator DocumentDataset")
+            print("   Using NeMo Curator DocumentDataset")
         except Exception as e:
-            print(f"   ⚠️  DocumentDataset creation failed: {e}, using list")
+            print(f"   DocumentDataset creation failed: {e}, using list")
             dataset = documents
     else:
         dataset = documents
-        print("   ✅ Using list-based dataset (NeMo Curator not available)")
+        print("   Using list-based dataset (NeMo Curator not available)")
     
     # Stage 2: Text Cleaning & Normalization
     print("\n" + "=" * 60)
@@ -3920,9 +3920,9 @@ def curate_with_nemo(
             else:
                 # Fallback: apply to list
                 dataset = [cleaner.modify_document(doc) for doc in dataset]
-            print("   ✅ Text cleaning applied (NeMo Curator)")
+            print("   Text cleaning applied (NeMo Curator)")
         except Exception as e:
-            print(f"   ⚠️  NeMo Curator cleaning failed: {e}, using fallback")
+            print(f"   NeMo Curator cleaning failed: {e}, using fallback")
             # Fallback to simple cleaning
             def simple_clean(doc):
                 text = doc.get('text', '')
@@ -3935,7 +3935,7 @@ def curate_with_nemo(
                 return doc
             
             dataset = [simple_clean(doc) for doc in dataset] if isinstance(dataset, list) else dataset.map(simple_clean)
-            print("   ✅ Simple text cleaning applied")
+            print("   Simple text cleaning applied")
     else:
         # Fallback to simple cleaning
         def simple_clean(doc):
@@ -3952,7 +3952,7 @@ def curate_with_nemo(
             dataset = [simple_clean(doc) for doc in dataset]
         else:
             dataset = dataset.map(simple_clean)
-        print("   ✅ Simple text cleaning applied (NeMo Curator not available)")
+        print("   Simple text cleaning applied (NeMo Curator not available)")
     
     # Stage 3: Quality Filtering
     print("\n" + "=" * 60)
@@ -3988,26 +3988,26 @@ def curate_with_nemo(
     # Apply filters (handle both list and DocumentDataset)
     if isinstance(dataset, list):
         dataset = [doc for doc in dataset if word_count_filter(doc)]
-        print(f"   ✅ Word count filter: {len(dataset)}/{before_quality} documents")
+        print(f"   Word count filter: {len(dataset)}/{before_quality} documents")
         
         dataset = [doc for doc in dataset if alphanumeric_filter(doc)]
         after_alnum = len(dataset)
-        print(f"   ✅ Alphanumeric filter: {after_alnum} documents")
+        print(f"   Alphanumeric filter: {after_alnum} documents")
         
         dataset = [doc for doc in dataset if language_filter(doc)]
         after_lang = len(dataset)
-        print(f"   ✅ Language filter: {after_lang} documents")
+        print(f"   Language filter: {after_lang} documents")
     else:
         dataset = dataset.filter(word_count_filter)
-        print(f"   ✅ Word count filter: {len(dataset)}/{before_quality} documents")
+        print(f"   Word count filter: {len(dataset)}/{before_quality} documents")
         
         dataset = dataset.filter(alphanumeric_filter)
         after_alnum = len(dataset)
-        print(f"   ✅ Alphanumeric filter: {after_alnum} documents")
+        print(f"   Alphanumeric filter: {after_alnum} documents")
         
         dataset = dataset.filter(language_filter)
         after_lang = len(dataset)
-        print(f"   ✅ Language filter: {after_lang} documents")
+        print(f"   Language filter: {after_lang} documents")
     
     # Stage 4: Domain-Specific Filtering
     print("\n" + "=" * 60)
@@ -4050,14 +4050,14 @@ def curate_with_nemo(
                     # Fallback to list comprehension
                     dataset = [doc for doc in dataset if wrapper.filter_document(doc)]
             except Exception as e:
-                print(f"   ⚠️  NeMo Curator ScoreFilter failed: {e}, using fallback")
+                print(f"   NeMo Curator ScoreFilter failed: {e}, using fallback")
                 dataset = [doc for doc in dataset if domain_filter.filter_document(doc, min_relevance=min_relevance_score)]
         else:
             dataset = [doc for doc in dataset if domain_filter.filter_document(doc, min_relevance=min_relevance_score)]
     
     after_domain = len(dataset)
-    print(f"   ✅ Domain relevance filter: {after_domain}/{before_domain} documents")
-    print(f"   📊 Relevance threshold: {min_relevance_score}")
+    print(f"   Domain relevance filter: {after_domain}/{before_domain} documents")
+    print(f"   Relevance threshold: {min_relevance_score}")
     
     # Count domain distribution
     domain_counts = defaultdict(int)
@@ -4067,7 +4067,7 @@ def curate_with_nemo(
             domain_counts[domain] += 1
     
     if domain_counts:
-        print(f"   📊 Domain distribution:")
+        print(f"   Domain distribution:")
         for domain, count in sorted(domain_counts.items(), key=lambda x: x[1], reverse=True):
             print(f"      {domain}: {count} documents")
     
@@ -4108,9 +4108,9 @@ def curate_with_nemo(
                         dataset = unique_docs
                 
                 after_dedup = len(dataset) if isinstance(dataset, list) else len(list(dataset))
-                print(f"   ✅ Deduplication: {after_dedup}/{before_dedup} documents")
+                print(f"   Deduplication: {after_dedup}/{before_dedup} documents")
             else:
-                print("   ⚠️  NeMo Curator deduplication not available, using simple hash-based dedup")
+                print("   NeMo Curator deduplication not available, using simple hash-based dedup")
                 # Simple deduplication by text hash
                 seen_texts = set()
                 unique_docs = []
@@ -4120,15 +4120,15 @@ def curate_with_nemo(
                         seen_texts.add(text_hash)
                         unique_docs.append(doc)
                 dataset = unique_docs
-                print(f"   ✅ Simple deduplication: {len(dataset)}/{before_dedup} documents")
+                print(f"   Simple deduplication: {len(dataset)}/{before_dedup} documents")
         except Exception as e:
-            print(f"   ⚠️  Deduplication failed: {e}")
+            print(f"   Deduplication failed: {e}")
             print("   Continuing without deduplication...")
     else:
         print("\n" + "=" * 60)
         print("Stage 5: Deduplication (Skipped)")
         print("=" * 60)
-        print("   ℹ️  Deduplication skipped as requested")
+        print("   Deduplication skipped as requested")
     
     # Stage 6: Format & Export
     print("\n" + "=" * 60)
@@ -4139,7 +4139,7 @@ def curate_with_nemo(
     # No need to add them again
     
     # Export to JSONL
-    print(f"   💾 Exporting to {output_jsonl}...")
+    print(f"   Exporting to {output_jsonl}...")
     os.makedirs(os.path.dirname(output_jsonl) if os.path.dirname(output_jsonl) else '.', exist_ok=True)
     
     with open(output_jsonl, 'w', encoding='utf-8') as f:
@@ -4163,14 +4163,14 @@ def curate_with_nemo(
     
     # Print summary
     print("\n" + "=" * 60)
-    print("✅ Curation Complete!")
+    print("Curation Complete!")
     print("=" * 60)
-    print(f"📊 Initial documents: {initial_count}")
-    print(f"📊 After quality filtering: {after_lang}")
-    print(f"📊 After domain filtering: {after_domain}")
-    print(f"📊 Final curated documents: {final_count}")
-    print(f"📊 Retention rate: {final_count/initial_count*100:.1f}%")
-    print(f"📁 Output file: {output_jsonl}")
+    print(f"Initial documents: {initial_count}")
+    print(f"After quality filtering: {after_lang}")
+    print(f"After domain filtering: {after_domain}")
+    print(f"Final curated documents: {final_count}")
+    print(f"Retention rate: {final_count/initial_count*100:.1f}%")
+    print(f"Output file: {output_jsonl}")
     
     # Quality score distribution
     if final_count > 0:
@@ -4178,7 +4178,7 @@ def curate_with_nemo(
         scores = [doc.get('relevance_score', 0.0) for doc in docs_list]
         if scores:
             import numpy as np
-            print(f"\n📊 Quality Score Distribution:")
+            print(f"\nQuality Score Distribution:")
             print(f"   Mean: {np.mean(scores):.3f}")
             print(f"   Median: {np.median(scores):.3f}")
             print(f"   Min: {np.min(scores):.3f}")
@@ -4194,7 +4194,7 @@ def curate_with_nemo(
         sample_size = min(100, final_count)
         sample_docs = random.sample(docs_list, sample_size)
         
-        print(f"   📊 Sampling {sample_size} documents for validation...")
+        print(f"   Sampling {sample_size} documents for validation...")
         
         validation_results = {
             'total_sampled': sample_size,
@@ -4219,10 +4219,10 @@ def curate_with_nemo(
         
         validation_results['avg_relevance'] = sum(relevance_scores) / len(relevance_scores) if relevance_scores else 0.0
         
-        print(f"   ✅ Documents with detected domains: {validation_results['with_domains']}/{sample_size}")
-        print(f"   📊 Average relevance score: {validation_results['avg_relevance']:.3f}")
-        print(f"   📊 High relevance documents (>0.7): {validation_results['high_relevance']}/{sample_size}")
-        print(f"   📊 Domain distribution in sample:")
+        print(f"   Documents with detected domains: {validation_results['with_domains']}/{sample_size}")
+        print(f"   Average relevance score: {validation_results['avg_relevance']:.3f}")
+        print(f"   High relevance documents (>0.7): {validation_results['high_relevance']}/{sample_size}")
+        print(f"   Domain distribution in sample:")
         for domain, count in sorted(validation_results['domain_distribution'].items(), key=lambda x: x[1], reverse=True):
             print(f"      {domain}: {count} documents")
     
@@ -4230,19 +4230,19 @@ def curate_with_nemo(
     try:
         if client is not None:
             client.close()
-            print("✅ Dask client closed")
+            print("Dask client closed")
     except Exception as e:
-        print(f"⚠️  Error closing Dask client: {e}")
+        print(f"Error closing Dask client: {e}")
     
     # Final confirmation
     print("\n" + "=" * 60)
-    print("✅ curate_with_nemo() completed successfully!")
-    print(f"📁 Output file: {output_jsonl}")
+    print("curate_with_nemo() completed successfully!")
+    print(f"Output file: {output_jsonl}")
     if os.path.exists(output_jsonl):
         file_size = os.path.getsize(output_jsonl) / (1024 * 1024)  # MB
         count = sum(1 for _ in open(output_jsonl))
-        print(f"📊 Output file size: {file_size:.2f} MB")
-        print(f"📊 Documents in output: {count}")
+        print(f"Output file size: {file_size:.2f} MB")
+        print(f"Documents in output: {count}")
     print("=" * 60)
 
 
@@ -4259,18 +4259,18 @@ def process_curated_dataset(
         num_workers: Number of parallel workers
     """
     print("=" * 60)
-    print("🔬 Healthcare Text Processing Pipeline")
+    print("Healthcare Text Processing Pipeline")
     print("=" * 60)
-    print(f"📁 Input file: {input_jsonl}")
-    print(f"📁 Output file: {output_jsonl}")
-    print(f"👷 Workers: {num_workers}")
+    print(f"Input file: {input_jsonl}")
+    print(f"Output file: {output_jsonl}")
+    print(f"Workers: {num_workers}")
     print()
     
     # Initialize modifier
     modifier = HealthcareTextModifier()
     
     # Load documents
-    print("📚 Loading curated dataset...")
+    print("Loading curated dataset...")
     documents = []
     with open(input_jsonl, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f, 1):
@@ -4280,15 +4280,15 @@ def process_curated_dataset(
                 doc = json.loads(line)
                 documents.append(doc)
             except json.JSONDecodeError as e:
-                print(f"   ⚠️  Warning: Invalid JSON on line {line_num}: {e}")
+                print(f"   Warning: Invalid JSON on line {line_num}: {e}")
                 continue
     
     total_docs = len(documents)
-    print(f"   ✅ Loaded {total_docs} documents")
+    print(f"   Loaded {total_docs} documents")
     print()
     
     # Process documents in parallel
-    print("🔄 Processing documents...")
+    print("Processing documents...")
     processed_docs = []
     lock = threading.Lock()
     
@@ -4328,21 +4328,21 @@ def process_curated_dataset(
             if error:
                 errors += 1
                 if errors <= 10:  # Only show first 10 errors
-                    print(f"   ⚠️  Error processing document: {error}")
+                    print(f"   Error processing document: {error}")
             else:
                 processed_docs.append(result)
             
             # Progress update
             if completed % 500 == 0:
-                print(f"   📊 Progress: {completed}/{total_docs} documents processed...")
+                print(f"   Progress: {completed}/{total_docs} documents processed...")
     
-    print(f"   ✅ Processed {len(processed_docs)} documents")
+    print(f"   Processed {len(processed_docs)} documents")
     if errors > 0:
-        print(f"   ⚠️  Errors: {errors} documents failed")
+        print(f"   Errors: {errors} documents failed")
     print()
     
     # Write output
-    print("💾 Writing processed dataset...")
+    print("Writing processed dataset...")
     os.makedirs(os.path.dirname(output_jsonl) if os.path.dirname(output_jsonl) else '.', exist_ok=True)
     
     with open(output_jsonl, 'w', encoding='utf-8') as f:
@@ -4352,12 +4352,12 @@ def process_curated_dataset(
     # Statistics
     print()
     print("=" * 60)
-    print("✅ Processing Complete!")
+    print("Processing Complete!")
     print("=" * 60)
-    print(f"📊 Total documents: {total_docs}")
-    print(f"✅ Successfully processed: {len(processed_docs)}")
-    print(f"❌ Failed: {errors}")
-    print(f"📁 Output file: {output_jsonl}")
+    print(f"Total documents: {total_docs}")
+    print(f"Successfully processed: {len(processed_docs)}")
+    print(f"Failed: {errors}")
+    print(f"Output file: {output_jsonl}")
     
     # Calculate statistics
     if processed_docs:
@@ -4373,7 +4373,7 @@ def process_curated_dataset(
         medical_terms_count = sum(len(doc.get('medical_terms_detected', [])) for doc in processed_docs)
         avg_medical_terms = medical_terms_count / len(processed_docs) if processed_docs else 0
         
-        print(f"\n📊 Statistics:")
+        print(f"\nStatistics:")
         print(f"   Average tokens per document: {avg_tokens:.0f}")
         print(f"   Average medical terms per document: {avg_medical_terms:.1f}")
         print(f"   Sections detected:")
@@ -4382,7 +4382,7 @@ def process_curated_dataset(
         
         # File size
         file_size_mb = os.path.getsize(output_jsonl) / (1024 * 1024)
-        print(f"\n💾 Output file size: {file_size_mb:.2f} MB")
+        print(f"\nOutput file size: {file_size_mb:.2f} MB")
 
 
 # Tokenizer Training Constants
@@ -4407,7 +4407,7 @@ def extract_texts_from_jsonl(input_jsonl: str, output_txt: str):
         input_jsonl: Input JSONL file with processed papers
         output_txt: Output text file path
     """
-    print(f"📚 Extracting texts from {input_jsonl}...")
+    print(f"Extracting texts from {input_jsonl}...")
     
     total_papers = 0
     total_chars = 0
@@ -4479,13 +4479,13 @@ def extract_texts_from_jsonl(input_jsonl: str, output_txt: str):
                     print(f"   Processed {line_num} records, {total_papers} papers with text...")
             
             except json.JSONDecodeError:
-                print(f"⚠️  Warning: Invalid JSON on line {line_num}")
+                print(f"Warning: Invalid JSON on line {line_num}")
                 continue
     
     file_size_mb = os.path.getsize(output_txt) / (1024 * 1024)
-    print(f"✅ Extracted {total_papers} papers, {total_chars:,} characters")
-    print(f"💾 Output file size: {file_size_mb:.2f} MB")
-    print(f"📁 Output file: {output_txt}")
+    print(f"Extracted {total_papers} papers, {total_chars:,} characters")
+    print(f"Output file size: {file_size_mb:.2f} MB")
+    print(f"Output file: {output_txt}")
     
     return total_papers, total_chars
 
@@ -4511,7 +4511,7 @@ def train_tokenizer(
         normalization: Normalization rule name ('identity' = no normalization)
     """
     if not SENTENCEPIECE_AVAILABLE:
-        print("❌ Error: sentencepiece package not available.")
+        print("Error: sentencepiece package not available.")
         print("   Install with: pip install sentencepiece")
         return None
     
@@ -4521,10 +4521,10 @@ def train_tokenizer(
     print("=" * 60)
     print("🔤 Training SentencePiece BPE Tokenizer")
     print("=" * 60)
-    print(f"📁 Input file: {input_txt}")
-    print(f"📊 Vocabulary size: {vocab_size}")
-    print(f"🔧 Model type: {model_type}")
-    print(f"📈 Character coverage: {char_coverage}")
+    print(f"Input file: {input_txt}")
+    print(f"Vocabulary size: {vocab_size}")
+    print(f"Model type: {model_type}")
+    print(f"Character coverage: {char_coverage}")
     print(f"🔤 Special tokens: {special_tokens}")
     print(f"📝 Normalization: {normalization}")
     print()
@@ -4551,18 +4551,18 @@ def train_tokenizer(
     if special_tokens:
         train_args['user_defined_symbols'] = ','.join(special_tokens)
     
-    print("🚀 Starting tokenizer training...")
+    print("Starting tokenizer training...")
     print("   This may take several minutes for large datasets...")
     print()
     
     try:
         spm.SentencePieceTrainer.train(**train_args)
-        print("✅ Tokenizer training complete!")
-        print(f"📁 Model file: {model_prefix}.model")
-        print(f"📁 Vocab file: {model_prefix}.vocab")
+        print("Tokenizer training complete!")
+        print(f"Model file: {model_prefix}.model")
+        print(f"Vocab file: {model_prefix}.vocab")
         return model_prefix
     except Exception as e:
-        print(f"❌ Error training tokenizer: {e}")
+        print(f"Error training tokenizer: {e}")
         return None
 
 
@@ -4580,27 +4580,27 @@ def validate_tokenizer(
         Dictionary with validation results
     """
     if not SENTENCEPIECE_AVAILABLE:
-        print("❌ Error: sentencepiece package not available.")
+        print("Error: sentencepiece package not available.")
         return {}
     
     if medical_terms is None:
         medical_terms = MEDICAL_TERMS
     
     print("=" * 60)
-    print("🔍 Tokenizer Validation")
+    print("Tokenizer Validation")
     print("=" * 60)
     
     # Load tokenizer
     try:
         sp = spm.SentencePieceProcessor()
         sp.load(model_path)
-        print(f"✅ Loaded tokenizer from {model_path}")
+        print(f"Loaded tokenizer from {model_path}")
     except Exception as e:
-        print(f"❌ Error loading tokenizer: {e}")
+        print(f"Error loading tokenizer: {e}")
         return {}
     
     # Validate medical terms
-    print(f"\n📊 Validating {len(medical_terms)} medical terms...")
+    print(f"\nValidating {len(medical_terms)} medical terms...")
     single_token_count = 0
     multi_token_count = 0
     term_results = {}
@@ -4626,8 +4626,8 @@ def validate_tokenizer(
     
     efficiency = (single_token_count / len(medical_terms)) * 100 if medical_terms else 0
     
-    print(f"✅ Single-token coverage: {single_token_count}/{len(medical_terms)} ({efficiency:.1f}%)")
-    print(f"⚠️  Multi-token terms: {multi_token_count}/{len(medical_terms)}")
+    print(f"Single-token coverage: {single_token_count}/{len(medical_terms)} ({efficiency:.1f}%)")
+    print(f"Multi-token terms: {multi_token_count}/{len(medical_terms)}")
     
     # Generate sample tokenizations
     print(f"\n📝 Sample tokenizations (100 examples):")
@@ -4710,7 +4710,7 @@ def save_validation_report(report: Dict, output_file: str):
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(report_json, f, indent=2, ensure_ascii=False)
     
-    print(f"\n📄 Validation report saved to: {output_file}")
+    print(f"\nValidation report saved to: {output_file}")
 
 
 def train_healthcare_tokenizer(
@@ -4741,7 +4741,7 @@ def train_healthcare_tokenizer(
     print()
     
     if total_papers == 0:
-        error_msg = f"❌ No papers found in input file: {input_jsonl}"
+        error_msg = f"No papers found in input file: {input_jsonl}"
         print(error_msg)
         raise ValueError(error_msg)
     
@@ -4760,7 +4760,7 @@ def train_healthcare_tokenizer(
     print()
     
     if not trained_model:
-        error_msg = "❌ Tokenizer training failed!"
+        error_msg = "Tokenizer training failed!"
         print(error_msg)
         raise RuntimeError(error_msg)
     
@@ -4778,20 +4778,20 @@ def train_healthcare_tokenizer(
         
         # Print summary
         print("=" * 60)
-        print("✅ Tokenizer Training Complete!")
+        print("Tokenizer Training Complete!")
         print("=" * 60)
-        print(f"📁 Model file: {model_file}")
-        print(f"📁 Vocab file: {model_path}.vocab")
-        print(f"📄 Validation report: {report_file}")
-        print(f"📊 Vocabulary size: {validation_report.get('vocab_size', vocab_size)}")
-        print(f"📊 Medical term efficiency: {validation_report.get('efficiency_percent', 0):.1f}%")
+        print(f"Model file: {model_file}")
+        print(f"Vocab file: {model_path}.vocab")
+        print(f"Validation report: {report_file}")
+        print(f"Vocabulary size: {validation_report.get('vocab_size', vocab_size)}")
+        print(f"Medical term efficiency: {validation_report.get('efficiency_percent', 0):.1f}%")
         print()
         
         # Print term results
-        print("📊 Medical term tokenization results:")
+        print("Medical term tokenization results:")
         term_results = validation_report.get('term_results', {})
         for term, result in sorted(term_results.items()):
-            status = "✓" if result['is_single'] else "✗"
+            status = "OK" if result['is_single'] else "FAIL"
             print(f"   {status} {term}: {result['num_tokens']} token(s) - {result['tokens']}")
     
     # Cleanup temp file (optional - comment out if you want to keep it)
@@ -4810,7 +4810,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
         True if successful, False otherwise
     """
     print("=" * 80)
-    print("🚀 Healthcare MoE Data Pipeline - Full Orchestration")
+    print("Healthcare MoE Data Pipeline - Full Orchestration")
     print("=" * 80)
     print()
     
@@ -4823,11 +4823,11 @@ def run_full_pipeline(config_path: str = "config.yaml"):
     resume = pipeline_config.get('resume', True)
     
     # Run diagnostics
-    print("🔍 Running diagnostics...")
+    print("Running diagnostics...")
     arxiv_ok = print_diagnostics(config)
     
     if not arxiv_ok:
-        print("\n⚠️  ArXiv connection check failed. Continuing anyway...")
+        print("\nArXiv connection check failed. Continuing anyway...")
         print("   If collection fails, you can use local test data or retry later")
     
     # Pipeline stages
@@ -4847,7 +4847,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
         if 'collect' not in skip_stages:
             stage_name = 'collect'
             print("\n" + "=" * 80)
-            print(f"📦 Stage 1: {stages[stage_name]}")
+            print(f"Stage 1: {stages[stage_name]}")
             print("=" * 80)
             
             stage_start = time.time()
@@ -4869,7 +4869,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                 if os.path.exists(cache_file):
                     count = sum(1 for line in open(cache_file) if line.strip())
                     if count == 0:
-                        print("⚠️  Warning: 0 papers collected")
+                        print("Warning: 0 papers collected")
                         print("   This might be due to:")
                         print("   - ArXiv API rate limiting")
                         print("   - Network issues")
@@ -4878,12 +4878,12 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                         stage_results[stage_name] = {'success': False, 'papers': 0}
                     else:
                         stage_results[stage_name] = {'success': True, 'papers': count}
-                        print(f"✅ Collected {count} papers")
+                        print(f"Collected {count} papers")
                 else:
                     stage_results[stage_name] = {'success': False, 'papers': 0}
                     
             except Exception as e:
-                print(f"❌ Stage 1 failed: {e}")
+                print(f"Stage 1 failed: {e}")
                 import traceback
                 print(traceback.format_exc())
                 stage_results[stage_name] = {'success': False, 'error': str(e)}
@@ -4891,16 +4891,16 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                     raise
             
             stage_elapsed = time.time() - stage_start
-            print(f"⏱️  Stage 1 completed in {stage_elapsed:.1f}s")
+            print(f"Stage 1 completed in {stage_elapsed:.1f}s")
         else:
-            print(f"\n⏭️  Skipping stage: {stages['collect']}")
+            print(f"\nSkipping stage: {stages['collect']}")
             stage_results['collect'] = {'success': True, 'skipped': True}
         
         # Stage 2: Extract PDFs
         if 'extract' not in skip_stages:
             stage_name = 'extract'
             print("\n" + "=" * 80)
-            print(f"📦 Stage 2: {stages[stage_name]}")
+            print(f"Stage 2: {stages[stage_name]}")
             print("=" * 80)
             
             stage_start = time.time()
@@ -4909,7 +4909,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
             cache_file = os.path.join(output_dir, "arxiv_papers.jsonl")
             
             if not os.path.exists(cache_file):
-                print(f"⚠️  Metadata file not found: {cache_file}")
+                print(f"Metadata file not found: {cache_file}")
                 print("   Skipping extraction stage")
                 stage_results[stage_name] = {'success': False, 'error': 'No metadata file'}
             else:
@@ -4924,10 +4924,10 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                     # Count extracted files
                     text_files = [f for f in os.listdir(text_dir) if f.endswith('.txt')] if os.path.exists(text_dir) else []
                     stage_results[stage_name] = {'success': True, 'files': len(text_files)}
-                    print(f"✅ Extracted {len(text_files)} text files")
+                    print(f"Extracted {len(text_files)} text files")
                     
                 except Exception as e:
-                    print(f"❌ Stage 2 failed: {e}")
+                    print(f"Stage 2 failed: {e}")
                     import traceback
                     print(traceback.format_exc())
                     stage_results[stage_name] = {'success': False, 'error': str(e)}
@@ -4935,9 +4935,9 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                         raise
             
             stage_elapsed = time.time() - stage_start
-            print(f"⏱️  Stage 2 completed in {stage_elapsed:.1f}s")
+            print(f"Stage 2 completed in {stage_elapsed:.1f}s")
         else:
-            print(f"\n⏭️  Skipping stage: {stages['extract']}")
+            print(f"\nSkipping stage: {stages['extract']}")
             stage_results['extract'] = {'success': True, 'skipped': True}
         
         # Stage 3: NeMo Curator curation (optional)
@@ -4948,7 +4948,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
             if use_nemo:
                 stage_name = 'curate'
                 print("\n" + "=" * 80)
-                print(f"📦 Stage 3: {stages[stage_name]}")
+                print(f"Stage 3: {stages[stage_name]}")
                 print("=" * 80)
                 
                 stage_start = time.time()
@@ -4957,7 +4957,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                 curated_file = os.path.join(output_dir, "curated_dataset.jsonl")
                 
                 if not os.path.exists(text_dir) or not os.listdir(text_dir):
-                    print(f"⚠️  Text directory empty or missing: {text_dir}")
+                    print(f"Text directory empty or missing: {text_dir}")
                     print("   Skipping curation stage")
                     stage_results[stage_name] = {'success': False, 'error': 'No text files'}
                 else:
@@ -4974,12 +4974,12 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                         if os.path.exists(curated_file):
                             count = sum(1 for _ in open(curated_file))
                             stage_results[stage_name] = {'success': True, 'papers': count}
-                            print(f"✅ Curated {count} papers")
+                            print(f"Curated {count} papers")
                         else:
                             stage_results[stage_name] = {'success': False, 'error': 'Output file not created'}
                             
                     except Exception as e:
-                        print(f"❌ Stage 3 failed: {e}")
+                        print(f"Stage 3 failed: {e}")
                         import traceback
                         print(traceback.format_exc())
                         stage_results[stage_name] = {'success': False, 'error': str(e)}
@@ -4987,19 +4987,19 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                             raise
                 
                 stage_elapsed = time.time() - stage_start
-                print(f"⏱️  Stage 3 completed in {stage_elapsed:.1f}s")
+                print(f"Stage 3 completed in {stage_elapsed:.1f}s")
             else:
-                print(f"\n⏭️  Skipping NeMo Curator curation (not available or disabled)")
+                print(f"\nSkipping NeMo Curator curation (not available or disabled)")
                 stage_results['curate'] = {'success': True, 'skipped': True}
         else:
-            print(f"\n⏭️  Skipping stage: {stages['curate']}")
+            print(f"\nSkipping stage: {stages['curate']}")
             stage_results['curate'] = {'success': True, 'skipped': True}
         
         # Stage 4: Preprocess and classify
         if 'preprocess' not in skip_stages:
             stage_name = 'preprocess'
             print("\n" + "=" * 80)
-            print(f"📦 Stage 4: {stages[stage_name]}")
+            print(f"Stage 4: {stages[stage_name]}")
             print("=" * 80)
             
             stage_start = time.time()
@@ -5018,7 +5018,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                 input_file = cache_file
                 print(f"   Using raw metadata: {cache_file}")
             else:
-                print(f"⚠️  No input file found")
+                print(f"No input file found")
                 stage_results[stage_name] = {'success': False, 'error': 'No input file'}
                 input_file = None
             
@@ -5043,12 +5043,12 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                     if os.path.exists(processed_file):
                         count = sum(1 for _ in open(processed_file))
                         stage_results[stage_name] = {'success': True, 'papers': count}
-                        print(f"✅ Processed {count} papers")
+                        print(f"Processed {count} papers")
                     else:
                         stage_results[stage_name] = {'success': False, 'error': 'Output file not created'}
                         
                 except Exception as e:
-                    print(f"❌ Stage 4 failed: {e}")
+                    print(f"Stage 4 failed: {e}")
                     import traceback
                     print(traceback.format_exc())
                     stage_results[stage_name] = {'success': False, 'error': str(e)}
@@ -5056,16 +5056,16 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                         raise
             
             stage_elapsed = time.time() - stage_start
-            print(f"⏱️  Stage 4 completed in {stage_elapsed:.1f}s")
+            print(f"Stage 4 completed in {stage_elapsed:.1f}s")
         else:
-            print(f"\n⏭️  Skipping stage: {stages['preprocess']}")
+            print(f"\nSkipping stage: {stages['preprocess']}")
             stage_results['preprocess'] = {'success': True, 'skipped': True}
         
         # Stage 5: Train tokenizer
         if 'tokenize' not in skip_stages:
             stage_name = 'tokenize'
             print("\n" + "=" * 80)
-            print(f"📦 Stage 5: {stages[stage_name]}")
+            print(f"Stage 5: {stages[stage_name]}")
             print("=" * 80)
             
             stage_start = time.time()
@@ -5073,7 +5073,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
             processed_file = os.path.join(output_dir, "processed_dataset.jsonl")
             
             if not os.path.exists(processed_file):
-                print(f"⚠️  Processed dataset not found: {processed_file}")
+                print(f"Processed dataset not found: {processed_file}")
                 stage_results[stage_name] = {'success': False, 'error': 'No processed dataset'}
             else:
                 try:
@@ -5087,12 +5087,12 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                     model_file = os.path.join(output_dir, f"{tokenizer_config.get('model_prefix', 'healthcare_tokenizer')}.model")
                     if os.path.exists(model_file):
                         stage_results[stage_name] = {'success': True}
-                        print(f"✅ Tokenizer trained: {model_file}")
+                        print(f"Tokenizer trained: {model_file}")
                     else:
                         stage_results[stage_name] = {'success': False, 'error': 'Model file not created'}
                         
                 except Exception as e:
-                    print(f"❌ Stage 5 failed: {e}")
+                    print(f"Stage 5 failed: {e}")
                     import traceback
                     print(traceback.format_exc())
                     stage_results[stage_name] = {'success': False, 'error': str(e)}
@@ -5100,9 +5100,9 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                         raise
             
             stage_elapsed = time.time() - stage_start
-            print(f"⏱️  Stage 5 completed in {stage_elapsed:.1f}s")
+            print(f"Stage 5 completed in {stage_elapsed:.1f}s")
         else:
-            print(f"\n⏭️  Skipping stage: {stages['tokenize']}")
+            print(f"\nSkipping stage: {stages['tokenize']}")
             stage_results['tokenize'] = {'success': True, 'skipped': True}
         
         # Generate final report
@@ -5110,12 +5110,12 @@ def run_full_pipeline(config_path: str = "config.yaml"):
         generate_final_report(stage_results, output_dir, total_elapsed)
         
         print("\n" + "=" * 80)
-        print("✅ Pipeline Complete!")
+        print("Pipeline Complete!")
         print("=" * 80)
         return True
         
     except Exception as e:
-        print(f"\n❌ Pipeline failed: {e}")
+        print(f"\nPipeline failed: {e}")
         import traceback
         print(traceback.format_exc())
         generate_final_report(stage_results, output_dir, time.time() - start_time, error=str(e))
@@ -5215,7 +5215,7 @@ def generate_final_report(stage_results: Dict, output_dir: str, total_elapsed: f
             f.write("Stage Results:\n")
             f.write("-" * 80 + "\n")
             for stage, result in stage_results.items():
-                status = "✅ Success" if result.get('success') else "❌ Failed"
+                status = "Success" if result.get('success') else "Failed"
                 f.write(f"{stage}: {status}\n")
                 if 'papers' in result:
                     f.write(f"  Papers: {result['papers']}\n")
@@ -5249,12 +5249,12 @@ def generate_final_report(stage_results: Dict, output_dir: str, total_elapsed: f
                 for name, size_mb in stats['file_sizes'].items():
                     f.write(f"  {name}: {size_mb:.2f} MB\n")
         
-        print(f"\n📊 Final report saved:")
+        print(f"\nFinal report saved:")
         print(f"   JSON: {report_file}")
         print(f"   Text: {report_text_file}")
         
     except Exception as e:
-        print(f"⚠️  Could not save report: {e}")
+        print(f"Could not save report: {e}")
 
 
 def main():

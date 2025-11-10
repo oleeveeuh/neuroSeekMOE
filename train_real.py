@@ -29,14 +29,14 @@ try:
     PYTORCH_AVAILABLE = True
 except ImportError:
     PYTORCH_AVAILABLE = False
-    print("⚠️  PyTorch not available. Please install with: pip install torch")
+    print("PyTorch not available. Please install with: pip install torch")
 
 try:
     import deepspeed
     DEEPSPEED_AVAILABLE = True
 except ImportError:
     DEEPSPEED_AVAILABLE = False
-    print("⚠️  DeepSpeed not available. Install with: pip install deepspeed")
+    print("DeepSpeed not available. Install with: pip install deepspeed")
 
 from model_architecture import Disease
 
@@ -453,7 +453,7 @@ class NeurodegenerativeDataset(Dataset):
                 text = record.get("text", "")
                 if text:
                     self.vocab.tokenize(text)
-            print(f"   ✅ Vocabulary built: {len(self.vocab.id_to_word)} token-to-word mappings")
+            print(f"   Vocabulary built: {len(self.vocab.id_to_word)} token-to-word mappings")
         
     def __len__(self) -> int:
         return len(self.text_data)
@@ -983,7 +983,7 @@ class SimpleMoEModel(nn.Module):
                 self.tokens_per_expert_target = tokens_per_expert_target
                 
                 # Logging
-                print(f"🔧 Expert Choice Routing Auto-Sizing:")
+                print(f"Expert Choice Routing Auto-Sizing:")
                 print(f"   Estimated tokens per batch: {estimated_tokens_per_batch}")
                 print(f"   Target tokens per expert: {tokens_per_expert_target}")
                 print(f"   Calculated routed experts: {num_routed_experts}")
@@ -1010,7 +1010,7 @@ class SimpleMoEModel(nn.Module):
                 self.expert_sizing_method = "token_choice"
                 self.estimated_tokens_per_batch = None
                 
-                print(f"🔧 Token-Choice Routing: Using {num_routed_experts} routed experts")
+                print(f"Token-Choice Routing: Using {num_routed_experts} routed experts")
         else:
             # User explicitly set num_routed_experts - respect that
             # Determine method based on top_k parameter (already set above)
@@ -1052,7 +1052,7 @@ class SimpleMoEModel(nn.Module):
             
             # If the provided top_k is too small, increase it
             if top_k < recommended_top_k:
-                print(f"⚠️  Adjusting top_k for Expert Choice routing:")
+                print(f"Adjusting top_k for Expert Choice routing:")
                 print(f"   Original top_k: {top_k}")
                 print(f"   Recommended top_k: {recommended_top_k}")
                 print(f"   With {num_routed_experts} experts × {recommended_top_k} tokens = {num_routed_experts * recommended_top_k} tokens routed")
@@ -1062,7 +1062,7 @@ class SimpleMoEModel(nn.Module):
             else:
                 # Log current coverage for visibility
                 current_coverage = (num_routed_experts * top_k) / estimated_tokens_per_batch * 100
-                print(f"✅ top_k ({top_k}) is sufficient for {num_routed_experts} experts")
+                print(f"top_k ({top_k}) is sufficient for {num_routed_experts} experts")
                 print(f"   Coverage: {current_coverage:.1f}%")
         
         # Validate top_k parameter (controls how many tokens each expert selects)
@@ -1070,7 +1070,7 @@ class SimpleMoEModel(nn.Module):
             raise ValueError(f"top_k must be >= 1, got {top_k}")
         # Auto-adjust top_k if it exceeds num_routed_experts (for small expert counts)
         if top_k > num_routed_experts:
-            print(f"⚠️  Warning: top_k ({top_k}) exceeds num_routed_experts ({num_routed_experts}). Adjusting top_k to {num_routed_experts}")
+            print(f"Warning: top_k ({top_k}) exceeds num_routed_experts ({num_routed_experts}). Adjusting top_k to {num_routed_experts}")
             top_k = num_routed_experts
         self.top_k = top_k
         self.noise_scale = noise_scale  # Scale of noise added to router logits during training (DeepSeek-MoE default: 0.5)
@@ -1083,7 +1083,7 @@ class SimpleMoEModel(nn.Module):
         self.vocab_size = vocab_size  # Store vocab_size for validation
         
         # Print DeepSeek-MoE configuration
-        print(f"🔧 DeepSeek-MoE Config: {self.num_shared_experts} shared, {self.num_routed_experts} routed, top_k={self.top_k}, noise_scale={self.noise_scale}, load_balance_weight={self.load_balance_loss_weight}")
+        print(f"DeepSeek-MoE Config: {self.num_shared_experts} shared, {self.num_routed_experts} routed, top_k={self.top_k}, noise_scale={self.noise_scale}, load_balance_weight={self.load_balance_loss_weight}")
         
         # Embedding layer
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
@@ -1207,7 +1207,7 @@ class SimpleMoEModel(nn.Module):
         
         else:
             # Invalid schedule: default to constant
-            print(f"⚠️  Invalid temperature_schedule '{self.temperature_schedule}', using 'constant'")
+            print(f"Invalid temperature_schedule '{self.temperature_schedule}', using 'constant'")
             self.gate_temperature = self.temperature_start
         
         # Ensure temperature doesn't go below a minimum (avoid division by zero or negative)
@@ -1544,7 +1544,7 @@ class SimpleMoEModel(nn.Module):
         # Only print once to reduce noise
         if len(output.shape) != 2:
             if not hasattr(self, '_debug_shape_warned') or not self._debug_shape_warned:
-                print(f"⚠️  Model decoder output shape is unexpected: {output.shape}")
+                print(f"Model decoder output shape is unexpected: {output.shape}")
                 print(f"   fused_output shape: {fused_output.shape}")
                 print(f"   text_sequence shape: {text_sequence.shape}")
                 print(f"   text_tokens shape: {text_tokens.shape}")
@@ -1625,7 +1625,7 @@ class SimpleMoEModel(nn.Module):
                     return output, (gate_logits_for_return, load_bal_loss, z_loss_val, cap_loss_tensor, aux_loss, routing_metrics)
                     
                 except Exception as e:
-                    print(f"⚠️  Error computing auxiliary losses: {e}")
+                    print(f"Error computing auxiliary losses: {e}")
                     import traceback
                     traceback.print_exc()
                     # Return output without losses on error
@@ -1780,36 +1780,36 @@ def log_training_report(epoch, num_epochs, train_loss, test_loss, model, routing
     
     report = f"""
 ============================================================
-📚 Epoch {epoch+1}/{num_epochs}
+Epoch {epoch+1}/{num_epochs}
 ============================================================
 
-✅ Losses:
+Losses:
    Train Loss: {train_loss:.4f}
    Test Loss:  {test_loss:.4f}
 
-🔍 DeepSeek-MoE Diagnostics:
+DeepSeek-MoE Diagnostics:
    Shared Expert Utilization: {shared_util:.2%}
    Routed Expert Utilization: {routed_util:.2%}
    Per-Expert Tokens: {expert_counts_str}
    
-   ✅ Load Balance Loss: {avg_load_bal_loss:.6f}
-   ✅ Z-Loss: {avg_z_loss:.6f}
-   ✅ Capacity Loss: {avg_cap_loss:.6f}
+   Load Balance Loss: {avg_load_bal_loss:.6f}
+   Z-Loss: {avg_z_loss:.6f}
+   Capacity Loss: {avg_cap_loss:.6f}
    
    Router Entropy: {router_entropy:.4f} (target: 0.3-1.0)
    Load Imbalance: {load_imbalance:.4f} (target: <0.3)
    Top Expert Fraction: {top_expert_fraction:.2%} (target: 40-60%)
 
-🌡️  Training Dynamics:
+Training Dynamics:
    Current Temperature: {model.gate_temperature:.4f}
    Gating Noise Scale: {model.noise_scale:.4f}
    Expert Diversity: {expert_diversity if isinstance(expert_diversity, str) else f'{expert_diversity:.4f}'}
 
-⚠️  Health Checks:
-   All routed experts active: {'✓' if all_experts_active else '✗'} ({num_active_experts}/{model.num_routed_experts})
-   Load balanced: {'✓' if load_balanced else '✗'} (imbalance: {load_imbalance:.4f})
-   No expert collapse: {'✓' if no_collapse else '✗'} (top expert: {top_expert_fraction:.2%})
-   Entropy healthy: {'✓' if entropy_healthy else '✗'} (entropy: {router_entropy:.4f})
+Health Checks:
+   All routed experts active: {'OK' if all_experts_active else 'FAIL'} ({num_active_experts}/{model.num_routed_experts})
+   Load balanced: {'OK' if load_balanced else 'FAIL'} (imbalance: {load_imbalance:.4f})
+   No expert collapse: {'OK' if no_collapse else 'FAIL'} (top expert: {top_expert_fraction:.2%})
+   Entropy healthy: {'OK' if entropy_healthy else 'FAIL'} (entropy: {router_entropy:.4f})
 """
     
     print(report)
@@ -1819,7 +1819,7 @@ def log_training_report(epoch, num_epochs, train_loss, test_loss, model, routing
         with open(report_file, 'a') as f:
             f.write(report + '\n')
     except Exception as e:
-        print(f"   ⚠️  Warning: Could not write to report file {report_file}: {e}")
+        print(f"   Warning: Could not write to report file {report_file}: {e}")
 
 
 def train_real_model(
@@ -1852,7 +1852,7 @@ def train_real_model(
     """
     
     if not PYTORCH_AVAILABLE:
-        print("❌ PyTorch is required for real training. Install with: pip install torch")
+        print("PyTorch is required for real training. Install with: pip install torch")
         return {}
     
     # Device selection
@@ -1860,10 +1860,10 @@ def train_real_model(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     
     if comparison_mode:
-        print(f"🔄 Training configuration (comparison mode)")
+        print(f"Training configuration (comparison mode)")
     else:
-        print(f"🚀 Starting REAL NeuroSeek-MoE training")
-    print(f"📊 Configuration:")
+        print(f"Starting REAL NeuroSeek-MoE training")
+    print(f"Configuration:")
     print(f"   Device: {device}")
     print(f"   Epochs: {epochs}")
     print(f"   Batch size: {batch_size}")
@@ -1882,31 +1882,31 @@ def train_real_model(
     vocab = Vocabulary(vocab_size=10007)
     if os.path.exists(vocab_path) and resume_from_epoch is not None:
         # Load existing vocabulary when resuming
-        print(f"📖 Loading vocabulary from {vocab_path}")
+        print(f"Loading vocabulary from {vocab_path}")
         vocab.load(vocab_path)
         print(f"   Loaded {len(vocab.id_to_word)} token-to-word mappings")
     else:
-        print(f"📖 Building vocabulary from dataset...")
+        print(f"Building vocabulary from dataset...")
     
     # Load data
     if multimodal_jsonl:
-        print(f"\n📁 Loading multimodal dataset from {multimodal_jsonl}")
+        print(f"\nLoading multimodal dataset from {multimodal_jsonl}")
         multimodal_ds = load_jsonl(multimodal_jsonl)
         if not multimodal_ds:
-            print("⚠️  Dataset is empty")
+            print("Dataset is empty")
             return
         
         text_ds = [item for item in multimodal_ds if item.get('modality') == 'text']
         image_ds = [item for item in multimodal_ds if item.get('modality') == 'image']
-        print(f"✅ Loaded {len(text_ds)} text records and {len(image_ds)} image records")
+        print(f"Loaded {len(text_ds)} text records and {len(image_ds)} image records")
     else:
-        print(f"\n📁 Loading separate datasets")
+        print(f"\nLoading separate datasets")
         if not text_jsonl or not image_jsonl:
-            print("❌ ERROR: Must provide either multimodal_jsonl or both text_jsonl and image_jsonl")
+            print("ERROR: Must provide either multimodal_jsonl or both text_jsonl and image_jsonl")
             return
         text_ds = load_jsonl(text_jsonl)
         image_ds = load_jsonl(image_jsonl)
-        print(f"✅ Loaded {len(text_ds)} text records and {len(image_ds)} image records")
+        print(f"Loaded {len(text_ds)} text records and {len(image_ds)} image records")
     
     # Create PyTorch dataset (this will build vocabulary if needed)
     dataset = NeurodegenerativeDataset(text_ds, image_ds, device=device, vocab=vocab)
@@ -1914,14 +1914,14 @@ def train_real_model(
     # Save vocabulary after building
     if len(vocab.id_to_word) > 0:
         vocab.save(vocab_path)
-        print(f"📖 Vocabulary saved to {vocab_path}")
+        print(f"Vocabulary saved to {vocab_path}")
     
     # Split dataset into train/test (80/20)
     total_size = len(dataset)
     train_size = int(0.8 * total_size)
     test_size = total_size - train_size
     
-    print(f"\n📊 Dataset Split:")
+    print(f"\nDataset Split:")
     print(f"   Total samples: {total_size}")
     print(f"   Train samples: {train_size} (80%)")
     print(f"   Test samples: {test_size} (20%)")
@@ -1939,7 +1939,7 @@ def train_real_model(
     total_train_steps = len(train_dataloader) * epochs
     
     # Build model
-    print(f"\n🏗️  Building trainable PyTorch MoE model...")
+    print(f"\n  Building trainable PyTorch MoE model...")
     
     # Store dataset size for expert count calculation
     dataset_size = train_size  # Use training set size for expert calculation
@@ -1970,7 +1970,7 @@ def train_real_model(
         # If num_experts is small (≤2), increase routed experts to prevent routing collapse
         # Use Expert Choice routing calculation (based on tokens per batch)
         if num_experts <= 2:
-            print(f"   ⚠️  WARNING: num_experts={num_experts} is too small, risks routing collapse.")
+            print(f"   WARNING: num_experts={num_experts} is too small, risks routing collapse.")
             # Calculate appropriate number of routed experts based on Expert Choice routing
             # For Expert Choice: size based on tokens per batch, not dataset size
             
@@ -1988,7 +1988,7 @@ def train_real_model(
             if num_routed_experts_override > max_routed_experts:
                 num_routed_experts_override = max_routed_experts
             
-            print(f"   🔧 Expert Choice Routing Auto-Sizing:")
+            print(f"   Expert Choice Routing Auto-Sizing:")
             print(f"      Estimated tokens per batch: {estimated_tokens_per_batch} (batch_size={batch_size} × seq_len≈127)")
             print(f"      Target tokens per expert: {tokens_per_expert_target}")
             print(f"      Calculated routed experts: {num_routed_experts_override}")
@@ -2017,25 +2017,25 @@ def train_real_model(
             )
     
     model = model.to(device)
-    print(f"✅ Model created and moved to {device}")
+    print(f"Model created and moved to {device}")
     
     # DIAGNOSTIC 4: Parameter & optimizer state
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"📊 Model Statistics:")
+    print(f"Model Statistics:")
     print(f"   Total parameters: {total_params:,}")
     print(f"   Trainable parameters: {trainable_params:,}")
     
     # Verify requires_grad on all parameters
     params_without_grad = [n for n, p in model.named_parameters() if not p.requires_grad]
     if params_without_grad:
-        print(f"⚠️  WARNING: {len(params_without_grad)} parameters have requires_grad=False:")
+        print(f"WARNING: {len(params_without_grad)} parameters have requires_grad=False:")
         for n in params_without_grad[:5]:  # Show first 5
             print(f"     - {n}")
         if len(params_without_grad) > 5:
             print(f"     ... and {len(params_without_grad) - 5} more")
     else:
-        print(f"✅ All parameters have requires_grad=True")
+        print(f"All parameters have requires_grad=True")
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -2046,13 +2046,13 @@ def train_real_model(
     scheduler = None
     
     if use_deepspeed and DEEPSPEED_AVAILABLE:
-        print(f"\n🚀 Initializing DeepSpeed with config: {deepspeed_config}")
+        print(f"\nInitializing DeepSpeed with config: {deepspeed_config}")
         # Load DeepSpeed config
         if os.path.exists(deepspeed_config):
             with open(deepspeed_config, 'r') as f:
                 ds_config = json.load(f)
         else:
-            print(f"⚠️  DeepSpeed config file not found: {deepspeed_config}")
+            print(f"DeepSpeed config file not found: {deepspeed_config}")
             print("   Using default DeepSpeed config")
             ds_config = {}
         
@@ -2148,7 +2148,7 @@ def train_real_model(
             error_str = str(e).lower()
             if "mpi4py" in error_str or "mpi" in error_str or "init_distributed" in error_str:
                 # If MPI is required but not available, fall back to standard PyTorch
-                print(f"⚠️  DeepSpeed initialization failed (MPI/distributed issue): {e}")
+                print(f"DeepSpeed initialization failed (MPI/distributed issue): {e}")
                 print(f"   Falling back to standard PyTorch optimizer")
                 print(f"   Note: For single GPU training, standard PyTorch is sufficient")
                 use_deepspeed = False
@@ -2159,7 +2159,7 @@ def train_real_model(
                 raise
         
         if model_engine is not None:
-            print(f"✅ DeepSpeed initialized")
+            print(f"DeepSpeed initialized")
             print(f"   Optimizer: {ds_config.get('optimizer', {}).get('type', 'AdamW')}")
             print(f"   Learning rate: {learning_rate}")
             print(f"   Weight decay: {opt_params.get('weight_decay', 'N/A')}")
@@ -2177,11 +2177,11 @@ def train_real_model(
                 'weight_decay': 1e-3  # Increased from 1e-5 to combat overfitting
             }
             optimizer, scheduler = setup_optimizer_and_scheduler(model, scheduler_config)
-            print(f"✅ Using standard PyTorch optimizer with DeepSeek-style LR scheduling (DeepSpeed disabled)")
+            print(f"Using standard PyTorch optimizer with DeepSeek-style LR scheduling (DeepSpeed disabled)")
             print(f"   Total training steps: {total_train_steps}, Warmup steps: {scheduler_config['warmup_steps']}")
     else:
         if use_deepspeed:
-            print(f"⚠️  DeepSpeed requested but not available. Using standard PyTorch optimizer.")
+            print(f"DeepSpeed requested but not available. Using standard PyTorch optimizer.")
         # Standard PyTorch optimizer with DeepSeek-style scheduler
         scheduler_config = {
             'learning_rate': learning_rate,
@@ -2192,7 +2192,7 @@ def train_real_model(
         }
         optimizer, scheduler = setup_optimizer_and_scheduler(model, scheduler_config)
         model_engine = model
-        print(f"✅ Using DeepSeek-style LR scheduling")
+        print(f"Using DeepSeek-style LR scheduling")
         print(f"   Total training steps: {total_train_steps}, Warmup steps: {scheduler_config['warmup_steps']}")
         
         # DIAGNOSTIC 4 (continued): Optimizer state
@@ -2214,7 +2214,7 @@ def train_real_model(
             # DeepSpeed checkpoint loading
             checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{resume_from_epoch}")
             if os.path.exists(checkpoint_path):
-                print(f"\n📂 Loading DeepSpeed checkpoint from epoch {resume_from_epoch}...")
+                print(f"\n Loading DeepSpeed checkpoint from epoch {resume_from_epoch}...")
                 try:
                     _, client_state = model_engine.load_checkpoint(checkpoint_path)
                     if client_state:
@@ -2225,21 +2225,21 @@ def train_real_model(
                             best_test_loss = client_state['best_test_loss']
                         if 'best_test_loss_epoch' in client_state:
                             best_test_loss_epoch = client_state['best_test_loss_epoch']
-                    print(f"✅ DeepSpeed checkpoint loaded successfully!")
+                    print(f"DeepSpeed checkpoint loaded successfully!")
                     print(f"   Resuming from epoch {start_epoch}")
                 except Exception as e:
-                    print(f"⚠️  Failed to load DeepSpeed checkpoint: {e}")
+                    print(f"Failed to load DeepSpeed checkpoint: {e}")
                     print("   Starting training from scratch...")
                     start_epoch = 0
             else:
-                print(f"⚠️  DeepSpeed checkpoint not found: {checkpoint_path}")
+                print(f"DeepSpeed checkpoint not found: {checkpoint_path}")
                 print("   Starting training from scratch...")
                 start_epoch = 0
         else:
             # Standard PyTorch checkpoint loading
             checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{resume_from_epoch}.pt")
             if os.path.exists(checkpoint_path):
-                print(f"\n📂 Loading checkpoint from epoch {resume_from_epoch}...")
+                print(f"\n Loading checkpoint from epoch {resume_from_epoch}...")
                 try:
                     checkpoint = torch.load(checkpoint_path, map_location=device)
                     model.load_state_dict(checkpoint['model_state_dict'])
@@ -2253,7 +2253,7 @@ def train_real_model(
                         best_test_loss = checkpoint['best_test_loss']
                     if 'best_test_loss_epoch' in checkpoint:
                         best_test_loss_epoch = checkpoint['best_test_loss_epoch']
-                    print(f"✅ Checkpoint loaded successfully!")
+                    print(f"Checkpoint loaded successfully!")
                     print(f"   Resuming from epoch {start_epoch}")
                     if loaded_checkpoint_loss is not None:
                         print(f"   Previous loss: {loaded_checkpoint_loss:.4f}")
@@ -2266,11 +2266,11 @@ def train_real_model(
                     sample_param = next(model.parameters())
                     print(f"   Sample param stats: mean={sample_param.data.mean().item():.4f}, std={sample_param.data.std().item():.4f}")
                 except Exception as e:
-                    print(f"⚠️  Failed to load checkpoint: {e}")
+                    print(f"Failed to load checkpoint: {e}")
                     print("   Starting training from scratch...")
                     start_epoch = 0
             else:
-                print(f"⚠️  Checkpoint not found: {checkpoint_path}")
+                print(f"Checkpoint not found: {checkpoint_path}")
                 print("   Starting training from scratch...")
                 start_epoch = 0
     
@@ -2282,7 +2282,7 @@ def train_real_model(
     
     # Check if training is needed
     if start_epoch >= epochs:
-        print(f"\n⚠️  Checkpoint epoch {start_epoch} is >= total epochs {epochs}")
+        print(f"\nCheckpoint epoch {start_epoch} is >= total epochs {epochs}")
         print("   Training already complete at this checkpoint!")
         avg_loss = loaded_checkpoint_loss if loaded_checkpoint_loss is not None else 0.0
         # Try to load metrics from checkpoint
@@ -2307,7 +2307,7 @@ def train_real_model(
                     pass
     else:
         # Training loop
-        print(f"\n🔄 Starting training...")
+        print(f"\nStarting training...")
         
         # Initialize global step counter for temperature scheduling
         global_step = 0
@@ -2317,7 +2317,7 @@ def train_real_model(
         
         for epoch in range(start_epoch, epochs):
             print(f"\n{'='*60}")
-            print(f"📚 Epoch {epoch + 1}/{epochs}" + (f" (resumed from {start_epoch})" if epoch == start_epoch and start_epoch > 0 else ""))
+            print(f"Epoch {epoch + 1}/{epochs}" + (f" (resumed from {start_epoch})" if epoch == start_epoch and start_epoch > 0 else ""))
             print(f"{'='*60}")
             
             model.train()
@@ -2431,7 +2431,7 @@ def train_real_model(
                     input_seq_len = input_tokens.shape[1]  # Original input sequence length
                     # Only print warning once per epoch
                     if batch_idx == 0 and epoch == start_epoch:
-                        print(f"⚠️  Output is 3D {output.shape}, reshaping to 2D. This indicates a bug in the model.")
+                        print(f"Output is 3D {output.shape}, reshaping to 2D. This indicates a bug in the model.")
                         print(f"   input_tokens shape: {input_tokens.shape}, target_tokens shape: {target_tokens.shape}")
                     
                     # Flatten output: [batch, output_seq_len, vocab_size] -> [batch*output_seq_len, vocab_size]
@@ -2459,7 +2459,7 @@ def train_real_model(
                         print(f"   Reshaped: output {output.shape}, target {target.shape}")
                 elif len(output.shape) == 1:
                     # If output is 1D [vocab_size], add batch dimension
-                    print(f"⚠️  Output is 1D, unsqueezing: {output.shape} -> [1, vocab_size]")
+                    print(f"Output is 1D, unsqueezing: {output.shape} -> [1, vocab_size]")
                     output = output.unsqueeze(0)  # [1, vocab_size]
                     target = target_tokens[:, -1:].squeeze(0) if target_tokens.shape[0] == 1 else target_tokens[:, -1]
                 else:
@@ -2613,30 +2613,30 @@ def train_real_model(
                             actual_model = model
                         load_bal_weight = actual_model.load_balance_loss_weight if hasattr(actual_model, 'load_balance_loss_weight') else 0.1
                         noise_scale = actual_model.noise_scale if hasattr(actual_model, 'noise_scale') else 0.5
-                        print(f"   ⚠️  WARNING: Auxiliary loss collapsed (stability={stability:.8f})")
-                        print(f"   ⚠️  This indicates routing collapse - auxiliary loss is no longer varying")
-                        print(f"   💡 Consider adjusting: load_balance_loss_weight, noise_scale, or num_experts")
-                        print(f"   💡 Current values: load_bal_weight={load_bal_weight:.4f}, noise_scale={noise_scale:.4f}")
+                        print(f"   WARNING: Auxiliary loss collapsed (stability={stability:.8f})")
+                        print(f"   This indicates routing collapse - auxiliary loss is no longer varying")
+                        print(f"   Consider adjusting: load_balance_loss_weight, noise_scale, or num_experts")
+                        print(f"   Current values: load_bal_weight={load_bal_weight:.4f}, noise_scale={noise_scale:.4f}")
                         # Note: We don't trigger early stopping here, just warn - let user decide
                 
                 # DIAGNOSTIC: Check load balance loss and expert usage (first batch only)
                 if not diagnostics_run and epoch == start_epoch and batch_idx == 0:
-                    print(f"  🔍 Load Balance & Expert Usage Check:")
+                    print(f"  Load Balance & Expert Usage Check:")
                     print(f"     Load balance loss: {load_bal_loss.item():.6f}")
                     if load_bal_loss.item() == 0.0:
-                        print(f"     ⚠️  WARNING: Load balance loss is zero! This may indicate routing issues.")
+                        print(f"     WARNING: Load balance loss is zero! This may indicate routing issues.")
                     else:
-                        print(f"     ✅ Load balance loss is non-zero (good)")
+                        print(f"     Load balance loss is non-zero (good)")
                     
                     # Check active experts
                     num_active_experts = (expert_usage > 0).sum().item()
                     print(f"     Active experts: {num_active_experts}/{model.num_experts} (routed: {model.num_routed_experts})")
                     if num_active_experts == 1:
-                        print(f"     ⚠️  WARNING: Only 1 expert is active! This suggests expert collapse.")
+                        print(f"     WARNING: Only 1 expert is active! This suggests expert collapse.")
                     elif num_active_experts < model.num_routed_experts:
-                        print(f"     ⚠️  WARNING: Only {num_active_experts} of {model.num_routed_experts} routed experts are active.")
+                        print(f"     WARNING: Only {num_active_experts} of {model.num_routed_experts} routed experts are active.")
                     else:
-                        print(f"     ✅ All routed experts are being used")
+                        print(f"     All routed experts are being used")
                     
                     # Check per-expert token counts (if available from routing_metrics)
                     if routing_metrics and 'expert_utilization' in routing_metrics:
@@ -2653,9 +2653,9 @@ def train_real_model(
                                 util_cv = util_std / util_mean  # Coefficient of variation
                                 print(f"     Utilization CV: {util_cv:.4f} (lower = more balanced)")
                                 if util_cv > 0.5:
-                                    print(f"     ⚠️  WARNING: High variation in expert utilization (CV={util_cv:.4f})")
+                                    print(f"     WARNING: High variation in expert utilization (CV={util_cv:.4f})")
                                 else:
-                                    print(f"     ✅ Expert utilization is reasonably balanced")
+                                    print(f"     Expert utilization is reasonably balanced")
                     
                     # Check temperature
                     current_temp = model_engine.gate_temperature if hasattr(model_engine, 'gate_temperature') else (model.gate_temperature if hasattr(model, 'gate_temperature') else 1.0)
@@ -2663,19 +2663,19 @@ def train_real_model(
                     if hasattr(model, 'temperature_schedule'):
                         print(f"     Temperature schedule: {model.temperature_schedule}")
                         if model.temperature_schedule == 'constant':
-                            print(f"     ⚠️  NOTE: Temperature is constant - consider using 'linear' or 'cosine' schedule")
+                            print(f"     NOTE: Temperature is constant - consider using 'linear' or 'cosine' schedule")
                     
                     # Check noise scale
                     noise_scale = model_engine.noise_scale if hasattr(model_engine, 'noise_scale') else (model.noise_scale if hasattr(model, 'noise_scale') else 0.01)
                     print(f"     Noise scale: {noise_scale:.4f}")
                     if noise_scale < 0.1:
-                        print(f"     ⚠️  NOTE: Noise scale is low ({noise_scale:.4f}). Consider increasing to 0.5-1.0 for better exploration.")
+                        print(f"     NOTE: Noise scale is low ({noise_scale:.4f}). Consider increasing to 0.5-1.0 for better exploration.")
                     
                     # Check top_k
                     top_k = model_engine.top_k if hasattr(model_engine, 'top_k') else (model.top_k if hasattr(model, 'top_k') else 2)
                     print(f"     Top-k: {top_k} (num_routed_experts: {model.num_routed_experts})")
                     if top_k >= model.num_routed_experts:
-                        print(f"     ⚠️  NOTE: top_k ({top_k}) >= num_routed_experts ({model.num_routed_experts}). Consider reducing top_k to force specialization.")
+                        print(f"     NOTE: top_k ({top_k}) >= num_routed_experts ({model.num_routed_experts}). Consider reducing top_k to force specialization.")
                 
                 # Track capacity metrics if available
                 if hasattr(model_engine, '_capacity_metrics'):
@@ -2690,7 +2690,7 @@ def train_real_model(
                 
                 # Check for NaN loss before backward pass
                 if torch.isnan(loss) or torch.isnan(main_loss) or torch.isnan(aux_loss):
-                    print(f"⚠️  NaN loss detected — skipping batch")
+                    print(f"NaN loss detected — skipping batch")
                     print(f"     Main loss: {main_loss.item() if not torch.isnan(main_loss) else 'NaN'}")
                     print(f"     Aux loss: {aux_loss.item() if not torch.isnan(aux_loss) else 'NaN'}")
                     print(f"     Total loss: {loss.item() if not torch.isnan(loss) else 'NaN'}")
@@ -2698,7 +2698,7 @@ def train_real_model(
                 
                 # Debug first batch after resuming to check loss
                 if batch_idx == 0 and epoch == start_epoch and start_epoch > 0:
-                    print(f"  🔍 Debug - First batch after resume:")
+                    print(f"  Debug - First batch after resume:")
                     print(f"     Output shape: {output.shape}, Target shape: {target.shape}")
                     print(f"     Mask sum: {mask.sum().item()}/{len(target)}")
                     print(f"     Output range: [{output.min().item():.2f}, {output.max().item():.2f}]")
@@ -2734,14 +2734,14 @@ def train_real_model(
                     
                     # DIAGNOSTIC: Check loss before backward
                     if not diagnostics_run and epoch == start_epoch:
-                        print(f"\n  🔍 DIAGNOSTIC: Pre-Backward Check")
+                        print(f"\n  DIAGNOSTIC: Pre-Backward Check")
                         print(f"     Loss value: {loss.item():.4f}")
                         print(f"     Loss requires_grad: {loss.requires_grad}")
                         print(f"     Loss device: {loss.device}")
                         print(f"     Loss dtype: {loss.dtype}")
                         # Check if loss is a scalar
                         if loss.numel() != 1:
-                            print(f"     ⚠️  WARNING: Loss is not a scalar! Shape: {loss.shape}")
+                            print(f"     WARNING: Loss is not a scalar! Shape: {loss.shape}")
                     
                     model_engine.backward(loss)
                     
@@ -2750,7 +2750,7 @@ def train_real_model(
                     # NOTE: With DeepSpeed ZeRO Stage 3, gradients are partitioned and may not
                     # be accessible via p.grad. DeepSpeed handles gradient accumulation internally.
                     if not diagnostics_run and epoch == start_epoch:
-                        print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check (after backward)")
+                        print(f"\n  DIAGNOSTIC 1: Gradient Check (after backward)")
                         # Access model through model_engine.module for DeepSpeed
                         model_for_grads = model_engine.module if hasattr(model_engine, 'module') else model
                         
@@ -2762,7 +2762,7 @@ def train_real_model(
                             zero_stage = ds_config.get('zero_optimization', {}).get('stage', 'unknown')
                         print(f"     DeepSpeed ZeRO stage: {zero_stage}")
                         if zero_stage == 3:
-                            print(f"     ℹ️  INFO: ZeRO Stage 3 partitions gradients across GPUs.")
+                            print(f"     INFO: ZeRO Stage 3 partitions gradients across GPUs.")
                             print(f"     Gradients are NOT stored in p.grad - DeepSpeed handles them internally.")
                             print(f"     This is EXPECTED behavior - training should still work correctly.")
                             print(f"     To verify training is working, check if loss decreases over epochs.")
@@ -2780,7 +2780,7 @@ def train_real_model(
                         params_without_grad = [n for n, p in model_for_grads.named_parameters() if not p.requires_grad]
                         print(f"     Parameters with requires_grad=True: {len(params_with_grad)}")
                         if params_without_grad:
-                            print(f"     ⚠️  Parameters with requires_grad=False: {len(params_without_grad)}")
+                            print(f"     Parameters with requires_grad=False: {len(params_without_grad)}")
                             for n in params_without_grad[:3]:
                                 print(f"        - {n}")
                         
@@ -2793,7 +2793,7 @@ def train_real_model(
                                 grad_mean = p.grad.abs().mean().item()
                                 grad_max = p.grad.abs().max().item()
                                 if grad_mean > 0 or grad_max > 0:
-                                    print(f"     ✅ {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
+                                    print(f"     {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
                                     grad_found = True
                                     grad_counts['with_grad'] += 1
                                 else:
@@ -2803,11 +2803,11 @@ def train_real_model(
                         
                         if not grad_found:
                             if zero_stage == 3:
-                                print(f"     ℹ️  INFO: With ZeRO Stage 3, gradients are partitioned and not in p.grad.")
+                                print(f"     INFO: With ZeRO Stage 3, gradients are partitioned and not in p.grad.")
                                 print(f"     This is normal - DeepSpeed handles gradients internally.")
                                 print(f"     Training should still work correctly.")
                             else:
-                                print(f"     ⚠️  WARNING: All gradients are None!")
+                                print(f"     WARNING: All gradients are None!")
                                 print(f"     Gradient summary: {grad_counts['with_grad']} with gradients, {grad_counts['without_grad']} zero gradients, {grad_counts['none']} None gradients")
                                 print(f"     This suggests the computational graph is broken or DeepSpeed is not computing gradients.")
                                 print(f"     Try: 1) Check DeepSpeed config, 2) Try without DeepSpeed, 3) Check if loss is detached")
@@ -2820,7 +2820,7 @@ def train_real_model(
                     # DIAGNOSTIC 1: Check if gradients are nonzero (first batch only, BEFORE step)
                     # Check right after backward() but before optimizer.step() which zeros gradients
                     if not diagnostics_run and epoch == start_epoch:
-                        print(f"\n  🔍 DIAGNOSTIC 1: Gradient Check")
+                        print(f"\n  DIAGNOSTIC 1: Gradient Check")
                         
                         # First check: Verify loss requires_grad
                         print(f"     Loss requires_grad: {loss.requires_grad}")
@@ -2835,7 +2835,7 @@ def train_real_model(
                         params_without_grad = [n for n, p in model.named_parameters() if not p.requires_grad]
                         print(f"     Parameters with requires_grad=True: {len(params_with_grad)}")
                         if params_without_grad:
-                            print(f"     ⚠️  Parameters with requires_grad=False: {len(params_without_grad)}")
+                            print(f"     Parameters with requires_grad=False: {len(params_without_grad)}")
                             for n in params_without_grad[:3]:
                                 print(f"        - {n}")
                         
@@ -2847,7 +2847,7 @@ def train_real_model(
                                 grad_mean = p.grad.abs().mean().item()
                                 grad_max = p.grad.abs().max().item()
                                 if grad_mean > 0 or grad_max > 0:
-                                    print(f"     ✅ {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
+                                    print(f"     {n}: mean={grad_mean:.6f}, max={grad_max:.6f}")
                                     grad_found = True
                                     grad_counts['with_grad'] += 1
                                 else:
@@ -2856,7 +2856,7 @@ def train_real_model(
                                 grad_counts['none'] += 1
                         
                         if not grad_found:
-                            print(f"     ⚠️  WARNING: All gradients are None!")
+                            print(f"     WARNING: All gradients are None!")
                             print(f"     Gradient summary: {grad_counts['with_grad']} with gradients, {grad_counts['without_grad']} zero gradients, {grad_counts['none']} None gradients")
                             print(f"     This suggests the computational graph is broken.")
                     
@@ -2876,7 +2876,7 @@ def train_real_model(
                 
                 # DIAGNOSTIC 2: Sample model output vs target (first batch only)
                 if not diagnostics_run and epoch == start_epoch:
-                    print(f"\n  🔍 DIAGNOSTIC 2: Model Output vs Target")
+                    print(f"\n  DIAGNOSTIC 2: Model Output vs Target")
                     with torch.no_grad():
                         # Get model output for this batch (without load-balance loss for diagnostics)
                         sample_output = model_engine(input_tokens, return_load_balance_loss=False)
@@ -2901,18 +2901,18 @@ def train_real_model(
                             max_entropy = math.log(probs_sample.shape[0])
                             print(f"       Prediction entropy: {entropy:.4f} (max={max_entropy:.4f}, ratio={entropy/max_entropy:.4f})")
                             if entropy / max_entropy < 0.1:
-                                print(f"       ⚠️  WARNING: Very uniform predictions (low entropy)")
+                                print(f"       WARNING: Very uniform predictions (low entropy)")
                 
                 # DIAGNOSTIC 3: Check loss computation / labels (first batch only)
                 if not diagnostics_run and epoch == start_epoch:
-                    print(f"\n  🔍 DIAGNOSTIC 3: Loss Computation Check")
+                    print(f"\n  DIAGNOSTIC 3: Loss Computation Check")
                     print(f"     Output shape: {output.shape}")
                     print(f"     Target shape: {target.shape}")
                     print(f"     Mask shape: {mask.shape}, non-zero: {mask.sum().item()}/{len(target)}")
                     print(f"     Target token range: [{target.min().item()}, {target.max().item()}]")
                     print(f"     Target unique values: {torch.unique(target).numel()}")
                     if target.max().item() >= output.shape[1]:
-                        print(f"     ⚠️  ERROR: Target token ID {target.max().item()} >= vocab_size {output.shape[1]}")
+                        print(f"     ERROR: Target token ID {target.max().item()} >= vocab_size {output.shape[1]}")
                     print(f"     Masked output shape: {masked_output.shape}")
                     print(f"     Masked target shape: {masked_target.shape}")
                     print(f"     Loss value: {loss.item():.4f}")
@@ -2956,7 +2956,7 @@ def train_real_model(
                             
                             # Debug: Print sample predictions occasionally
                             if len(bert_scores) < 3 and epoch == start_epoch:
-                                print(f"  🔍 Sample prediction {len(bert_scores)+1}:")
+                                print(f"  Sample prediction {len(bert_scores)+1}:")
                                 print(f"     Reference: {ref_text[:100]}...")
                                 print(f"     Hypothesis: {hyp_text}")
                                 print(f"     Predicted token ID: {pred_token_id}")
@@ -2966,12 +2966,12 @@ def train_real_model(
                             bert_scores.append(bert_val)
                     except Exception as e:
                         # Silently skip metric computation on error to not interrupt training
-                        print(f"⚠️  Metric computation error (batch {batch_idx}): {e}")
+                        print(f"Metric computation error (batch {batch_idx}): {e}")
                         pass
                 
                 # Debug: Print target statistics occasionally
                 if not diagnostics_run and epoch == start_epoch:
-                    print(f"  📊 Debug - First batch targets: min={target.min().item()}, max={target.max().item()}, "
+                    print(f"  Debug - First batch targets: min={target.min().item()}, max={target.max().item()}, "
                           f"unique={torch.unique(target).numel()}, non-zero={mask.sum().item()}/{len(target)}")
                 
                 if batch_idx % max(1, len(train_dataloader) // 10) == 0:
@@ -3111,38 +3111,38 @@ def train_real_model(
             test_avg_loss = test_total_loss / test_batch_count if test_batch_count > 0 else 0.0
             test_avg_bert = sum(test_bert_scores) / len(test_bert_scores) if test_bert_scores else 0.0
             
-            print(f"\n✅ Epoch {epoch + 1} complete:")
+            print(f"\nEpoch {epoch + 1} complete:")
             print(f"   Train Loss: {avg_loss:.4f}")
             print(f"   Test Loss:  {test_avg_loss:.4f} (evaluated on {total_test_samples} test samples)")
-            print(f"🔍 Epoch {epoch + 1}: Aux loss = {avg_aux_loss:.4f} (LoadBal: {avg_load_bal_loss:.4f}, Z-loss: {avg_z_loss:.4f}, Cap: {avg_cap_loss:.4f})")
+            print(f"Epoch {epoch + 1}: Aux loss = {avg_aux_loss:.4f} (LoadBal: {avg_load_bal_loss:.4f}, Z-loss: {avg_z_loss:.4f}, Cap: {avg_cap_loss:.4f})")
             
             # Log auxiliary loss variance per epoch (DeepSeek routing stability metric)
             if len(epoch_aux_losses) > 1:
                 aux_loss_variance = np.std(epoch_aux_losses)
-                print(f"   📊 Aux loss variance: {aux_loss_variance:.8f}", end="")
+                print(f"   Aux loss variance: {aux_loss_variance:.8f}", end="")
                 if aux_loss_variance < 0.00001:
-                    print(f" ⚠️  (COLLAPSE: variance too low, routing may be unstable)")
+                    print(f" (COLLAPSE: variance too low, routing may be unstable)")
                 elif aux_loss_variance < 0.0001:
-                    print(f" ⚠️  (LOW: variance below healthy threshold)")
+                    print(f" (LOW: variance below healthy threshold)")
                 else:
-                    print(f" ✅ (HEALTHY: variance indicates active routing)")
+                    print(f" (HEALTHY: variance indicates active routing)")
             else:
-                print(f"   📊 Aux loss variance: N/A (insufficient data)")
+                print(f"   Aux loss variance: N/A (insufficient data)")
             
             # Verify load balance loss is non-zero
             if avg_load_bal_loss == 0.0:
-                print(f"   ⚠️  WARNING: Load balance loss is zero! This may indicate routing issues.")
+                print(f"   WARNING: Load balance loss is zero! This may indicate routing issues.")
             else:
-                print(f"   ✅ Load balance loss is non-zero: {avg_load_bal_loss:.6f}")
+                print(f"   Load balance loss is non-zero: {avg_load_bal_loss:.6f}")
             
             # Check active experts
             print(f"   Expert capacity: Dropped {avg_dropped_fraction*100:.2f}%, Utilization {avg_expert_utilization*100:.2f}%, Active experts = {num_active_experts}/{model.num_experts}")
             if num_active_experts == 1:
-                print(f"   ⚠️  WARNING: Only 1 expert is active! This suggests expert collapse.")
+                print(f"   WARNING: Only 1 expert is active! This suggests expert collapse.")
             elif num_active_experts < model.num_routed_experts:
-                print(f"   ⚠️  WARNING: Only {num_active_experts} of {model.num_routed_experts} routed experts are active.")
+                print(f"   WARNING: Only {num_active_experts} of {model.num_routed_experts} routed experts are active.")
             else:
-                print(f"   ✅ All {num_active_experts} routed experts are being used")
+                print(f"   All {num_active_experts} routed experts are being used")
             
             # Get routing metrics and shared expert scale for comprehensive report
             model_for_metrics = model_engine.module if (use_deepspeed and model_engine is not None and hasattr(model_engine, 'module')) else model
@@ -3173,7 +3173,7 @@ def train_real_model(
             
             # Legacy routing metrics print (kept for backward compatibility)
             if routing_metrics:
-                print(f"   📊 Routing Metrics (detailed):")
+                print(f"   Routing Metrics (detailed):")
                 print(f"      Router entropy: {routing_metrics.get('router_entropy', torch.tensor(0.0)).item():.4f}")
                 print(f"      Load imbalance: {routing_metrics.get('load_imbalance', torch.tensor(0.0)).item():.4f}")
                 print(f"      Top expert fraction: {routing_metrics.get('top_expert_fraction', torch.tensor(0.0)).item():.4f}")
@@ -3193,11 +3193,11 @@ def train_real_model(
             # Check temperature progression
             current_temp = model_engine.gate_temperature if (use_deepspeed and model_engine is not None and hasattr(model_engine, 'gate_temperature')) else (model.gate_temperature if hasattr(model, 'gate_temperature') else 1.0)
             if epoch == start_epoch:
-                print(f"   🌡️  Temperature: {current_temp:.4f} (schedule: {model.temperature_schedule if hasattr(model, 'temperature_schedule') else 'constant'})")
+                print(f"   Temperature: {current_temp:.4f} (schedule: {model.temperature_schedule if hasattr(model, 'temperature_schedule') else 'constant'})")
             else:
                 prev_temp = getattr(model, '_prev_temp', current_temp)
                 temp_change = current_temp - prev_temp
-                print(f"   🌡️  Temperature: {current_temp:.4f} (change: {temp_change:+.4f})")
+                print(f"   Temperature: {current_temp:.4f} (change: {temp_change:+.4f})")
                 model._prev_temp = current_temp  # Store for next epoch
             if bert_scores:
                 print(f"   Train BERTScore: {avg_bert:.4f} (from {len(bert_scores)} samples)")
@@ -3232,18 +3232,18 @@ def train_real_model(
                 best_test_loss = test_avg_loss
                 best_test_loss_epoch = epoch + 1
                 epochs_without_improvement = 0
-                print(f"   🏆 New best test loss: {best_test_loss:.4f} at epoch {best_test_loss_epoch}")
+                print(f"    New best test loss: {best_test_loss:.4f} at epoch {best_test_loss_epoch}")
                 print(f"   Current learning rate: {current_lr:.6f}")
             else:
                 epochs_without_improvement += 1
                 # Warn if test loss is significantly worse than best
                 if test_avg_loss > best_test_loss * 1.5:
-                    print(f"   ⚠️  Test loss ({test_avg_loss:.4f}) is much worse than best ({best_test_loss:.4f}) - possible overfitting!")
+                    print(f"   Test loss ({test_avg_loss:.4f}) is much worse than best ({best_test_loss:.4f}) - possible overfitting!")
                 print(f"   Current learning rate: {current_lr:.6f} (no improvement for {epochs_without_improvement} epochs)")
                 
                 # Early stopping if patience is set
                 if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
-                    print(f"\n⏹️  Early stopping triggered!")
+                    print(f"\n⏹  Early stopping triggered!")
                     print(f"   No improvement for {epochs_without_improvement} epochs")
                     print(f"   Best test loss: {best_test_loss:.4f} (epoch {best_test_loss_epoch})")
                     print(f"   Stopping at epoch {epoch + 1}/{epochs}")
@@ -3286,7 +3286,7 @@ def train_real_model(
     # Final model save
     final_model_path = os.path.join(outputs_dir, "final_model.pt")
     torch.save(model.state_dict(), final_model_path)
-    print(f"\n✅ Final model saved: {final_model_path}")
+    print(f"\nFinal model saved: {final_model_path}")
     
     # Save results (include test metrics)
     results = {
@@ -3311,12 +3311,12 @@ def train_real_model(
     
     total_time = time.time() - start_time
     print(f"\n{'='*60}")
-    print(f"🎉 Training Complete!")
+    print(f" Training Complete!")
     print(f"   Total time: {total_time:.2f}s ({total_time/60:.1f} minutes)")
     print(f"   Train Loss: {avg_loss:.4f}")
     print(f"   Test Loss:  {test_loss:.4f}")
     if best_test_loss != float('inf'):
-        print(f"   🏆 Best Test Loss: {best_test_loss:.4f} (epoch {best_test_loss_epoch})")
+        print(f"    Best Test Loss: {best_test_loss:.4f} (epoch {best_test_loss_epoch})")
     if final_bert > 0:
         print(f"   Train BERTScore: {final_bert:.4f}")
         print(f"   Test BERTScore:  {test_bert:.4f}")

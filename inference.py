@@ -175,7 +175,7 @@ class InferencePipeline:
         self.tokenizer = spm.SentencePieceProcessor()
         self.tokenizer.load(tokenizer_path)
         self.vocab_size = self.tokenizer.get_piece_size()
-        print(f"✅ Loaded tokenizer (vocab_size={self.vocab_size})")
+        print(f"Loaded tokenizer (vocab_size={self.vocab_size})")
         
         # Load model
         self.model = self._load_model(checkpoint_path)
@@ -187,7 +187,7 @@ class InferencePipeline:
             self.model = torch.quantization.quantize_dynamic(
                 self.model, {nn.Linear}, dtype=torch.qint8
             )
-            print("✅ Model quantized to INT8")
+            print("Model quantized to INT8")
         
         # Initialize cache
         if use_cache:
@@ -198,7 +198,7 @@ class InferencePipeline:
         # Domain classifier (lazy-loaded)
         self._domain_classifier = None
         
-        print(f"✅ Inference pipeline initialized on {device}")
+        print(f"Inference pipeline initialized on {device}")
     
     def _load_model(self, checkpoint_path: str) -> nn.Module:
         """Load model from checkpoint.
@@ -244,11 +244,11 @@ class InferencePipeline:
             else:
                 model.load_state_dict(checkpoint, strict=False)
             
-            print(f"✅ Loaded model from {checkpoint_path}")
+            print(f"Loaded model from {checkpoint_path}")
             return model
             
         except Exception as e:
-            print(f"⚠️  Could not load model: {e}")
+            print(f"Could not load model: {e}")
             raise
     
     def _tokenize(self, text: str) -> torch.Tensor:
@@ -419,7 +419,7 @@ class InferencePipeline:
                     classes = domain_classifier.classes_
                     return {str(domain): float(prob) for domain, prob in zip(classes, probs)}
                 except Exception as e:
-                    print(f"⚠️  Classifier prediction failed: {e}, using keyword-based")
+                    print(f"Classifier prediction failed: {e}, using keyword-based")
         
         # Fallback to keyword-based classification
         return self._keyword_domain_classification(text)
@@ -469,7 +469,7 @@ class InferencePipeline:
             save_metadata: Whether to save metadata
             metadata: Optional metadata for each document
         """
-        print(f"📊 Precomputing embeddings for {len(corpus_texts)} documents...")
+        print(f"Precomputing embeddings for {len(corpus_texts)} documents...")
         
         # Batch encode
         embeddings = self.batch_encode(corpus_texts, batch_size=batch_size)
@@ -481,7 +481,7 @@ class InferencePipeline:
             save_dict['metadata'] = metadata
         
         np.savez_compressed(output_path, **save_dict)
-        print(f"✅ Saved embeddings to {output_path}")
+        print(f"Saved embeddings to {output_path}")
         print(f"   Shape: {embeddings.shape}")
         print(f"   Size: {os.path.getsize(output_path) / (1024**2):.2f} MB")
     
@@ -493,7 +493,7 @@ class InferencePipeline:
             sample_text: Sample text for tracing
         """
         if not ONNX_AVAILABLE:
-            print("⚠️  ONNX not available, skipping export")
+            print("ONNX not available, skipping export")
             return
         
         self.model.eval()
@@ -515,9 +515,9 @@ class InferencePipeline:
                 },
                 opset_version=11
             )
-            print(f"✅ Model exported to ONNX: {output_path}")
+            print(f"Model exported to ONNX: {output_path}")
         except Exception as e:
-            print(f"⚠️  ONNX export failed: {e}")
+            print(f"ONNX export failed: {e}")
 
 
 def benchmark_inference(pipeline: InferencePipeline, num_samples: int = 100):
@@ -527,7 +527,7 @@ def benchmark_inference(pipeline: InferencePipeline, num_samples: int = 100):
         pipeline: Inference pipeline
         num_samples: Number of samples to test
     """
-    print(f"⏱️  Benchmarking inference ({num_samples} samples)...")
+    print(f"Benchmarking inference ({num_samples} samples)...")
     
     sample_texts = [
         "Alzheimer's disease is a neurodegenerative disorder characterized by cognitive decline.",
@@ -547,15 +547,15 @@ def benchmark_inference(pipeline: InferencePipeline, num_samples: int = 100):
     
     avg_time = elapsed / num_samples * 1000  # Convert to ms
     
-    print(f"✅ Benchmark results:")
+    print(f"Benchmark results:")
     print(f"   Total time: {elapsed:.2f}s")
     print(f"   Average per inference: {avg_time:.2f}ms")
     print(f"   Throughput: {num_samples / elapsed:.1f} samples/sec")
     
     if avg_time < 100:
-        print(f"   ✅ Target met: <100ms per inference")
+        print(f"   Target met: <100ms per inference")
     else:
-        print(f"   ⚠️  Target not met: >100ms per inference")
+        print(f"   Target not met: >100ms per inference")
 
 
 def main():
@@ -639,7 +639,7 @@ def main():
     # Execute command
     if args.command == 'embed':
         embedding = pipeline.generate_embeddings(args.text)
-        print(f"✅ Embedding shape: {embedding.shape}")
+        print(f"Embedding shape: {embedding.shape}")
         print(f"   Embedding (first 10): {embedding[:10]}")
     
     elif args.command == 'batch':
@@ -648,7 +648,7 @@ def main():
         
         embeddings = pipeline.batch_encode(texts)
         np.save(args.output, embeddings)
-        print(f"✅ Saved {len(texts)} embeddings to {args.output}")
+        print(f"Saved {len(texts)} embeddings to {args.output}")
     
     elif args.command == 'review':
         # Load corpus
@@ -664,7 +664,7 @@ def main():
             top_k=args.top_k
         )
         
-        print(f"\n📚 Top {args.top_k} results for query: '{args.query}'")
+        print(f"\nTop {args.top_k} results for query: '{args.query}'")
         for result in results:
             print(f"\n  Rank {result['rank']}: similarity={result['similarity']:.4f}")
             if 'arxiv_id' in result:
@@ -674,7 +674,7 @@ def main():
     
     elif args.command == 'classify':
         domains = pipeline.classify_domain(args.text)
-        print(f"\n🏷️  Domain classification for: '{args.text[:50]}...'")
+        print(f"\nDomain classification for: '{args.text[:50]}...'")
         for domain, score in sorted(domains.items(), key=lambda x: x[1], reverse=True):
             print(f"   {domain}: {score:.4f}")
     

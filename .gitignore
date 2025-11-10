@@ -47,6 +47,8 @@ processed/
 image_shards/
 test_*/
 temp/
+data/
+!data/.gitkeep
 
 # Logs
 *.log

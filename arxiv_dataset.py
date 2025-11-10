@@ -92,7 +92,7 @@ class ArXivStreamingDataset(IterableDataset):
         # Estimate dataset length
         self._estimated_length = None
         
-        print(f"📚 ArXivStreamingDataset initialized:")
+        print(f"ArXivStreamingDataset initialized:")
         print(f"   Text files: {len(self.text_files)}")
         print(f"   Metadata entries: {len(self.metadata)}")
         print(f"   Max length: {max_length}, Min length: {min_length}")
@@ -106,10 +106,10 @@ class ArXivStreamingDataset(IterableDataset):
         """
         metadata = {}
         if not os.path.exists(self.metadata_jsonl):
-            print(f"⚠️  Warning: Metadata file not found: {self.metadata_jsonl}")
+            print(f"Warning: Metadata file not found: {self.metadata_jsonl}")
             return metadata
         
-        print(f"📖 Loading metadata from {self.metadata_jsonl}...")
+        print(f"Loading metadata from {self.metadata_jsonl}...")
         with open(self.metadata_jsonl, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 if not line.strip():
@@ -123,7 +123,7 @@ class ArXivStreamingDataset(IterableDataset):
                 except json.JSONDecodeError:
                     continue
         
-        print(f"   ✅ Loaded {len(metadata)} metadata entries")
+        print(f"   Loaded {len(metadata)} metadata entries")
         return metadata
     
     def _get_text_files(self) -> List[Tuple[str, str]]:
@@ -134,7 +134,7 @@ class ArXivStreamingDataset(IterableDataset):
         """
         text_files = []
         if not os.path.exists(self.text_dir):
-            print(f"⚠️  Warning: Text directory not found: {self.text_dir}")
+            print(f"Warning: Text directory not found: {self.text_dir}")
             return text_files
         
         for filename in os.listdir(self.text_dir):
@@ -448,7 +448,7 @@ if __name__ == "__main__":
     import sys
     
     print("=" * 60)
-    print("📚 ArXivStreamingDataset Example")
+    print("ArXivStreamingDataset Example")
     print("=" * 60)
     print()
     print("Usage:")
@@ -482,5 +482,5 @@ if __name__ == "__main__":
     print("      target_ids = batch['target_ids']")
     print("      # ... training code ...")
     print()
-    print("✅ Dataset class ready to use!")
+    print("Dataset class ready to use!")
 

@@ -51,7 +51,7 @@ try:
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
-    print("⚠️  matplotlib not available, visualization disabled")
+    print("matplotlib not available, visualization disabled")
 
 
 class SectionClassifier:
@@ -264,7 +264,7 @@ def compute_domain_classification_accuracy(
         y_pred = classifier.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
     except Exception as e:
-        print(f"⚠️  Domain classification failed: {e}")
+        print(f"Domain classification failed: {e}")
         return 0.0
     
     return accuracy
@@ -442,7 +442,7 @@ def evaluate_model(
         Dictionary with evaluation metrics
     """
     print("=" * 60)
-    print("🔍 Model Evaluation")
+    print("Model Evaluation")
     print("=" * 60)
     print()
     
@@ -453,11 +453,11 @@ def evaluate_model(
     tokenizer = spm.SentencePieceProcessor()
     tokenizer.load(tokenizer_path)
     vocab_size = tokenizer.get_piece_size()
-    print(f"✅ Loaded tokenizer (vocab_size={vocab_size})")
+    print(f"Loaded tokenizer (vocab_size={vocab_size})")
     
     # Load model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"✅ Using device: {device}")
+    print(f"Using device: {device}")
     
     try:
         from train_real import SimpleMoEModel
@@ -491,9 +491,9 @@ def evaluate_model(
         
         model.to(device)
         model.eval()
-        print(f"✅ Loaded model from {model_checkpoint}")
+        print(f"Loaded model from {model_checkpoint}")
     except Exception as e:
-        print(f"⚠️  Could not load model: {e}")
+        print(f"Could not load model: {e}")
         raise
     
     # Create adapter
@@ -528,7 +528,7 @@ def evaluate_model(
         min_length=64
     )
     
-    print(f"✅ Created test dataset: {len(test_files)} papers")
+    print(f"Created test dataset: {len(test_files)} papers")
     
     # Create test dataloader
     test_dataloader = create_dataloader(
@@ -539,24 +539,24 @@ def evaluate_model(
     )
     
     # Compute metrics
-    print("\n📊 Computing metrics...")
+    print("\nComputing metrics...")
     
     # 1. Perplexity
     print("   Computing perplexity...")
     perplexity = compute_perplexity(model, adapter, test_dataloader)
-    print(f"   ✅ Perplexity: {perplexity:.2f}")
+    print(f"   Perplexity: {perplexity:.2f}")
     
     # 2. Extract embeddings
     print("   Extracting embeddings...")
     embeddings, metadata = extract_embeddings(
         model, adapter, test_dataloader, max_samples=max_test_samples
     )
-    print(f"   ✅ Extracted embeddings: {embeddings.shape}")
+    print(f"   Extracted embeddings: {embeddings.shape}")
     
     # 3. Domain classification accuracy
     print("   Computing domain classification accuracy...")
     domain_accuracy = compute_domain_classification_accuracy(embeddings, metadata)
-    print(f"   ✅ Domain accuracy: {domain_accuracy:.4f}")
+    print(f"   Domain accuracy: {domain_accuracy:.4f}")
     
     # 4. Neurodegeneration relevance ranking (MRR@20)
     print("   Computing neurodegeneration relevance ranking (MRR@20)...")
@@ -565,14 +565,14 @@ def evaluate_model(
         if meta.get('has_neurodegeneration', False)
     ]
     mrr_20 = compute_mrr_at_k(embeddings, metadata, query_indices, k=20)
-    print(f"   ✅ MRR@20: {mrr_20:.4f}")
+    print(f"   MRR@20: {mrr_20:.4f}")
     
     # 5. Section classification accuracy
     print("   Computing section classification accuracy...")
     section_accuracy = compute_section_classification_accuracy(
         model, adapter, test_dataloader, num_samples=min(100, len(test_files))
     )
-    print(f"   ✅ Section accuracy: {section_accuracy:.4f}")
+    print(f"   Section accuracy: {section_accuracy:.4f}")
     
     # Compile results
     results = {
@@ -593,7 +593,7 @@ def evaluate_model(
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
     
-    print(f"\n💾 Results saved to: {results_file}")
+    print(f"\nResults saved to: {results_file}")
     
     return results
 
@@ -609,7 +609,7 @@ def plot_training_curves(
         output_file: Output file path (None = auto-generate)
     """
     if not MATPLOTLIB_AVAILABLE:
-        print("⚠️  matplotlib not available, skipping visualization")
+        print("matplotlib not available, skipping visualization")
         return
     
     import pandas as pd
@@ -662,7 +662,7 @@ def plot_training_curves(
     if output_file is None:
         output_file = training_log_csv.replace('.csv', '_curves.png')
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    print(f"📊 Training curves saved to: {output_file}")
+    print(f"Training curves saved to: {output_file}")
     
     plt.close()
 
@@ -678,7 +678,7 @@ def plot_evaluation_trends(
         output_file: Output file path (None = auto-generate)
     """
     if not MATPLOTLIB_AVAILABLE:
-        print("⚠️  matplotlib not available, skipping visualization")
+        print("matplotlib not available, skipping visualization")
         return
     
     # Load all evaluation files
@@ -689,7 +689,7 @@ def plot_evaluation_trends(
     ])
     
     if len(eval_files) == 0:
-        print("⚠️  No evaluation files found")
+        print("No evaluation files found")
         return
     
     # Extract metrics
@@ -761,7 +761,7 @@ def plot_evaluation_trends(
     if output_file is None:
         output_file = os.path.join(evaluation_dir, 'evaluation_trends.png')
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    print(f"📊 Evaluation trends saved to: {output_file}")
+    print(f"Evaluation trends saved to: {output_file}")
     
     plt.close()
 
@@ -816,7 +816,7 @@ def main():
     if args.plot_evaluation_trends:
         plot_evaluation_trends(args.output_dir)
     
-    print("\n✅ Evaluation complete!")
+    print("\nEvaluation complete!")
 
 
 if __name__ == "__main__":

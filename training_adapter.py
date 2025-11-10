@@ -66,7 +66,7 @@ class ModelAdapter:
         self.model.to(self.device)
         self.model.eval()  # Will be set to train mode by training loop
         
-        print(f"✅ ModelAdapter initialized:")
+        print(f"ModelAdapter initialized:")
         print(f"   Device: {self.device}")
         print(f"   Domain weights: {self.domain_weights}")
         print(f"   Ignore index: {self.ignore_index}")
@@ -315,7 +315,7 @@ class ModelAdapter:
         
         if print_details:
             print("=" * 60)
-            print("🔍 Batch Debug Information")
+            print("Batch Debug Information")
             print("=" * 60)
             
             for key, info in debug_info.items():
@@ -327,30 +327,30 @@ class ModelAdapter:
                     print(f"   {info}")
             
             # Sanity checks
-            print("\n✅ Sanity Checks:")
+            print("\nSanity Checks:")
             
             if 'input_ids' in debug_info and 'target_ids' in debug_info:
                 input_shape = debug_info['input_ids']['shape']
                 target_shape = debug_info['target_ids']['shape']
                 
                 if input_shape == target_shape:
-                    print("   ✓ input_ids and target_ids have matching shapes")
+                    print("   OK input_ids and target_ids have matching shapes")
                 else:
-                    print(f"   ✗ Shape mismatch: input_ids {input_shape} vs target_ids {target_shape}")
+                    print(f"   FAIL Shape mismatch: input_ids {input_shape} vs target_ids {target_shape}")
                 
                 # Check sequence length consistency
                 if input_shape[0] == target_shape[0]:
-                    print(f"   ✓ Batch size consistent: {input_shape[0]}")
+                    print(f"   OK Batch size consistent: {input_shape[0]}")
                 else:
-                    print(f"   ✗ Batch size mismatch: {input_shape[0]} vs {target_shape[0]}")
+                    print(f"   FAIL Batch size mismatch: {input_shape[0]} vs {target_shape[0]}")
             
             if 'input_ids' in debug_info:
                 input_min = debug_info['input_ids']['min']
                 input_max = debug_info['input_ids']['max']
                 if input_min >= 0:
-                    print(f"   ✓ input_ids in valid range: [{input_min}, {input_max}]")
+                    print(f"   OK input_ids in valid range: [{input_min}, {input_max}]")
                 else:
-                    print(f"   ✗ input_ids has negative values: min={input_min}")
+                    print(f"   FAIL input_ids has negative values: min={input_min}")
             
             print("=" * 60)
         
@@ -361,7 +361,7 @@ class ModelAdapter:
 if __name__ == "__main__":
     """Example usage of ModelAdapter."""
     print("=" * 60)
-    print("🔌 ModelAdapter Example")
+    print("ModelAdapter Example")
     print("=" * 60)
     print()
     print("Usage:")
@@ -404,5 +404,5 @@ if __name__ == "__main__":
     print("      loss.backward()")
     print("      # ... optimizer step ...")
     print()
-    print("✅ ModelAdapter ready to use!")
+    print("ModelAdapter ready to use!")
 

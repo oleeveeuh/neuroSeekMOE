@@ -53,21 +53,21 @@ try:
     TRAIN_COLAB_AVAILABLE = True
 except ImportError:
     TRAIN_COLAB_AVAILABLE = False
-    print("⚠️  train_colab.py not available")
+    print("train_colab.py not available")
 
 try:
     from evaluate import evaluate_model
     EVALUATE_AVAILABLE = True
 except ImportError:
     EVALUATE_AVAILABLE = False
-    print("⚠️  evaluate.py not available")
+    print("evaluate.py not available")
 
 try:
     from inference import InferencePipeline
     INFERENCE_AVAILABLE = True
 except ImportError:
     INFERENCE_AVAILABLE = False
-    print("⚠️  inference.py not available")
+    print("inference.py not available")
 
 # Setup logging
 logging.basicConfig(
@@ -112,11 +112,11 @@ class PipelineOrchestrator:
         self.inference_dir = Path(self.config['inference']['output_dir'])
         
         logger.info("=" * 80)
-        logger.info("🚀 Pipeline Orchestrator Initialized")
+        logger.info("Pipeline Orchestrator Initialized")
         logger.info("=" * 80)
-        logger.info(f"📁 Output directory: {self.output_dir}")
-        logger.info(f"📋 Config file: {config_path}")
-        logger.info(f"🔄 Resume mode: {self.config['pipeline']['resume']}")
+        logger.info(f"Output directory: {self.output_dir}")
+        logger.info(f"Config file: {config_path}")
+        logger.info(f"Resume mode: {self.config['pipeline']['resume']}")
         logger.info(f"🧹 Cleanup intermediate: {self.config['pipeline']['cleanup_intermediate']}")
     
     def _load_config(self, config_path: str) -> Dict:
@@ -158,7 +158,7 @@ class PipelineOrchestrator:
                     # For files, check if they have content
                     try:
                         if f.stat().st_size == 0:
-                            logger.info(f"⚠️  Step '{step_name}' output file exists but is empty: {f}")
+                            logger.info(f"Step '{step_name}' output file exists but is empty: {f}")
                             all_valid = False
                             break
                         # For JSONL files, check if they have at least one valid line
@@ -166,27 +166,27 @@ class PipelineOrchestrator:
                             with open(f, 'r', encoding='utf-8') as file_handle:
                                 has_content = any(line.strip() for line in file_handle)
                                 if not has_content:
-                                    logger.info(f"⚠️  Step '{step_name}' JSONL file exists but has no valid lines: {f}")
+                                    logger.info(f"Step '{step_name}' JSONL file exists but has no valid lines: {f}")
                                     all_valid = False
                                     break
                     except Exception as e:
-                        logger.warning(f"⚠️  Could not check file {f}: {e}")
+                        logger.warning(f"Could not check file {f}: {e}")
                         all_valid = False
                         break
                 elif f.is_dir():
                     # For directories, check if they have at least one file
                     try:
                         if not any(f.iterdir()):
-                            logger.info(f"⚠️  Step '{step_name}' output directory exists but is empty: {f}")
+                            logger.info(f"Step '{step_name}' output directory exists but is empty: {f}")
                             all_valid = False
                             break
                     except Exception as e:
-                        logger.warning(f"⚠️  Could not check directory {f}: {e}")
+                        logger.warning(f"Could not check directory {f}: {e}")
                         all_valid = False
                         break
         
         if all_valid:
-            logger.info(f"✅ Step '{step_name}' already complete (output files exist and are valid)")
+            logger.info(f"Step '{step_name}' already complete (output files exist and are valid)")
         return all_valid
     
     def _log_step_start(self, step_name: str, step_num: int, total_steps: int):
@@ -199,7 +199,7 @@ class PipelineOrchestrator:
         """
         logger.info("")
         logger.info("=" * 80)
-        logger.info(f"📦 Step {step_num}/{total_steps}: {step_name}")
+        logger.info(f"Step {step_num}/{total_steps}: {step_name}")
         logger.info("=" * 80)
         self.step_times[step_name] = time.time()
     
@@ -211,7 +211,7 @@ class PipelineOrchestrator:
             success: Whether step completed successfully
         """
         elapsed = time.time() - self.step_times.get(step_name, time.time())
-        status = "✅" if success else "❌"
+        status = "" if success else ""
         logger.info(f"{status} Step '{step_name}' completed in {elapsed:.2f}s")
         self.step_status[step_name] = {
             'success': success,
@@ -235,27 +235,27 @@ class PipelineOrchestrator:
         if self.metadata_jsonl.exists():
             count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
             if count >= target_papers:
-                logger.info(f"📊 Found {count} papers (target: {target_papers}) - collection already complete")
+                logger.info(f"Found {count} papers (target: {target_papers}) - collection already complete")
                 self._log_step_end(step_name, True)
                 return True
             elif count > 0:
-                logger.info(f"📊 Found {count} papers (target: {target_papers}) - continuing collection...")
+                logger.info(f"Found {count} papers (target: {target_papers}) - continuing collection...")
                 # Continue to collection below
             else:
-                logger.warning(f"⚠️  Metadata file exists but is empty. Re-running collection...")
+                logger.warning(f"Metadata file exists but is empty. Re-running collection...")
         
         try:
             # If file exists but is empty, delete it to force re-collection
             if self.metadata_jsonl.exists():
                 count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
                 if count == 0:
-                    logger.warning(f"⚠️  Existing metadata file is empty. Deleting to force re-collection...")
+                    logger.warning(f"Existing metadata file is empty. Deleting to force re-collection...")
                     self.metadata_jsonl.unlink()
             
             collection_config = self.config['collection']
             rate_limit_delay = 1.0 / collection_config['rate_limit']
             
-            logger.info(f"🔍 Starting ArXiv paper collection...")
+            logger.info(f"Starting ArXiv paper collection...")
             logger.info(f"   Target: {collection_config['max_papers']} papers")
             logger.info(f"   Rate limit: {collection_config['rate_limit']} requests/sec")
             
@@ -279,11 +279,11 @@ class PipelineOrchestrator:
             
             # Count collected papers
             count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
-            logger.info(f"📊 Collected {count} papers")
+            logger.info(f"Collected {count} papers")
             
             if count == 0:
                 error_msg = (
-                    "❌ Error: 0 papers collected. This indicates a problem:\n"
+                    "Error: 0 papers collected. This indicates a problem:\n"
                     "   1. ArXiv API issues or rate limiting\n"
                     "   2. Network connectivity problems\n"
                     "   3. Query parameters too restrictive\n"
@@ -297,7 +297,7 @@ class PipelineOrchestrator:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Step 1 failed: {e}", exc_info=True)
+            logger.error(f"Step 1 failed: {e}", exc_info=True)
             self._log_step_end(step_name, False)
             return False
     
@@ -316,13 +316,13 @@ class PipelineOrchestrator:
             if self.text_dir.exists():
                 text_files = list(self.text_dir.glob("*.txt"))
                 if len(text_files) > 0:
-                    logger.info(f"📊 Found {len(text_files)} text files in existing directory")
+                    logger.info(f"Found {len(text_files)} text files in existing directory")
                     self._log_step_end(step_name, True)
                     return True
                 else:
-                    logger.warning(f"⚠️  Text directory exists but has no .txt files. Re-running extraction...")
+                    logger.warning(f"Text directory exists but has no .txt files. Re-running extraction...")
             else:
-                logger.warning(f"⚠️  Text directory check passed but doesn't exist. Re-running extraction...")
+                logger.warning(f"Text directory check passed but doesn't exist. Re-running extraction...")
         
         try:
             if not self.metadata_jsonl.exists():
@@ -334,7 +334,7 @@ class PipelineOrchestrator:
             num_workers = extraction_config.get('workers', extraction_config.get('num_workers', 2))
             rate_limit_delay = extraction_config.get('rate_limit', extraction_config.get('rate_limit_delay', 0.4))
             
-            logger.info(f"🔍 Starting PDF extraction...")
+            logger.info(f"Starting PDF extraction...")
             logger.info(f"   Workers: {num_workers}")
             logger.info(f"   Rate limit: {1.0/rate_limit_delay:.1f} requests/sec")
             
@@ -350,13 +350,13 @@ class PipelineOrchestrator:
             
             # Count extracted texts
             text_files = list(self.text_dir.glob("*.txt"))
-            logger.info(f"📊 Extracted {len(text_files)} text files")
+            logger.info(f"Extracted {len(text_files)} text files")
             
             self._log_step_end(step_name, True)
             return True
             
         except Exception as e:
-            logger.error(f"❌ Step 2 failed: {e}", exc_info=True)
+            logger.error(f"Step 2 failed: {e}", exc_info=True)
             self._log_step_end(step_name, False)
             return False
     
@@ -377,7 +377,7 @@ class PipelineOrchestrator:
         # Force immediate output - CRITICAL for Colab visibility
         import sys
         print(f"\n{'='*80}", flush=True)
-        print(f"📦 Step 3: {step_name}", flush=True)
+        print(f"Step 3: {step_name}", flush=True)
         print(f"{'='*80}", flush=True)
         print(f"⏰ Starting at: {datetime.now().isoformat()}", flush=True)
         sys.stdout.flush()
@@ -385,15 +385,15 @@ class PipelineOrchestrator:
         try:
             self._log_step_start(step_name, 3, 8)
         except Exception as e:
-            print(f"⚠️  Error in _log_step_start: {e}", flush=True)
+            print(f"Error in _log_step_start: {e}", flush=True)
         
         # Check if already complete (verify file is non-empty)
-        print(f"🔍 Checking if step already complete...", flush=True)
+        print(f"Checking if step already complete...", flush=True)
         try:
             is_complete = self._check_step_complete(step_name, [self.curated_jsonl], check_non_empty=True)
             print(f"   Step complete check: {is_complete}", flush=True)
         except Exception as e:
-            print(f"⚠️  Error checking step completion: {e}", flush=True)
+            print(f"Error checking step completion: {e}", flush=True)
             is_complete = False
         
         if is_complete:
@@ -404,27 +404,27 @@ class PipelineOrchestrator:
                     count = sum(1 for line in open(self.curated_jsonl) if line.strip())
                     print(f"   Found {count} papers in existing file", flush=True)
                     if count > 0:
-                        print(f"✅ Step already complete with {count} papers", flush=True)
-                        logger.info(f"📊 Found {count} papers in existing curated dataset")
+                        print(f"Step already complete with {count} papers", flush=True)
+                        logger.info(f"Found {count} papers in existing curated dataset")
                         self._log_step_end(step_name, True)
                         return True
                     else:
-                        print(f"⚠️  Curated file exists but is empty. Re-running curation...", flush=True)
-                        logger.warning(f"⚠️  Curated file exists but is empty. Re-running curation...")
+                        print(f"Curated file exists but is empty. Re-running curation...", flush=True)
+                        logger.warning(f"Curated file exists but is empty. Re-running curation...")
                 except Exception as e:
-                    print(f"⚠️  Error reading curated file: {e}", flush=True)
+                    print(f"Error reading curated file: {e}", flush=True)
             else:
-                print(f"⚠️  Curated file check passed but doesn't exist. Re-running curation...", flush=True)
-                logger.warning(f"⚠️  Curated file check passed but doesn't exist. Re-running curation...")
+                print(f"Curated file check passed but doesn't exist. Re-running curation...", flush=True)
+                logger.warning(f"Curated file check passed but doesn't exist. Re-running curation...")
         
-        print(f"🚀 Starting NeMo Curator curation...", flush=True)
+        print(f"Starting NeMo Curator curation...", flush=True)
         sys.stdout.flush()
         
         try:
-            print(f"📋 Loading NeMo Curator config from config.yaml...", flush=True)
+            print(f"Loading NeMo Curator config from config.yaml...", flush=True)
             nemo_config = self.config.get('nemo_curator', {})
             if not nemo_config:
-                print(f"⚠️  Warning: 'nemo_curator' section not found in config, using defaults", flush=True)
+                print(f"Warning: 'nemo_curator' section not found in config, using defaults", flush=True)
             print(f"   Config loaded: {list(nemo_config.keys())}", flush=True)
             sys.stdout.flush()
             
@@ -433,7 +433,7 @@ class PipelineOrchestrator:
             # Otherwise, use Pipeline API to download from scratch
             text_files_exist = self.text_dir.exists() and any(self.text_dir.glob("*.txt"))
             
-            print(f"\n🔍 Debug: Checking NeMo Curator step...", flush=True)
+            print(f"\nDebug: Checking NeMo Curator step...", flush=True)
             print(f"   Text files exist: {text_files_exist}", flush=True)
             print(f"   Text directory: {self.text_dir}", flush=True)
             print(f"   Metadata file: {self.metadata_jsonl}", flush=True)
@@ -442,8 +442,8 @@ class PipelineOrchestrator:
             
             if text_files_exist:
                 # Use legacy curate_with_nemo function (processes existing text files)
-                print("🔬 Using NeMo Curator to process existing extracted text files", flush=True)
-                logger.info("🔬 Using NeMo Curator to process existing extracted text files")
+                print("Using NeMo Curator to process existing extracted text files", flush=True)
+                logger.info("Using NeMo Curator to process existing extracted text files")
                 print(f"   Found text files in: {self.text_dir}", flush=True)
                 logger.info(f"   Found text files in: {self.text_dir}")
                 
@@ -453,12 +453,12 @@ class PipelineOrchestrator:
                     from data_pipeline import NEMO_CURATOR_AVAILABLE
                     print(f"   NeMo Curator available: {NEMO_CURATOR_AVAILABLE}", flush=True)
                 except Exception as e:
-                    print(f"❌ Error importing NEMO_CURATOR_AVAILABLE: {e}", flush=True)
+                    print(f"Error importing NEMO_CURATOR_AVAILABLE: {e}", flush=True)
                     raise
                 
                 if not NEMO_CURATOR_AVAILABLE:
                     error_msg = (
-                        "❌ NeMo Curator not available.\n"
+                        "NeMo Curator not available.\n"
                         "   Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'\n"
                         "   Note: NeMo Curator only supports Linux systems\n"
                         "   On non-Linux systems, you can skip this step and use the preprocess command instead"
@@ -470,7 +470,7 @@ class PipelineOrchestrator:
                 
                 if not self.metadata_jsonl.exists():
                     error_msg = f"Metadata file not found: {self.metadata_jsonl}"
-                    print(f"❌ {error_msg}", flush=True)
+                    print(f"{error_msg}", flush=True)
                     logger.error(error_msg)
                     sys.stdout.flush()
                     raise FileNotFoundError(error_msg)
@@ -480,7 +480,7 @@ class PipelineOrchestrator:
                 print(f"   Processing {text_file_count} text files", flush=True)
                 logger.info(f"   Processing {text_file_count} text files")
                 
-                print(f"\n🚀 Calling curate_with_nemo()...", flush=True)
+                print(f"\nCalling curate_with_nemo()...", flush=True)
                 sys.stdout.flush()
                 try:
                     curate_with_nemo(
@@ -491,10 +491,10 @@ class PipelineOrchestrator:
                         skip_dedup=nemo_config.get('skip_dedup', False),
                         min_relevance_score=nemo_config.get('min_relevance_score', 0.5)
                     )
-                    print(f"✅ curate_with_nemo() completed", flush=True)
+                    print(f"curate_with_nemo() completed", flush=True)
                     sys.stdout.flush()
                 except Exception as e:
-                    print(f"❌ curate_with_nemo() failed with error: {e}", flush=True)
+                    print(f"curate_with_nemo() failed with error: {e}", flush=True)
                     import traceback
                     print(f"   Full traceback:\n{traceback.format_exc()}", flush=True)
                     sys.stdout.flush()
@@ -506,12 +506,12 @@ class PipelineOrchestrator:
                         "NeMo Curator curation completed but no output file was created.\n"
                         "   This may indicate NeMo Curator is not properly installed or configured."
                     )
-                    print(f"❌ {error_msg}", flush=True)
+                    print(f"{error_msg}", flush=True)
                     logger.error(error_msg)
                     sys.stdout.flush()
                     raise RuntimeError(error_msg)
                 else:
-                    print(f"✅ Output file created: {self.curated_jsonl}", flush=True)
+                    print(f"Output file created: {self.curated_jsonl}", flush=True)
                     sys.stdout.flush()
                 
             else:
@@ -521,8 +521,8 @@ class PipelineOrchestrator:
                 sys.stdout.flush()
                 
                 if use_pipeline_api:
-                    print("🔬 Using NeMo Curator Pipeline API with FREE download_arxiv()", flush=True)
-                    logger.info("🔬 Using NeMo Curator Pipeline API with FREE download_arxiv()")
+                    print("Using NeMo Curator Pipeline API with FREE download_arxiv()", flush=True)
+                    logger.info("Using NeMo Curator Pipeline API with FREE download_arxiv()")
                     print("   No existing text files found - will download from ArXiv", flush=True)
                     logger.info("   No existing text files found - will download from ArXiv")
                     sys.stdout.flush()
@@ -537,7 +537,7 @@ class PipelineOrchestrator:
                     checkpoint_interval = nemo_config.get('checkpoint_interval', 1000)
                     resume = nemo_config.get('resume', True)
                     
-                    print(f"\n🚀 Calling run_nemo_curator_pipeline()...", flush=True)
+                    print(f"\nCalling run_nemo_curator_pipeline()...", flush=True)
                     print(f"   Output path: {self.curated_jsonl}", flush=True)
                     print(f"   Raw data path: {raw_data_path}", flush=True)
                     print(f"   Filter query: {filter_query}", flush=True)
@@ -558,10 +558,10 @@ class PipelineOrchestrator:
                             max_papers=max_papers,
                             resume=resume
                         )
-                        print(f"✅ run_nemo_curator_pipeline() returned: {result}", flush=True)
+                        print(f"run_nemo_curator_pipeline() returned: {result}", flush=True)
                         sys.stdout.flush()
                     except Exception as e:
-                        print(f"❌ run_nemo_curator_pipeline() failed with error: {e}", flush=True)
+                        print(f"run_nemo_curator_pipeline() failed with error: {e}", flush=True)
                         import traceback
                         print(f"   Full traceback:\n{traceback.format_exc()}", flush=True)
                         sys.stdout.flush()
@@ -569,7 +569,7 @@ class PipelineOrchestrator:
                     
                     if result is None:
                         error_msg = "NeMo Curator pipeline failed (returned None)"
-                        print(f"❌ {error_msg}", flush=True)
+                        print(f"{error_msg}", flush=True)
                         logger.error(error_msg)
                         sys.stdout.flush()
                         raise RuntimeError(error_msg)
@@ -581,22 +581,22 @@ class PipelineOrchestrator:
             
             if not self.curated_jsonl.exists():
                 error_msg = f"Curated dataset not created: {self.curated_jsonl}"
-                print(f"❌ {error_msg}", flush=True)
+                print(f"{error_msg}", flush=True)
                 logger.error(error_msg)
                 sys.stdout.flush()
                 raise FileNotFoundError(error_msg)
             
             # Count curated papers
-            print(f"📊 Counting curated papers...", flush=True)
+            print(f"Counting curated papers...", flush=True)
             try:
                 count = sum(1 for _ in open(self.curated_jsonl))
-                print(f"✅ Curated {count} papers", flush=True)
-                logger.info(f"📊 Curated {count} papers")
+                print(f"Curated {count} papers", flush=True)
+                logger.info(f"Curated {count} papers")
             except Exception as e:
-                print(f"⚠️  Error counting papers: {e}", flush=True)
+                print(f"Error counting papers: {e}", flush=True)
                 count = 0
             
-            print(f"✅ Step 3 completed successfully!", flush=True)
+            print(f"Step 3 completed successfully!", flush=True)
             sys.stdout.flush()
             self._log_step_end(step_name, True)
             return True
@@ -605,13 +605,13 @@ class PipelineOrchestrator:
             import sys
             import traceback
             
-            error_msg = f"❌ Step 3 failed: {e}"
+            error_msg = f"Step 3 failed: {e}"
             print(f"\n{'='*80}", flush=True)
             print(f"{error_msg}", flush=True)
             print(f"{'='*80}", flush=True)
             
             full_traceback = traceback.format_exc()
-            print(f"\n📋 Full error traceback:", flush=True)
+            print(f"\nFull error traceback:", flush=True)
             print(full_traceback, flush=True)
             
             logger.error(error_msg, exc_info=True)
@@ -635,13 +635,13 @@ class PipelineOrchestrator:
             if self.processed_jsonl.exists():
                 count = sum(1 for line in open(self.processed_jsonl) if line.strip())
                 if count > 0:
-                    logger.info(f"📊 Found {count} papers in existing processed dataset")
+                    logger.info(f"Found {count} papers in existing processed dataset")
                     self._log_step_end(step_name, True)
                     return True
                 else:
-                    logger.warning(f"⚠️  Processed file exists but is empty. Re-running processing...")
+                    logger.warning(f"Processed file exists but is empty. Re-running processing...")
             else:
-                logger.warning(f"⚠️  Processed file check passed but doesn't exist. Re-running processing...")
+                logger.warning(f"Processed file check passed but doesn't exist. Re-running processing...")
         
         try:
             if not self.curated_jsonl.exists():
@@ -652,7 +652,7 @@ class PipelineOrchestrator:
             
             num_workers = processing_config.get('workers', processing_config.get('num_workers', 4))
             
-            logger.info(f"🔬 Starting healthcare-specific processing...")
+            logger.info(f"Starting healthcare-specific processing...")
             logger.info(f"   Input: {self.curated_jsonl}")
             logger.info(f"   Output: {self.processed_jsonl}")
             logger.info(f"   Workers: {num_workers}")
@@ -668,7 +668,7 @@ class PipelineOrchestrator:
             
             # Count processed papers
             count = sum(1 for _ in open(self.processed_jsonl))
-            logger.info(f"📊 Processed {count} papers")
+            logger.info(f"Processed {count} papers")
             
             # Cleanup intermediate files if requested (but keep text_dir for training)
             if self.config['pipeline']['cleanup_intermediate']:
@@ -681,7 +681,7 @@ class PipelineOrchestrator:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Step 4 failed: {e}", exc_info=True)
+            logger.error(f"Step 4 failed: {e}", exc_info=True)
             self._log_step_end(step_name, False)
             return False
     
@@ -699,46 +699,46 @@ class PipelineOrchestrator:
             # Double-check: verify tokenizer files are valid
             if self.tokenizer_model.exists() and self.tokenizer_vocab.exists():
                 if self.tokenizer_model.stat().st_size > 0 and self.tokenizer_vocab.stat().st_size > 0:
-                    logger.info(f"📊 Found existing tokenizer files")
+                    logger.info(f"Found existing tokenizer files")
                     self._log_step_end(step_name, True)
                     return True
                 else:
-                    logger.warning(f"⚠️  Tokenizer files exist but are empty. Re-running tokenizer training...")
+                    logger.warning(f"Tokenizer files exist but are empty. Re-running tokenizer training...")
             else:
-                logger.warning(f"⚠️  Tokenizer file check passed but files don't exist. Re-running tokenizer training...")
+                logger.warning(f"Tokenizer file check passed but files don't exist. Re-running tokenizer training...")
         
         try:
             import sys
             print(f"\n{'='*80}", flush=True)
-            print(f"📦 Step 5: {step_name}", flush=True)
+            print(f"Step 5: {step_name}", flush=True)
             print(f"{'='*80}", flush=True)
             print(f"⏰ Starting at: {datetime.now().isoformat()}", flush=True)
             sys.stdout.flush()
             
             if not self.processed_jsonl.exists():
                 error_msg = f"Processed dataset not found: {self.processed_jsonl}"
-                print(f"❌ {error_msg}", flush=True)
+                print(f"{error_msg}", flush=True)
                 raise FileNotFoundError(error_msg)
             
-            print(f"📁 Input file: {self.processed_jsonl}", flush=True)
-            print(f"📁 Output directory: {self.output_dir}", flush=True)
+            print(f"Input file: {self.processed_jsonl}", flush=True)
+            print(f"Output directory: {self.output_dir}", flush=True)
             
             # Check file size
             file_size = self.processed_jsonl.stat().st_size
-            print(f"📊 Input file size: {file_size:,} bytes", flush=True)
+            print(f"Input file size: {file_size:,} bytes", flush=True)
             
             if file_size == 0:
                 error_msg = f"Input file is empty: {self.processed_jsonl}"
-                print(f"❌ {error_msg}", flush=True)
+                print(f"{error_msg}", flush=True)
                 raise ValueError(error_msg)
             
             tokenizer_config = self.config['tokenizer']
-            print(f"🔧 Tokenizer config:", flush=True)
+            print(f"Tokenizer config:", flush=True)
             print(f"   Model prefix: {tokenizer_config['model_prefix']}", flush=True)
             print(f"   Vocab size: {tokenizer_config['vocab_size']}", flush=True)
             sys.stdout.flush()
             
-            print(f"\n🚀 Calling train_healthcare_tokenizer()...", flush=True)
+            print(f"\nCalling train_healthcare_tokenizer()...", flush=True)
             sys.stdout.flush()
             
             train_healthcare_tokenizer(
@@ -748,39 +748,39 @@ class PipelineOrchestrator:
                 vocab_size=tokenizer_config['vocab_size']
             )
             
-            print(f"\n🔍 Verifying tokenizer files were created...", flush=True)
+            print(f"\nVerifying tokenizer files were created...", flush=True)
             if not self.tokenizer_model.exists():
                 error_msg = f"Tokenizer model file not created: {self.tokenizer_model}"
-                print(f"❌ {error_msg}", flush=True)
+                print(f"{error_msg}", flush=True)
                 raise FileNotFoundError(error_msg)
             
             if not self.tokenizer_vocab.exists():
                 error_msg = f"Tokenizer vocab file not created: {self.tokenizer_vocab}"
-                print(f"❌ {error_msg}", flush=True)
+                print(f"{error_msg}", flush=True)
                 raise FileNotFoundError(error_msg)
             
             model_size = self.tokenizer_model.stat().st_size
             vocab_size = self.tokenizer_vocab.stat().st_size
-            print(f"✅ Tokenizer files created:", flush=True)
+            print(f"Tokenizer files created:", flush=True)
             print(f"   Model: {self.tokenizer_model} ({model_size:,} bytes)", flush=True)
             print(f"   Vocab: {self.tokenizer_vocab} ({vocab_size:,} bytes)", flush=True)
             
-            logger.info(f"📊 Tokenizer trained: {self.tokenizer_model}")
+            logger.info(f"Tokenizer trained: {self.tokenizer_model}")
             
-            print(f"✅ Step 5 completed successfully!", flush=True)
+            print(f"Step 5 completed successfully!", flush=True)
             sys.stdout.flush()
             self._log_step_end(step_name, True)
             return True
             
         except Exception as e:
             import traceback
-            error_msg = f"❌ Step 5 failed: {e}"
+            error_msg = f"Step 5 failed: {e}"
             print(f"\n{'='*80}", flush=True)
             print(f"{error_msg}", flush=True)
             print(f"{'='*80}", flush=True)
             
             full_traceback = traceback.format_exc()
-            print(f"\n📋 Full error traceback:", flush=True)
+            print(f"\nFull error traceback:", flush=True)
             print(full_traceback, flush=True)
             
             logger.error(error_msg, exc_info=True)
@@ -799,7 +799,7 @@ class PipelineOrchestrator:
         self._log_step_start(step_name, 6, 8)
         
         if not TRAIN_COLAB_AVAILABLE:
-            logger.error("❌ train_colab.py not available")
+            logger.error("train_colab.py not available")
             self._log_step_end(step_name, False)
             return False
         
@@ -824,7 +824,7 @@ class PipelineOrchestrator:
                 if 'step_' in checkpoint_name:
                     step_num = int(checkpoint_name.split('_')[1])
                     if step_num >= max_steps:
-                        logger.info(f"✅ Training already complete (step {step_num} >= {max_steps})")
+                        logger.info(f"Training already complete (step {step_num} >= {max_steps})")
                         self._log_step_end(step_name, True)
                         return True
             
@@ -874,7 +874,7 @@ class PipelineOrchestrator:
                     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
                 else:
                     model.load_state_dict(checkpoint, strict=False)
-                logger.info(f"✅ Loaded pretrained model from {training_config['model_path']}")
+                logger.info(f"Loaded pretrained model from {training_config['model_path']}")
             
             # Create dataset
             # Note: dataset reads from text_dir, so we need to keep it until after training
@@ -927,7 +927,7 @@ class PipelineOrchestrator:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Step 6 failed: {e}", exc_info=True)
+            logger.error(f"Step 6 failed: {e}", exc_info=True)
             self._log_step_end(step_name, False)
             return False
     
@@ -941,7 +941,7 @@ class PipelineOrchestrator:
         self._log_step_start(step_name, 7, 8)
         
         if not EVALUATE_AVAILABLE:
-            logger.error("❌ evaluate.py not available")
+            logger.error("evaluate.py not available")
             self._log_step_end(step_name, False)
             return False
         
@@ -981,7 +981,7 @@ class PipelineOrchestrator:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Step 7 failed: {e}", exc_info=True)
+            logger.error(f"Step 7 failed: {e}", exc_info=True)
             self._log_step_end(step_name, False)
             return False
     
@@ -995,7 +995,7 @@ class PipelineOrchestrator:
         self._log_step_start(step_name, 8, 8)
         
         if not INFERENCE_AVAILABLE:
-            logger.error("❌ inference.py not available")
+            logger.error("inference.py not available")
             self._log_step_end(step_name, False)
             return False
         
@@ -1024,7 +1024,7 @@ class PipelineOrchestrator:
             
             # Precompute embeddings if requested
             if inference_config.get('precompute_embeddings', False) and self.processed_jsonl.exists():
-                logger.info("📊 Precomputing corpus embeddings...")
+                logger.info("Precomputing corpus embeddings...")
                 embeddings_path = inference_dir / "corpus_embeddings.npz"
                 
                 # Read corpus texts from JSONL
@@ -1049,9 +1049,9 @@ class PipelineOrchestrator:
                         output_path=str(embeddings_path),
                         metadata=metadata_list if metadata_list else None
                     )
-                    logger.info(f"✅ Precomputed embeddings for {len(corpus_texts)} documents")
+                    logger.info(f"Precomputed embeddings for {len(corpus_texts)} documents")
                 else:
-                    logger.warning("⚠️  No texts found in processed dataset, skipping embedding precomputation")
+                    logger.warning("No texts found in processed dataset, skipping embedding precomputation")
             
             # Export to ONNX if requested
             if inference_config.get('export_onnx', False):
@@ -1069,23 +1069,23 @@ class PipelineOrchestrator:
             with open(inference_dir / "pipeline_info.json", 'w') as f:
                 json.dump(pipeline_info, f, indent=2)
             
-            logger.info(f"✅ Inference pipeline exported to {inference_dir}")
+            logger.info(f"Inference pipeline exported to {inference_dir}")
             
             self._log_step_end(step_name, True)
             return True
             
         except FileNotFoundError as e:
-            logger.error(f"❌ Step 8 failed - file not found: {e}")
-            logger.info("💡 Tip: Ensure training completed successfully and checkpoint exists")
+            logger.error(f"Step 8 failed - file not found: {e}")
+            logger.info("Tip: Ensure training completed successfully and checkpoint exists")
             self._log_step_end(step_name, False)
             return False
         except ImportError as e:
-            logger.error(f"❌ Step 8 failed - import error: {e}")
-            logger.info("💡 Tip: Ensure all dependencies are installed (sentencepiece, torch, etc.)")
+            logger.error(f"Step 8 failed - import error: {e}")
+            logger.info("Tip: Ensure all dependencies are installed (sentencepiece, torch, etc.)")
             self._log_step_end(step_name, False)
             return False
         except Exception as e:
-            logger.error(f"❌ Step 8 failed: {e}", exc_info=True)
+            logger.error(f"Step 8 failed: {e}", exc_info=True)
             logger.error(f"   Full traceback:", exc_info=True)
             self._log_step_end(step_name, False)
             return False
@@ -1177,10 +1177,10 @@ class PipelineOrchestrator:
                 start_from_step = step_num
                 break
             else:
-                logger.info("✅ All steps already complete!")
+                logger.info("All steps already complete!")
                 return
         
-        logger.info(f"🚀 Starting pipeline from step {start_from_step}")
+        logger.info(f"Starting pipeline from step {start_from_step}")
         
         # Run steps
         for step_num, step_func in steps:
@@ -1189,13 +1189,13 @@ class PipelineOrchestrator:
             
             success = step_func()
             if not success:
-                logger.error(f"❌ Pipeline stopped at step {step_num}")
+                logger.error(f"Pipeline stopped at step {step_num}")
                 break
         
         # Generate final report
         logger.info("")
         logger.info("=" * 80)
-        logger.info("📊 Generating Final Report")
+        logger.info("Generating Final Report")
         logger.info("=" * 80)
         
         report = self.generate_report()
@@ -1203,13 +1203,13 @@ class PipelineOrchestrator:
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=2)
         
-        logger.info(f"📄 Report saved to: {report_path}")
+        logger.info(f"Report saved to: {report_path}")
         logger.info("")
         logger.info("=" * 80)
-        logger.info("✅ Pipeline Complete!")
+        logger.info("Pipeline Complete!")
         logger.info("=" * 80)
-        logger.info(f"⏱️  Total time: {report['pipeline']['total_elapsed_hours']:.2f} hours")
-        logger.info(f"📊 Steps completed: {sum(1 for s in self.step_status.values() if s['success'])}/8")
+        logger.info(f"Total time: {report['pipeline']['total_elapsed_hours']:.2f} hours")
+        logger.info(f"Steps completed: {sum(1 for s in self.step_status.values() if s['success'])}/8")
 
 
 def main():
@@ -1237,7 +1237,7 @@ def main():
     args = parser.parse_args()
     
     if not os.path.exists(args.config):
-        print(f"❌ Config file not found: {args.config}")
+        print(f"Config file not found: {args.config}")
         print(f"   Please create config.yaml or specify --config")
         sys.exit(1)
     

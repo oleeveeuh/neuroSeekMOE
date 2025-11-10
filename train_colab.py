@@ -47,7 +47,7 @@ try:
     SENTENCEPIECE_AVAILABLE = True
 except ImportError:
     SENTENCEPIECE_AVAILABLE = False
-    print("⚠️  sentencepiece not available")
+    print("sentencepiece not available")
 
 
 class TrainingLogger:
@@ -149,7 +149,7 @@ def save_checkpoint(
     }
     
     torch.save(checkpoint, checkpoint_path)
-    print(f"💾 Saved checkpoint: {checkpoint_path}")
+    print(f"Saved checkpoint: {checkpoint_path}")
     
     # Delete old checkpoints (keep only last max_checkpoints)
     checkpoints = []
@@ -166,7 +166,7 @@ def save_checkpoint(
         # Delete oldest checkpoints
         for step_num, path in checkpoints[:-max_checkpoints]:
             os.remove(path)
-            print(f"🗑️  Deleted old checkpoint: step_{step_num}.pt")
+            print(f"  Deleted old checkpoint: step_{step_num}.pt")
 
 
 def load_checkpoint(
@@ -196,7 +196,7 @@ def load_checkpoint(
     scaler.load_state_dict(checkpoint['scaler_state_dict'])
     
     step = checkpoint.get('step', 0)
-    print(f"✅ Loaded checkpoint from step {step}: {checkpoint_path}")
+    print(f"Loaded checkpoint from step {step}: {checkpoint_path}")
     
     return step
 
@@ -251,7 +251,7 @@ def find_max_batch_size(
     Returns:
         Maximum batch size that fits
     """
-    print(f"🔍 Finding maximum batch size (starting from {start_batch_size})...")
+    print(f"Finding maximum batch size (starting from {start_batch_size})...")
     
     model.eval()
     batch_size = start_batch_size
@@ -283,7 +283,7 @@ def find_max_batch_size(
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            print(f"   ✅ Batch size {batch_size} fits")
+            print(f"   Batch size {batch_size} fits")
             batch_size = min(batch_size + 2, start_batch_size * 2)  # Cap at 2x start
             break
             
@@ -291,13 +291,13 @@ def find_max_batch_size(
             if "out of memory" in str(e):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                print(f"   ❌ Batch size {batch_size} too large, trying {batch_size - 1}")
+                print(f"   Batch size {batch_size} too large, trying {batch_size - 1}")
                 batch_size -= 1
             else:
                 raise
     
     model.train()
-    print(f"✅ Maximum batch size: {batch_size}")
+    print(f"Maximum batch size: {batch_size}")
     return max(batch_size, min_batch_size)
 
 
@@ -380,7 +380,7 @@ def train(
     # Enable gradient checkpointing if available
     if hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
-        print("✅ Gradient checkpointing enabled")
+        print("Gradient checkpointing enabled")
     
     # Resume from checkpoint if specified or auto-detect
     start_step = 0
@@ -403,7 +403,7 @@ def train(
     start_time = time.time()
     
     print("=" * 60)
-    print("🚀 Starting Training Loop")
+    print("Starting Training Loop")
     print("=" * 60)
     print(f"   Device: {device}")
     print(f"   Batch size: {batch_size}")
@@ -444,7 +444,7 @@ def train(
             accumulated_loss += loss.item() * gradient_accumulation_steps
         except RuntimeError as e:
             if "out of memory" in str(e):
-                print(f"⚠️  OOM at step {step}, skipping batch")
+                print(f"OOM at step {step}, skipping batch")
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 # Reset gradients if we were accumulating
@@ -505,11 +505,11 @@ def train(
             save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
     
     # Final checkpoint
-    print("\n💾 Saving final checkpoint...")
+    print("\nSaving final checkpoint...")
     save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
     
-    print("\n✅ Training complete!")
-    print(f"📊 Training log saved to: {log_file}")
+    print("\nTraining complete!")
+    print(f"Training log saved to: {log_file}")
 
 
 def main():
@@ -568,11 +568,11 @@ def main():
     # Handle deprecated/alias arguments
     if args.checkpoint_dir is not None:
         args.output_dir = args.checkpoint_dir
-        print("⚠️  Warning: --checkpoint-dir is deprecated, use --output-dir instead")
+        print("Warning: --checkpoint-dir is deprecated, use --output-dir instead")
     
     if args.gradient_accumulation_steps is not None:
         args.gradient_accumulation = args.gradient_accumulation_steps
-        print("⚠️  Warning: --gradient-accumulation-steps is deprecated, use --gradient-accumulation instead")
+        print("Warning: --gradient-accumulation-steps is deprecated, use --gradient-accumulation instead")
     
     # Load tokenizer
     if not SENTENCEPIECE_AVAILABLE:
@@ -580,7 +580,7 @@ def main():
     
     tokenizer = spm.SentencePieceProcessor()
     tokenizer.load(args.tokenizer_path)
-    print(f"✅ Loaded tokenizer from {args.tokenizer_path}")
+    print(f"Loaded tokenizer from {args.tokenizer_path}")
     print(f"   Vocabulary size: {tokenizer.get_piece_size()}")
     
     # Create dataset
@@ -591,16 +591,16 @@ def main():
         max_length=512,
         min_length=64
     )
-    print(f"✅ Created dataset with ~{len(dataset)} samples")
+    print(f"Created dataset with ~{len(dataset)} samples")
     
     # Load model - use SimpleMoEModel from train_real.py
     vocab_size = tokenizer.get_piece_size()
     
     try:
         from train_real import SimpleMoEModel
-        print("✅ Imported SimpleMoEModel from train_real.py")
+        print("Imported SimpleMoEModel from train_real.py")
     except ImportError:
-        print("⚠️  Could not import SimpleMoEModel, using dummy model")
+        print("Could not import SimpleMoEModel, using dummy model")
         # Fallback to dummy model
         class DummyModel(nn.Module):
             def __init__(self, vocab_size):
@@ -661,15 +661,15 @@ def main():
             checkpoint = torch.load(args.model_path, map_location='cpu')
             if 'model_state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-                print(f"✅ Loaded model from {args.model_path}")
+                print(f"Loaded model from {args.model_path}")
             else:
                 model.load_state_dict(checkpoint, strict=False)
-                print(f"✅ Loaded model weights from {args.model_path}")
+                print(f"Loaded model weights from {args.model_path}")
         except Exception as e:
-            print(f"⚠️  Could not load model from {args.model_path}: {e}")
+            print(f"Could not load model from {args.model_path}: {e}")
             print("   Using randomly initialized model")
     else:
-        print(f"⚠️  Model path {args.model_path} does not exist, using randomly initialized model")
+        print(f"Model path {args.model_path} does not exist, using randomly initialized model")
     
     # Create adapter
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

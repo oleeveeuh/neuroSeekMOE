@@ -532,10 +532,14 @@ def main():
     # Training config
     parser.add_argument('--output-dir', type=str, default='./checkpoints',
                        help='Output directory for checkpoints')
+    parser.add_argument('--checkpoint-dir', type=str, default=None,
+                       help='Alias for --output-dir (deprecated, use --output-dir)')
     parser.add_argument('--batch-size', type=int, default=6,
                        help='Batch size (default: 6)')
     parser.add_argument('--gradient-accumulation', type=int, default=4,
                        help='Gradient accumulation steps (default: 4)')
+    parser.add_argument('--gradient-accumulation-steps', type=int, default=None,
+                       help='Alias for --gradient-accumulation (deprecated, use --gradient-accumulation)')
     parser.add_argument('--max-steps', type=int, default=50000,
                        help='Maximum training steps (default: 50000)')
     parser.add_argument('--learning-rate', type=float, default=5e-4,
@@ -560,6 +564,15 @@ def main():
                        help='Loss weight for neuroscience papers (default: 1.2)')
     
     args = parser.parse_args()
+    
+    # Handle deprecated/alias arguments
+    if args.checkpoint_dir is not None:
+        args.output_dir = args.checkpoint_dir
+        print("⚠️  Warning: --checkpoint-dir is deprecated, use --output-dir instead")
+    
+    if args.gradient_accumulation_steps is not None:
+        args.gradient_accumulation = args.gradient_accumulation_steps
+        print("⚠️  Warning: --gradient-accumulation-steps is deprecated, use --gradient-accumulation instead")
     
     # Load tokenizer
     if not SENTENCEPIECE_AVAILABLE:

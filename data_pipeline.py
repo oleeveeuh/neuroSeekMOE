@@ -4621,8 +4621,9 @@ def train_healthcare_tokenizer(
     print()
     
     if total_papers == 0:
-        print("❌ No papers found in input file!")
-        return
+        error_msg = f"❌ No papers found in input file: {input_jsonl}"
+        print(error_msg)
+        raise ValueError(error_msg)
     
     # Step 2: Train tokenizer
     print("Step 2: Training SentencePiece tokenizer...")
@@ -4639,8 +4640,9 @@ def train_healthcare_tokenizer(
     print()
     
     if not trained_model:
-        print("❌ Tokenizer training failed!")
-        return
+        error_msg = "❌ Tokenizer training failed!"
+        print(error_msg)
+        raise RuntimeError(error_msg)
     
     # Step 3: Validate tokenizer
     print("Step 3: Validating tokenizer...")

@@ -706,10 +706,38 @@ class PipelineOrchestrator:
                 logger.warning(f"⚠️  Tokenizer file check passed but files don't exist. Re-running tokenizer training...")
         
         try:
+            import sys
+            print(f"\n{'='*80}", flush=True)
+            print(f"📦 Step 5: {step_name}", flush=True)
+            print(f"{'='*80}", flush=True)
+            print(f"⏰ Starting at: {datetime.now().isoformat()}", flush=True)
+            sys.stdout.flush()
+            
             if not self.processed_jsonl.exists():
-                raise FileNotFoundError(f"Processed dataset not found: {self.processed_jsonl}")
+                error_msg = f"Processed dataset not found: {self.processed_jsonl}"
+                print(f"❌ {error_msg}", flush=True)
+                raise FileNotFoundError(error_msg)
+            
+            print(f"📁 Input file: {self.processed_jsonl}", flush=True)
+            print(f"📁 Output directory: {self.output_dir}", flush=True)
+            
+            # Check file size
+            file_size = self.processed_jsonl.stat().st_size
+            print(f"📊 Input file size: {file_size:,} bytes", flush=True)
+            
+            if file_size == 0:
+                error_msg = f"Input file is empty: {self.processed_jsonl}"
+                print(f"❌ {error_msg}", flush=True)
+                raise ValueError(error_msg)
             
             tokenizer_config = self.config['tokenizer']
+            print(f"🔧 Tokenizer config:", flush=True)
+            print(f"   Model prefix: {tokenizer_config['model_prefix']}", flush=True)
+            print(f"   Vocab size: {tokenizer_config['vocab_size']}", flush=True)
+            sys.stdout.flush()
+            
+            print(f"\n🚀 Calling train_healthcare_tokenizer()...", flush=True)
+            sys.stdout.flush()
             
             train_healthcare_tokenizer(
                 input_jsonl=str(self.processed_jsonl),
@@ -718,16 +746,44 @@ class PipelineOrchestrator:
                 vocab_size=tokenizer_config['vocab_size']
             )
             
-            if not self.tokenizer_model.exists() or not self.tokenizer_vocab.exists():
-                raise FileNotFoundError(f"Tokenizer files not created: {self.tokenizer_model}")
+            print(f"\n🔍 Verifying tokenizer files were created...", flush=True)
+            if not self.tokenizer_model.exists():
+                error_msg = f"Tokenizer model file not created: {self.tokenizer_model}"
+                print(f"❌ {error_msg}", flush=True)
+                raise FileNotFoundError(error_msg)
+            
+            if not self.tokenizer_vocab.exists():
+                error_msg = f"Tokenizer vocab file not created: {self.tokenizer_vocab}"
+                print(f"❌ {error_msg}", flush=True)
+                raise FileNotFoundError(error_msg)
+            
+            model_size = self.tokenizer_model.stat().st_size
+            vocab_size = self.tokenizer_vocab.stat().st_size
+            print(f"✅ Tokenizer files created:", flush=True)
+            print(f"   Model: {self.tokenizer_model} ({model_size:,} bytes)", flush=True)
+            print(f"   Vocab: {self.tokenizer_vocab} ({vocab_size:,} bytes)", flush=True)
             
             logger.info(f"📊 Tokenizer trained: {self.tokenizer_model}")
             
+            print(f"✅ Step 5 completed successfully!", flush=True)
+            sys.stdout.flush()
             self._log_step_end(step_name, True)
             return True
             
         except Exception as e:
-            logger.error(f"❌ Step 5 failed: {e}", exc_info=True)
+            import traceback
+            error_msg = f"❌ Step 5 failed: {e}"
+            print(f"\n{'='*80}", flush=True)
+            print(f"{error_msg}", flush=True)
+            print(f"{'='*80}", flush=True)
+            
+            full_traceback = traceback.format_exc()
+            print(f"\n📋 Full error traceback:", flush=True)
+            print(full_traceback, flush=True)
+            
+            logger.error(error_msg, exc_info=True)
+            sys.stdout.flush()
+            
             self._log_step_end(step_name, False)
             return False
     

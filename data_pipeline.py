@@ -298,17 +298,23 @@ OPTIMIZED_QUERIES = {
     'tier_1_primary': [
         ("cat:cs.LG AND healthcare", 5000),
         ("cat:cs.LG AND (medical OR diagnosis OR clinical)", 5000),
-        ("cat:cs.AI AND (neurodegeneration OR alzheimer OR parkinson)", 3000),
-        ("cat:cs.AI AND (drug OR protein OR molecular)", 2000),
+        ("cs AND (machine learning OR deep learning) AND (neurodegeneration OR alzheimer OR parkinson)", 3000),
+        ("cs AND (machine learning OR deep learning) AND (drug OR protein OR molecular)", 2000),
     ],
     'tier_2_neuro_ml': [
-        ("cat:q-bio.NC AND (machine learning OR deep learning OR neural network)", 4000),
-        ("cat:q-bio.NC AND (fmri OR eeg OR neuroimaging)", 2000),
-        ("cat:q-bio.NC AND (connectome OR brain mapping)", 1000),
+        ("q-bio AND (machine learning OR deep learning OR neural network OR computational)", 4000),
+        ("(neuroscience OR brain OR fmri OR eeg OR neuroimaging) AND (learning OR analysis OR computational)", 2000),
+        ("(neural OR brain) AND (network OR mapping OR connectivity OR analysis)", 1000),
     ],
     'tier_3_medical_imaging': [
-        ("cat:cs.LG AND (medical imaging OR mri OR ct OR x-ray)", 3000),
-        ("cat:cs.CV AND (medical OR diagnosis OR pathology)", 2000),
+        ("cs AND (image OR imaging OR segmentation) AND (medical OR diagnosis OR pathology)", 3000),
+        ("(computer vision OR image processing) AND (medical OR clinical OR diagnosis OR treatment)", 2000),
+    ],
+    'tier_4_broad_coverage': [
+        ("(machine learning OR deep learning OR artificial intelligence) AND (healthcare OR hospital OR patient OR clinical)", 5000),
+        ("(model OR algorithm OR network) AND (disease OR diagnosis OR prognosis OR treatment)", 4000),
+        ("(learning OR neural) AND (medical OR health OR clinical OR patient)", 3000),
+        ("(data OR prediction OR classification) AND (medical OR diagnosis OR disease OR health)", 3000),
     ],
 }
 

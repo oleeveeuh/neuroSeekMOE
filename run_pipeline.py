@@ -936,14 +936,47 @@ class PipelineOrchestrator:
             latest_checkpoint = find_latest_checkpoint(str(checkpoint_dir))
             max_steps = training_config['max_steps']
             
-            # Check if we've reached max_steps
-            if latest_checkpoint:
+            # Count current dataset size
+            current_dataset_size = 0
+            if self.processed_jsonl.exists():
+                current_dataset_size = sum(1 for line in open(self.processed_jsonl) if line.strip())
+            
+            # Check if dataset has grown since last training
+            dataset_metadata_file = checkpoint_dir / "dataset_metadata.json"
+            should_retrain_due_to_dataset_growth = False
+            
+            if latest_checkpoint and dataset_metadata_file.exists():
+                try:
+                    with open(dataset_metadata_file, 'r') as f:
+                        training_metadata = json.load(f)
+                        training_dataset_size = training_metadata.get('dataset_size', 0)
+                        
+                        if current_dataset_size > training_dataset_size:
+                            logger.info(f"Dataset has grown: {current_dataset_size} papers (was {training_dataset_size} when last trained)")
+                            logger.info(f"   Retraining to include new data...")
+                            should_retrain_due_to_dataset_growth = True
+                        elif current_dataset_size < training_dataset_size:
+                            logger.warning(f"Dataset size decreased: {current_dataset_size} papers (was {training_dataset_size})")
+                            logger.warning(f"   This may indicate data was removed. Continuing with current dataset...")
+                except Exception as e:
+                    logger.warning(f"Could not read training metadata: {e}. Will check training completion status...")
+            
+            # Check if we've reached max_steps (only if dataset hasn't grown)
+            if latest_checkpoint and not should_retrain_due_to_dataset_growth:
                 # Extract step number from checkpoint filename
                 checkpoint_name = Path(latest_checkpoint).stem
                 if 'step_' in checkpoint_name:
                     step_num = int(checkpoint_name.split('_')[1])
                     if step_num >= max_steps:
                         logger.info(f"Training already complete (step {step_num} >= {max_steps})")
+                        # Update dataset metadata even if training is complete
+                        if current_dataset_size > 0:
+                            with open(dataset_metadata_file, 'w') as f:
+                                json.dump({
+                                    'dataset_size': current_dataset_size,
+                                    'last_trained_step': step_num,
+                                    'last_updated': datetime.now().isoformat()
+                                }, f, indent=2)
                         self._log_step_end(step_name, True)
                         return True
             
@@ -1035,6 +1068,25 @@ class PipelineOrchestrator:
                 log_interval=training_config.get('log_interval', 100),
                 resume_from_checkpoint=None  # Auto-detect
             )
+            
+            # Save dataset metadata after training
+            if current_dataset_size > 0:
+                latest_checkpoint_after = find_latest_checkpoint(str(checkpoint_dir))
+                latest_step = 0
+                if latest_checkpoint_after:
+                    checkpoint_name = Path(latest_checkpoint_after).stem
+                    if 'step_' in checkpoint_name:
+                        latest_step = int(checkpoint_name.split('_')[1])
+                
+                with open(dataset_metadata_file, 'w') as f:
+                    json.dump({
+                        'dataset_size': current_dataset_size,
+                        'last_trained_step': latest_step,
+                        'last_updated': datetime.now().isoformat(),
+                        'processed_jsonl': str(self.processed_jsonl),
+                        'processed_jsonl_mtime': os.path.getmtime(self.processed_jsonl) if self.processed_jsonl.exists() else None
+                    }, f, indent=2)
+                logger.info(f"Saved dataset metadata: {current_dataset_size} papers, step {latest_step}")
             
             # Cleanup text_dir after training if requested
             if self.config['pipeline']['cleanup_intermediate']:

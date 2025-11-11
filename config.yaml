@@ -2,11 +2,13 @@
 
 # Pipeline Settings
 pipeline:
-  output_dir: "./data/arxiv"
+  output_dir: "./data/arxiv"  # Local fallback directory
   max_papers: 30000  # Target number of papers
   skip_stages: []  # List of stages to skip: [collect, extract, curate, preprocess, tokenize]
   resume: true  # Resume from last completed step
   cleanup_intermediate: true  # Delete intermediate files after processing
+  use_drive: true  # Use Google Drive if available (Colab) - saves directly to Drive for persistence
+  drive_base: "/content/drive/MyDrive/neuroMOE_results"  # Google Drive base path (Colab)
 
 # Step 1: ArXiv Paper Collection
 collection:

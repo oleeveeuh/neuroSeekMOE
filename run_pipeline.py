@@ -92,8 +92,29 @@ class PipelineOrchestrator:
         """
         self.config_path = config_path
         self.config = self._load_config(config_path)
-        self.output_dir = Path(self.config['pipeline']['output_dir'])
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Check if we should use Google Drive (Colab)
+        use_drive = self.config['pipeline'].get('use_drive', True)
+        local_output_dir = self.config['pipeline']['output_dir']
+        
+        if use_drive:
+            # Try to use Google Drive if available
+            try:
+                from data_pipeline import get_drive_output_dir
+                output_dir_str = get_drive_output_dir(
+                    local_output_dir=local_output_dir,
+                    drive_base=self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                )
+                self.output_dir = Path(output_dir_str)
+                logger.info(f"Output directory: {self.output_dir} (Google Drive if available)")
+            except Exception as e:
+                # Fall back to local
+                self.output_dir = Path(local_output_dir)
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Using local output directory: {self.output_dir}")
+        else:
+            self.output_dir = Path(local_output_dir)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Pipeline state
         self.step_status = {}
@@ -265,13 +286,17 @@ class PipelineOrchestrator:
             logger.info(f"   Batch size: {batch_size} papers/batch")
             logger.info(f"   RAM target: <{ram_target}%")
             
+            # Use Google Drive if configured
+            use_drive = self.config['pipeline'].get('use_drive', True)
+            
             collect_arxiv_papers(
                 output_dir=str(self.output_dir),
                 max_papers=collection_config['max_papers'],
                 cache_file=collection_config.get('cache_file'),
                 rate_limit_delay=rate_limit_delay,
                 batch_size=batch_size,
-                ram_target=ram_target
+                ram_target=ram_target,
+                use_drive=use_drive
             )
             
             if not self.metadata_jsonl.exists():

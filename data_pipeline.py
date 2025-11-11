@@ -243,9 +243,11 @@ CHECKPOINT_INTERVAL = 5000  # Save checkpoint every 5000 papers
 LOG_INTERVAL = 500  # Log progress every 500 papers
 
 # Target date range (set to None to disable date filtering)
-MIN_YEAR = 2016  # None = no minimum (accept all years)
+# NOTE: Date filtering significantly reduces collection efficiency
+# If you need recent papers, consider filtering AFTER collection
+MIN_YEAR = None  # None = no minimum (accept all years) - DISABLED for efficiency
 MAX_YEAR = None  # None = no maximum (accept all years)
-# Alternative: MIN_YEAR = 2015, MAX_YEAR = 2024 for date filtering
+# Alternative: MIN_YEAR = 2015, MAX_YEAR = 2024 for date filtering (but reduces efficiency)
 
 # ArXiv search queries (legacy - used by older collection functions)
 # Note: The main collection now uses diverse ML + healthcare/neuroscience combinations
@@ -279,6 +281,60 @@ ARXIV_QUERIES = [
 
 # Output fields (minimal metadata)
 OUTPUT_FIELDS = ['id', 'title', 'abstract', 'year', 'categories', 'pdf_url']
+
+# ============================================================================
+# Google Drive Support (for Colab)
+# ============================================================================
+
+def get_drive_output_dir(local_output_dir: str = "./data/arxiv", drive_base: str = "/content/drive/MyDrive/neuroMOE_results") -> str:
+    """
+    Get output directory, preferring Google Drive if available (Colab).
+    
+    Args:
+        local_output_dir: Local output directory (fallback)
+        drive_base: Base path for Google Drive (default Colab path)
+        
+    Returns:
+        Path to output directory (Drive if available, local otherwise)
+    """
+    # Check if we're in Colab and Drive is mounted
+    try:
+        import os
+        drive_path = Path(drive_base)
+        
+        # Check if Drive is mounted (exists and is accessible)
+        if drive_path.exists() and os.access(drive_path, os.W_OK):
+            # Use Drive path
+            drive_output = drive_path / "data" / "arxiv"
+            drive_output.mkdir(parents=True, exist_ok=True)
+            print(f"Using Google Drive for output: {drive_output}")
+            print(f"  Data will persist even if runtime is interrupted")
+            return str(drive_output)
+    except Exception as e:
+        # If Drive not available, fall back to local
+        pass
+    
+    # Fall back to local directory
+    os.makedirs(local_output_dir, exist_ok=True)
+    return local_output_dir
+
+
+def is_colab_environment() -> bool:
+    """Check if running in Google Colab."""
+    try:
+        import os
+        return 'COLAB_GPU' in os.environ or 'COLAB_JUPYTER_TOKEN' in os.environ
+    except:
+        return False
+
+
+def is_drive_mounted(drive_path: str = "/content/drive/MyDrive") -> bool:
+    """Check if Google Drive is mounted."""
+    try:
+        import os
+        return os.path.exists(drive_path) and os.access(drive_path, os.W_OK)
+    except:
+        return False
 
 # ============================================================================
 # Configuration Management
@@ -1221,9 +1277,13 @@ class RAMEfficientArxivCollector:
         max_search_results = max(max_papers * 30, 200000)  # Increased: 30x target, min 200k results
         
         try:
+            # Use more conservative rate limiting to avoid empty page errors
+            # ArXiv API can be sensitive to rapid requests
+            # delay_seconds is the delay between requests (higher = slower but more reliable)
             client = arxiv.Client(
-                delay_seconds=self.rate_limit,
-                num_retries=2
+                delay_seconds=max(self.rate_limit, 3.0),  # Minimum 3 seconds between requests
+                num_retries=3,  # Increased retries for better reliability
+                page_size=100  # Standard page size
             )
             
             # Single large search for the entire query
@@ -1286,8 +1346,9 @@ class RAMEfficientArxivCollector:
                 # Clear memory
                 self._clear_memory()
                 
-                # Avoid hitting rate limits
-                time.sleep(1)
+                # Avoid hitting rate limits - longer delay after each batch
+                # This helps prevent empty page errors from ArXiv API
+                time.sleep(2)  # Increased from 1 to 2 seconds for better reliability
         
         except StopIteration:
             print("   Reached end of search results")
@@ -1499,24 +1560,30 @@ def collect_arxiv_efficient(
     total_target: int = 10000,
     batch_size: int = 10,
     ram_target: float = 50.0,
-    rate_limit: float = 0.33
+    rate_limit: float = 0.33,
+    use_drive: bool = True
 ):
     """
     Collect ArXiv papers efficiently without OOM.
     
     Args:
-        output_dir: Output directory
+        output_dir: Output directory (local fallback)
         total_target: Total papers to collect
         batch_size: Papers per batch (adjust for RAM)
         ram_target: Target RAM percentage to stay below
         rate_limit: Delay between requests (seconds)
+        use_drive: If True, use Google Drive if available (default: True)
     """
     if not ARXIV_AVAILABLE:
         error_msg = "Error: arxiv package not available. Install with: pip install arxiv"
         print(error_msg)
         raise ImportError(error_msg)
     
-    os.makedirs(output_dir, exist_ok=True)
+    # Use Google Drive if available and requested
+    if use_drive:
+        output_dir = get_drive_output_dir(local_output_dir=output_dir)
+    else:
+        os.makedirs(output_dir, exist_ok=True)
     
     output_file = os.path.join(output_dir, "arxiv_papers.jsonl")
     checkpoint_file = os.path.join(output_dir, "collection_checkpoint.json")
@@ -1559,17 +1626,19 @@ def collect_arxiv_papers(
     cache_file: str = None,
     rate_limit_delay: float = RATE_LIMIT_DELAY,
     batch_size: int = 10,
-    ram_target: float = 50.0
+    ram_target: float = 50.0,
+    use_drive: bool = True
 ):
     """Main function to collect ArXiv papers using RAM-efficient batch collection.
     
     Args:
-        output_dir: Directory to save output files
+        output_dir: Directory to save output files (local fallback)
         max_papers: Maximum total papers to collect
         cache_file: Path to cache file (default: output_dir/arxiv_papers.jsonl)
         rate_limit_delay: Delay between API requests (seconds)
         batch_size: Papers per batch (default: 10 for RAM efficiency)
         ram_target: Target RAM percentage to stay below (default: 50%)
+        use_drive: If True, use Google Drive if available (default: True)
     """
     if cache_file is None:
         cache_file = os.path.join(output_dir, "arxiv_papers.jsonl")
@@ -1580,7 +1649,8 @@ def collect_arxiv_papers(
         total_target=max_papers,
         batch_size=batch_size,
         ram_target=ram_target,
-        rate_limit=rate_limit_delay
+        rate_limit=rate_limit_delay,
+        use_drive=use_drive
     )
 
 

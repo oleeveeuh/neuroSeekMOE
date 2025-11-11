@@ -2725,16 +2725,30 @@ def extract_text_from_pdf_url(pdf_url: str, max_pages: int = MAX_PAGES, max_char
                             break
         else:
             # Use PyPDF2
-            pdf_reader = PyPDF2.PdfReader(pdf_buffer)
-            for page_num in range(min(max_pages, len(pdf_reader.pages))):
-                page = pdf_reader.pages[page_num]
-                page_text = page.extract_text()
-                if page_text:
-                    text_parts.append(page_text)
-                    total_chars += len(page_text)
-                    # Stop if we've reached max_chars
-                    if total_chars >= max_chars:
-                        break
+            # Suppress harmless PyPDF2 warnings about unknown widths/formatting
+            import warnings
+            import logging
+            # Suppress PyPDF2 warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # Also suppress logging warnings from PyPDF2
+                pypdf2_logger = logging.getLogger("PyPDF2")
+                old_level = pypdf2_logger.level
+                pypdf2_logger.setLevel(logging.ERROR)
+                try:
+                    pdf_reader = PyPDF2.PdfReader(pdf_buffer)
+                    for page_num in range(min(max_pages, len(pdf_reader.pages))):
+                        page = pdf_reader.pages[page_num]
+                        page_text = page.extract_text()
+                        if page_text:
+                            text_parts.append(page_text)
+                            total_chars += len(page_text)
+                            # Stop if we've reached max_chars
+                            if total_chars >= max_chars:
+                                break
+                finally:
+                    # Restore original logging level
+                    pypdf2_logger.setLevel(old_level)
         
         # Combine text parts
         full_text = '\n\n'.join(text_parts)

@@ -6450,6 +6450,20 @@ def train_healthcare_tokenizer(
     print("=" * 60)
     print()
     
+    # Ensure paths are absolute (critical for Colab/Drive paths)
+    input_jsonl = os.path.abspath(os.path.expanduser(input_jsonl))
+    output_dir = os.path.abspath(os.path.expanduser(output_dir))
+    
+    print(f"Input JSONL: {input_jsonl}")
+    print(f"Output directory: {output_dir}")
+    print()
+    
+    # Verify input file exists
+    if not os.path.exists(input_jsonl):
+        error_msg = f"Input file not found: {input_jsonl}"
+        print(f"❌ {error_msg}")
+        raise FileNotFoundError(error_msg)
+    
     os.makedirs(output_dir, exist_ok=True)
     
     model_path = os.path.join(output_dir, model_prefix)

@@ -10,8 +10,8 @@ Optimized for Colab T4 GPU (12GB VRAM) with:
 - Comprehensive logging
 
 Usage:
+    # Train from scratch (recommended)
     python train_colab.py \
-        --model-path ./checkpoints/step_0.pt \
         --dataset-text-dir ./data/arxiv/texts \
         --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
         --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
@@ -20,6 +20,17 @@ Usage:
         --gradient-accumulation 4 \
         --max-steps 50000 \
         --learning-rate 5e-4
+    
+    # Resume from checkpoint (optional)
+    python train_colab.py \
+        --model-path ./checkpoints/step_5000.pt \
+        --dataset-text-dir ./data/arxiv/texts \
+        --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
+        --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
+        --output-dir ./checkpoints \
+        --batch-size 6 \
+        --gradient-accumulation 4 \
+        --max-steps 50000
 """
 
 from __future__ import annotations
@@ -520,8 +531,8 @@ def main():
     )
     
     # Model and data paths
-    parser.add_argument('--model-path', type=str, required=True,
-                       help='Path to model checkpoint or initial weights')
+    parser.add_argument('--model-path', type=str, default=None,
+                       help='Path to model checkpoint or initial weights (optional, creates new model if not provided)')
     parser.add_argument('--dataset-text-dir', type=str, required=True,
                        help='Directory containing text files')
     parser.add_argument('--dataset-metadata', type=str, required=True,
@@ -655,8 +666,8 @@ def main():
     
     model = ModelWrapper(model)
     
-    # If model path exists, try to load it
-    if os.path.exists(args.model_path):
+    # If model path provided and exists, try to load it
+    if args.model_path and os.path.exists(args.model_path):
         try:
             checkpoint = torch.load(args.model_path, map_location='cpu')
             if 'model_state_dict' in checkpoint:
@@ -669,7 +680,10 @@ def main():
             print(f"Could not load model from {args.model_path}: {e}")
             print("   Using randomly initialized model")
     else:
-        print(f"Model path {args.model_path} does not exist, using randomly initialized model")
+        if args.model_path:
+            print(f"Model path {args.model_path} does not exist, using randomly initialized model")
+        else:
+            print("No model path provided, using randomly initialized model")
     
     # Create adapter
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

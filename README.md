@@ -125,9 +125,11 @@ python train_colab.py \
     --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
     --dataset-text-dir ./data/arxiv/texts \
     --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
-    --checkpoint-dir ./checkpoints \
+    --output-dir ./checkpoints \
     --batch-size 6 \
-    --max-steps 50000
+    --gradient-accumulation 4 \
+    --max-steps 50000 \
+    --learning-rate 5e-4
 ```
 
 ## Mixture of Experts (MoE) Architecture

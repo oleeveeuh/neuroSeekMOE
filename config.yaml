@@ -117,7 +117,7 @@ training:
     general_ml_health: 1.0
   
   # Checkpointing
-  checkpoint_dir: ".content/drive/MyDrive/neuroMOE_results/checkpoints"
+  checkpoint_dir: "./checkpoints"  # Local by default; set to "/content/drive/MyDrive/neuroMOE_results/checkpoints" for Colab Drive persistence
   checkpoint_interval: 5000  # Steps between checkpoints
   keep_last_n_checkpoints: 2
   

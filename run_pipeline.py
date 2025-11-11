@@ -38,6 +38,11 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
 # Import pipeline components
 from data_pipeline import (
     collect_arxiv_papers,
@@ -858,11 +863,21 @@ class PipelineOrchestrator:
             sys.stdout.flush()
             
             print(f"\nCalling train_healthcare_tokenizer()...", flush=True)
+            print(f"   Input: {self.processed_jsonl}", flush=True)
+            print(f"   Output: {self.output_dir}", flush=True)
+            sys.stdout.flush()
+            
+            # Ensure absolute paths (critical for Colab/Drive)
+            input_path = str(self.processed_jsonl.resolve())
+            output_path = str(self.output_dir.resolve())
+            
+            print(f"   Resolved input: {input_path}", flush=True)
+            print(f"   Resolved output: {output_path}", flush=True)
             sys.stdout.flush()
             
             train_healthcare_tokenizer(
-                input_jsonl=str(self.processed_jsonl),
-                output_dir=str(self.output_dir),
+                input_jsonl=input_path,
+                output_dir=output_path,
                 model_prefix=tokenizer_config['model_prefix'],
                 vocab_size=tokenizer_config['vocab_size']
             )

@@ -155,19 +155,29 @@ class PipelineOrchestrator:
             config = yaml.safe_load(f)
         return config
     
-    def _check_step_complete(self, step_name: str, output_files: List[Path], check_non_empty: bool = True) -> bool:
+    def _check_step_complete(self, step_name: str, output_files: List[Path], check_non_empty: bool = True, 
+                             input_count: int = None, output_count: int = None) -> bool:
         """Check if a step is complete by verifying output files exist and are non-empty.
         
         Args:
             step_name: Name of the step
             output_files: List of output file paths to check
             check_non_empty: If True, also verify files are non-empty (default: True)
+            input_count: Optional count of input items (e.g., papers in metadata)
+            output_count: Optional count of output items (e.g., processed papers)
             
         Returns:
             True if all output files exist (and are non-empty if check_non_empty=True), False otherwise
+            Also returns False if input_count > output_count (input has more data than output)
         """
         if not self.config['pipeline']['resume']:
             return False
+        
+        # If input has more data than output, step is not complete
+        if input_count is not None and output_count is not None:
+            if input_count > output_count:
+                logger.info(f"Step '{step_name}' input has {input_count} items but output has {output_count} - rerunning step")
+                return False
         
         all_valid = True
         for f in output_files:
@@ -376,19 +386,32 @@ class PipelineOrchestrator:
         step_name = "Extract PDFs"
         self._log_step_start(step_name, 2, 8)
         
-        # Check if already complete (verify directory has files)
-        if self._check_step_complete(step_name, [self.text_dir], check_non_empty=True):
+        # Check if already complete - compare input papers vs extracted text files
+        metadata_count = 0
+        if self.metadata_jsonl.exists():
+            metadata_count = sum(1 for line in open(self.metadata_jsonl) if line.strip())
+        
+        text_file_count = 0
+        if self.text_dir.exists():
+            text_file_count = len(list(self.text_dir.glob("*.txt")))
+        
+        # Rerun if we have more papers than text files
+        if self._check_step_complete(step_name, [self.text_dir], check_non_empty=True,
+                                     input_count=metadata_count, output_count=text_file_count):
             # Double-check: count text files
             if self.text_dir.exists():
                 text_files = list(self.text_dir.glob("*.txt"))
                 if len(text_files) > 0:
-                    logger.info(f"Found {len(text_files)} text files in existing directory")
+                    logger.info(f"Found {len(text_files)} text files in existing directory (matches {metadata_count} papers)")
                     self._log_step_end(step_name, True)
                     return True
                 else:
                     logger.warning(f"Text directory exists but has no .txt files. Re-running extraction...")
             else:
                 logger.warning(f"Text directory check passed but doesn't exist. Re-running extraction...")
+        else:
+            if metadata_count > text_file_count:
+                logger.info(f"Found {metadata_count} papers but only {text_file_count} text files - rerunning extraction")
         
         try:
             if not self.metadata_jsonl.exists():
@@ -453,10 +476,23 @@ class PipelineOrchestrator:
         except Exception as e:
             print(f"Error in _log_step_start: {e}", flush=True)
         
-        # Check if already complete (verify file is non-empty)
+        # Check if already complete - compare input text files vs curated papers
+        text_file_count = 0
+        if self.text_dir.exists():
+            text_file_count = len(list(self.text_dir.glob("*.txt")))
+        
+        curated_count = 0
+        if self.curated_jsonl.exists():
+            try:
+                curated_count = sum(1 for line in open(self.curated_jsonl) if line.strip())
+            except:
+                pass
+        
         print(f"Checking if step already complete...", flush=True)
+        print(f"   Input text files: {text_file_count}, Output curated papers: {curated_count}", flush=True)
         try:
-            is_complete = self._check_step_complete(step_name, [self.curated_jsonl], check_non_empty=True)
+            is_complete = self._check_step_complete(step_name, [self.curated_jsonl], check_non_empty=True,
+                                                    input_count=text_file_count, output_count=curated_count)
             print(f"   Step complete check: {is_complete}", flush=True)
         except Exception as e:
             print(f"Error checking step completion: {e}", flush=True)
@@ -482,6 +518,10 @@ class PipelineOrchestrator:
             else:
                 print(f"Curated file check passed but doesn't exist. Re-running curation...", flush=True)
                 logger.warning(f"Curated file check passed but doesn't exist. Re-running curation...")
+        else:
+            if text_file_count > curated_count:
+                print(f"   Input has {text_file_count} text files but output has {curated_count} papers - rerunning curation", flush=True)
+                logger.info(f"Input has {text_file_count} text files but output has {curated_count} papers - rerunning curation")
         
         print(f"Starting NeMo Curator curation...", flush=True)
         sys.stdout.flush()
@@ -695,19 +735,32 @@ class PipelineOrchestrator:
         step_name = "Process Curated Dataset"
         self._log_step_start(step_name, 4, 8)
         
-        # Check if already complete (verify file is non-empty)
-        if self._check_step_complete(step_name, [self.processed_jsonl], check_non_empty=True):
+        # Check if already complete - compare input curated papers vs processed papers
+        curated_count = 0
+        if self.curated_jsonl.exists():
+            curated_count = sum(1 for line in open(self.curated_jsonl) if line.strip())
+        
+        processed_count = 0
+        if self.processed_jsonl.exists():
+            processed_count = sum(1 for line in open(self.processed_jsonl) if line.strip())
+        
+        # Rerun if we have more curated papers than processed papers
+        if self._check_step_complete(step_name, [self.processed_jsonl], check_non_empty=True,
+                                     input_count=curated_count, output_count=processed_count):
             # Double-check: count processed papers
             if self.processed_jsonl.exists():
                 count = sum(1 for line in open(self.processed_jsonl) if line.strip())
                 if count > 0:
-                    logger.info(f"Found {count} papers in existing processed dataset")
+                    logger.info(f"Found {count} papers in existing processed dataset (matches {curated_count} curated papers)")
                     self._log_step_end(step_name, True)
                     return True
                 else:
                     logger.warning(f"Processed file exists but is empty. Re-running processing...")
             else:
                 logger.warning(f"Processed file check passed but doesn't exist. Re-running processing...")
+        else:
+            if curated_count > processed_count:
+                logger.info(f"Found {curated_count} curated papers but only {processed_count} processed papers - rerunning processing")
         
         try:
             if not self.curated_jsonl.exists():

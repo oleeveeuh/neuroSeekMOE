@@ -46,8 +46,14 @@ except ImportError:
 try:
     import arxiv
     ARXIV_AVAILABLE = True
+    # Try to import specific exceptions for better error handling
+    try:
+        from arxiv import UnexpectedEmptyPageError
+    except ImportError:
+        UnexpectedEmptyPageError = None
 except ImportError:
     ARXIV_AVAILABLE = False
+    UnexpectedEmptyPageError = None
     print("arxiv package not available. Install with: pip install arxiv")
 
 try:
@@ -243,6 +249,26 @@ MAX_YEAR = None  # None = no maximum (accept all years)
 
 # ArXiv search queries (legacy - used by older collection functions)
 # Note: The main collection now uses diverse ML + healthcare/neuroscience combinations
+# Optimized tiered query structure for healthcare + ML paper collection
+OPTIMIZED_QUERIES = {
+    'tier_1_primary': [
+        ("cat:cs.LG AND healthcare", 5000),
+        ("cat:cs.LG AND (medical OR diagnosis OR clinical)", 5000),
+        ("cat:cs.AI AND (neurodegeneration OR alzheimer OR parkinson)", 3000),
+        ("cat:cs.AI AND (drug OR protein OR molecular)", 2000),
+    ],
+    'tier_2_neuro_ml': [
+        ("cat:q-bio.NC AND (machine learning OR deep learning OR neural network)", 4000),
+        ("cat:q-bio.NC AND (fmri OR eeg OR neuroimaging)", 2000),
+        ("cat:q-bio.NC AND (connectome OR brain mapping)", 1000),
+    ],
+    'tier_3_medical_imaging': [
+        ("cat:cs.LG AND (medical imaging OR mri OR ct OR x-ray)", 3000),
+        ("cat:cs.CV AND (medical OR diagnosis OR pathology)", 2000),
+    ],
+}
+
+# Legacy flat query list (for backward compatibility)
 ARXIV_QUERIES = [
     "cat:cs.LG AND (healthcare OR medical OR clinical)",
     "cat:cs.AI AND (neuroscience OR brain OR neural)",
@@ -1370,9 +1396,21 @@ class RAMEfficientArxivCollector:
             # End of results
             pass
         except Exception as e:
-            print(f"   Batch error: {e}")
-            import traceback
-            print(f"   Traceback: {traceback.format_exc()}")
+            # Check if it's an ArXiv API error (empty page, rate limiting, etc.)
+            is_empty_page_error = False
+            if UnexpectedEmptyPageError and isinstance(e, UnexpectedEmptyPageError):
+                is_empty_page_error = True
+            elif "UnexpectedEmptyPageError" in str(type(e).__name__) or "empty" in str(e).lower():
+                is_empty_page_error = True
+            
+            if is_empty_page_error:
+                print(f"   ArXiv API returned empty page (likely rate limiting or pagination issue)")
+                print(f"   Collected {papers_in_batch} papers before error, continuing to next query...")
+                # Return what we have - the iterator is broken, so we'll move to next query
+            else:
+                print(f"   Batch error: {e}")
+                import traceback
+                print(f"   Traceback: {traceback.format_exc()}")
         
         elapsed = time.time() - batch_start
         rate = papers_in_batch / elapsed if elapsed > 0 else 0
@@ -1492,59 +1530,20 @@ def collect_arxiv_efficient(
         rate_limit=rate_limit
     )
     
-    # Define queries with diverse ML + healthcare/neuroscience combinations
-    # Each query can contribute up to its limit, but we'll continue until total_target is reached
-    # Use larger per-query limits to ensure we can reach the target
-    # For 30k target, set per-query limit to at least 15k to allow queries to contribute more
-    query_limit_per_query = max(total_target // 2, 15000)  # Increased from total_target // 4 to allow more papers per query
+    # Use optimized tiered queries
+    # Flatten the tiered structure into a list of (query, max_papers) tuples
+    queries = []
+    for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
+        for query, max_papers in tier_queries:
+            # Respect the per-query limit, but don't exceed total_target
+            adjusted_limit = min(max_papers, total_target)
+            queries.append((query, adjusted_limit))
     
-    queries = [
-        # Machine Learning + Healthcare combinations
-        ("cat:cs.LG AND (healthcare OR medical OR clinical)", query_limit_per_query),
-        ("cat:cs.AI AND (healthcare OR medical OR clinical)", query_limit_per_query),
-        ("cat:stat.ML AND (healthcare OR medical OR clinical)", query_limit_per_query),
-        
-        # Machine Learning + Neuroscience combinations
-        ("cat:cs.LG AND (neuroscience OR brain OR neural OR neuroimaging)", query_limit_per_query),
-        ("cat:cs.AI AND (neuroscience OR brain OR neural OR neuroimaging)", query_limit_per_query),
-        ("cat:q-bio.NC AND (machine learning OR deep learning OR neural network)", query_limit_per_query),
-        
-        # Machine Learning + Neurodegeneration/Disease combinations
-        ("cat:cs.AI AND (neurodegeneration OR alzheimer OR parkinson OR dementia)", query_limit_per_query),
-        ("cat:cs.LG AND (disease OR diagnosis OR treatment OR prognosis)", query_limit_per_query),
-        ("cat:stat.ML AND (disease OR diagnosis OR treatment)", query_limit_per_query),
-        
-        # Machine Learning + Medical Imaging combinations
-        ("cat:cs.LG AND (mri OR ct OR medical imaging OR radiology)", query_limit_per_query),
-        ("cat:cs.AI AND (mri OR ct OR medical imaging OR radiology)", query_limit_per_query),
-        ("cat:cs.CV AND (medical imaging OR medical image OR radiology)", query_limit_per_query),
-        
-        # Machine Learning + Clinical combinations
-        ("cat:cs.LG AND (patient OR clinical OR diagnosis OR prognosis)", query_limit_per_query),
-        ("cat:cs.AI AND (patient OR clinical OR diagnosis OR prognosis)", query_limit_per_query),
-        
-        # Machine Learning + Drug Discovery combinations
-        ("cat:cs.LG AND (drug OR molecule OR protein OR compound OR pharmaceutical)", query_limit_per_query),
-        ("cat:cs.AI AND (drug OR molecule OR protein OR compound OR pharmaceutical)", query_limit_per_query),
-        
-        # Broader healthcare + ML combinations
-        ("cat:cs.LG AND (health OR medicine OR biomedical)", query_limit_per_query),
-        ("cat:cs.AI AND (health OR medicine OR biomedical)", query_limit_per_query),
-        ("cat:stat.ML AND (health OR medicine OR biomedical)", query_limit_per_query),
-        
-        # Neuroscience + ML (broader)
-        ("cat:q-bio.NC AND (artificial intelligence OR machine learning OR deep learning)", query_limit_per_query),
-        ("cat:q-bio.NC AND (neural network OR transformer OR lstm)", query_limit_per_query),
-        
-        # Additional very broad queries to help reach target
-        ("cat:cs.LG AND health", query_limit_per_query),
-        ("cat:cs.AI AND medical", query_limit_per_query),
-        ("cat:stat.ML AND (health OR medical OR clinical)", query_limit_per_query),
-        ("cat:q-bio.NC AND (learning OR prediction OR classification)", query_limit_per_query),
-        ("cat:cs.CV AND (medical OR health OR clinical)", query_limit_per_query),
-        ("cat:cs.LG AND (disease OR diagnosis OR treatment)", query_limit_per_query),
-        ("cat:cs.AI AND (brain OR neural OR neuroscience)", query_limit_per_query),
-    ]
+    print(f"Using {len(queries)} optimized queries from {len(OPTIMIZED_QUERIES)} tiers")
+    print(f"Tier breakdown:")
+    for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
+        tier_total = sum(max_papers for _, max_papers in tier_queries)
+        print(f"  {tier_name}: {len(tier_queries)} queries, {tier_total} max papers")
     
     # Collect
     collector.collect_all(queries, total_target)

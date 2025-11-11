@@ -252,6 +252,152 @@ This is effectively **domain-adaptive pretraining** - the model learns healthcar
 - **Domain-Aware Loss**: Weighted loss for neurodegeneration and neuroscience papers
 - **Checkpointing**: Saves every 5000 steps with resume capability
 
+## Expected Training Times
+
+### Tokenizer Training
+Tokenizer training time depends on the size of your processed dataset:
+
+| Dataset Size | Papers | Estimated Time | Notes |
+|-------------|--------|----------------|-------|
+| Small | 1,000-5,000 | 2-5 minutes | Fast vocabulary learning |
+| Medium | 5,000-15,000 | 5-15 minutes | Typical for healthcare datasets |
+| Large | 15,000-30,000 | 15-30 minutes | Full ArXiv collection |
+| Very Large | 30,000+ | 30-60 minutes | Maximum vocabulary coverage |
+
+**Factors affecting tokenizer training:**
+- **Corpus size**: More papers = longer training
+- **Text length**: Longer papers = more processing
+- **CPU cores**: Uses 4 threads by default (configurable)
+- **Vocabulary size**: Default 50k (larger vocab = slightly longer)
+
+### Model Training
+Model training time depends on your hardware and configuration:
+
+#### Google Colab (T4 GPU, 12GB VRAM)
+| Configuration | Steps | Estimated Time | Notes |
+|--------------|-------|----------------|-------|
+| Fast (10k steps) | 10,000 | 2-4 hours | Quick test run |
+| Standard (50k steps) | 50,000 | 8-12 hours | Default configuration |
+| Extended (100k steps) | 100,000 | 16-24 hours | Full training |
+
+**Default settings:**
+- Batch size: 6
+- Gradient accumulation: 4 (effective batch size: 24)
+- Mixed precision: Enabled
+- Throughput: ~1000-1500 samples/sec on T4 GPU
+
+#### Local GPU (V100/A100)
+| Configuration | Steps | Estimated Time | Notes |
+|--------------|-------|----------------|-------|
+| Standard (50k steps) | 50,000 | 4-6 hours | Faster than Colab |
+| Extended (100k steps) | 100,000 | 8-12 hours | Full training |
+
+#### CPU Only (Not Recommended)
+| Configuration | Steps | Estimated Time | Notes |
+|--------------|-------|----------------|-------|
+| Standard (50k steps) | 50,000 | 3-5 days | Very slow, use GPU if possible |
+
+**Factors affecting training time:**
+- **GPU type**: T4 < V100 < A100 (speed)
+- **Batch size**: Larger = faster but more memory
+- **Sequence length**: Longer sequences = slower
+- **Model size**: More experts/parameters = slower
+- **Gradient accumulation**: More steps = slower but better quality
+
+### Complete Pipeline Timeline
+
+For a typical run with **5,000-10,000 processed papers** on **Google Colab**:
+
+| Stage | Time | Notes |
+|-------|------|-------|
+| Collection | 2-4 hours | Depends on network, rate limits |
+| PDF Extraction | 30-60 minutes | Parallel processing |
+| NeMo Curator | 1-2 hours | Quality filtering, deduplication |
+| Processing | 10-20 minutes | Text cleaning, classification |
+| **Tokenizer Training** | **5-15 minutes** | Fast for medium datasets |
+| **Model Training (50k steps)** | **8-12 hours** | Main training phase |
+| Evaluation | 10-30 minutes | Metrics computation |
+| **Total** | **12-20 hours** | End-to-end pipeline |
+
+**Tips for faster training:**
+- Use GPU (Colab T4 is free and sufficient)
+- Reduce `max_steps` for testing (e.g., 10k steps = 2-4 hours)
+- Increase `batch_size` if you have more VRAM
+- Use gradient accumulation to simulate larger batches
+- Resume from checkpoints if interrupted
+
+## Google Drive Persistence
+
+When running on Google Colab with `use_drive: true` (default), **all pipeline outputs are automatically saved to Google Drive** for persistence across runtime interruptions.
+
+### What Gets Saved to Drive
+
+All data files are saved directly to Google Drive at:
+```
+/content/drive/MyDrive/neuroMOE_results/data/arxiv/
+```
+
+**Step 1: Collection**
+- ✅ `arxiv_papers.jsonl` - Collected paper metadata
+- ✅ `collection_checkpoint.json` - Collection progress checkpoint
+- ✅ `collected_ids.db` - SQLite database for deduplication
+
+**Step 2: PDF Extraction**
+- ✅ `texts/` - Directory with extracted `.txt` files (one per paper)
+
+**Step 3: NeMo Curator**
+- ✅ `curated_dataset.jsonl` - Curated and filtered papers
+- ✅ `curated_checkpoint.json` - Curation progress checkpoint
+
+**Step 4: Processing**
+- ✅ `processed_dataset.jsonl` - Processed papers with domain classification
+
+**Step 5: Tokenizer Training**
+- ✅ `healthcare_tokenizer.model` - Trained tokenizer model
+- ✅ `healthcare_tokenizer.vocab` - Tokenizer vocabulary
+- ✅ `tokenizer_metadata.json` - Tokenizer training metadata
+- ✅ `tokenizer_validation_report.json` - Validation results
+
+**Step 6: Model Training**
+- ✅ `checkpoints/` - Training checkpoints (saved every 5000 steps)
+  - `step_5000.pt`, `step_10000.pt`, etc.
+  - `dataset_metadata.json` - Dataset tracking for resume
+- ⚠️ **Note**: Checkpoints are saved to `./checkpoints/` (local) by default
+  - To save checkpoints to Drive, set `checkpoint_dir` in `config.yaml` to a Drive path
+
+**Step 7: Evaluation**
+- ✅ `evaluations/` - Evaluation results and metrics
+
+**Step 8: Inference**
+- ✅ `inference/` - Exported inference pipeline
+
+### Benefits
+
+- **Persistent Storage**: All data survives runtime disconnections
+- **Resume Capability**: Pipeline automatically resumes from Drive checkpoints
+- **No Data Loss**: Even if Colab runtime times out, your data is safe
+- **Automatic**: No manual copying needed - everything saves directly to Drive
+
+### Configuration
+
+In `config.yaml`:
+```yaml
+pipeline:
+  use_drive: true  # Enable Google Drive persistence (default: true)
+  drive_base: "/content/drive/MyDrive/neuroMOE_results"  # Drive path
+```
+
+### Restoring from Drive
+
+The Colab notebook includes a `restore_from_drive()` function that automatically restores:
+- Collected papers and metadata
+- Extracted text files
+- Curated datasets
+- Training checkpoints
+- Trained tokenizer
+
+This allows you to resume exactly where you left off, even after days or weeks.
+
 ### Evaluation & Inference
 - **Comprehensive Metrics**: Perplexity, domain accuracy, MRR@20, section classification
 - **Fast Inference**: <100ms per paper on CPU

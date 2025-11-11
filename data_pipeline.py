@@ -290,6 +290,9 @@ def get_drive_output_dir(local_output_dir: str = "./data/arxiv", drive_base: str
     """
     Get output directory, preferring Google Drive if available (Colab).
     
+    This function ensures that ALL pipeline outputs (metadata, text files, curated datasets, etc.)
+    are saved directly to Google Drive for persistence.
+    
     Args:
         local_output_dir: Local output directory (fallback)
         drive_base: Base path for Google Drive (default Colab path)
@@ -304,11 +307,23 @@ def get_drive_output_dir(local_output_dir: str = "./data/arxiv", drive_base: str
         
         # Check if Drive is mounted (exists and is accessible)
         if drive_path.exists() and os.access(drive_path, os.W_OK):
-            # Use Drive path
+            # Use Drive path - this will be the base for all outputs
+            # Structure: /content/drive/MyDrive/neuroMOE_results/data/arxiv/
+            #   - arxiv_papers.jsonl (metadata)
+            #   - texts/ (extracted .txt files)
+            #   - curated_dataset.jsonl
+            #   - processed_dataset.jsonl
+            #   - etc.
             drive_output = drive_path / "data" / "arxiv"
             drive_output.mkdir(parents=True, exist_ok=True)
+            
+            # Also create texts subdirectory on Drive
+            texts_dir = drive_output / "texts"
+            texts_dir.mkdir(parents=True, exist_ok=True)
+            
             print(f"Using Google Drive for output: {drive_output}")
-            print(f"  Data will persist even if runtime is interrupted")
+            print(f"  Text files directory: {texts_dir}")
+            print(f"  All data will persist even if runtime is interrupted")
             return str(drive_output)
     except Exception as e:
         # If Drive not available, fall back to local
@@ -316,6 +331,9 @@ def get_drive_output_dir(local_output_dir: str = "./data/arxiv", drive_base: str
     
     # Fall back to local directory
     os.makedirs(local_output_dir, exist_ok=True)
+    # Also create texts subdirectory locally
+    texts_dir = os.path.join(local_output_dir, "texts")
+    os.makedirs(texts_dir, exist_ok=True)
     return local_output_dir
 
 
@@ -1107,11 +1125,17 @@ class RAMEfficientArxivCollector:
         try:
             # Always load from output file first (most accurate source of truth)
             if os.path.exists(self.output_file):
+                print(f"Loading existing papers from: {self.output_file}")
                 existing_ids = load_existing_ids(self.output_file)
                 self.collected_ids = existing_ids
                 self.total_collected = len(existing_ids)
                 if self.total_collected > 0:
                     print(f"Found {self.total_collected} existing papers in output file")
+                else:
+                    print(f"Output file exists but is empty or has no valid papers")
+            else:
+                print(f"Output file not found at: {self.output_file}")
+                print(f"  Starting fresh collection")
             
             # Also check checkpoint file for count verification
             if os.path.exists(self.checkpoint_file):
@@ -1123,8 +1147,10 @@ class RAMEfficientArxivCollector:
                     # Note: We don't use checkpoint's collected_ids since we loaded all from file
         except Exception as e:
             print(f"Could not load checkpoint: {e}")
+            import traceback
+            print(f"Error details: {traceback.format_exc()}")
             if self.total_collected == 0:
-                print("📝 Starting fresh")
+                print("Starting fresh")
     
     def _clear_memory(self):
         """Aggressively clear memory."""
@@ -1219,15 +1245,16 @@ class RAMEfficientArxivCollector:
                     self.total_collected += 1
                     papers_in_batch += 1
                     
-                    # Check RAM after every 5 papers
-                    if papers_in_batch % 5 == 0:
+                    # Check RAM less frequently for speed (every 10 papers instead of 5)
+                    if papers_in_batch % 10 == 0:
                         ram_percent = self._get_ram_percent()
                         if ram_percent > self.ram_target_percent:
                             print(f"   RAM at {ram_percent:.0f}%, stopping batch early")
                             break
                     
-                    # Rate limiting
-                    time.sleep(self.rate_limit)
+                    # Rate limiting - optimized for Colab speed
+                    # Use minimum 2 seconds (faster than 3, still safe)
+                    time.sleep(max(self.rate_limit, 2.0))
         
         except Exception as e:
             print(f"   Batch error: {e}")
@@ -1277,11 +1304,13 @@ class RAMEfficientArxivCollector:
         max_search_results = max(max_papers * 30, 200000)  # Increased: 30x target, min 200k results
         
         try:
-            # Use more conservative rate limiting to avoid empty page errors
-            # ArXiv API can be sensitive to rapid requests
-            # delay_seconds is the delay between requests (higher = slower but more reliable)
+            # Optimized rate limiting for Colab
+            # ArXiv API allows ~1 request per second, but we can be slightly more aggressive
+            # Use adaptive delay: start conservative, reduce if no errors
+            # delay_seconds is the delay between requests
+            base_delay = max(self.rate_limit, 2.0)  # Reduced from 3.0 to 2.0 for speed (still safe)
             client = arxiv.Client(
-                delay_seconds=max(self.rate_limit, 3.0),  # Minimum 3 seconds between requests
+                delay_seconds=base_delay,  # 2 seconds between requests (faster but still safe)
                 num_retries=3,  # Increased retries for better reliability
                 page_size=100  # Standard page size
             )
@@ -1346,9 +1375,9 @@ class RAMEfficientArxivCollector:
                 # Clear memory
                 self._clear_memory()
                 
-                # Avoid hitting rate limits - longer delay after each batch
-                # This helps prevent empty page errors from ArXiv API
-                time.sleep(2)  # Increased from 1 to 2 seconds for better reliability
+                # Avoid hitting rate limits - brief delay after each batch
+                # Reduced delay for speed (batch already has per-request delays)
+                time.sleep(0.5)  # Reduced from 2 to 0.5 seconds for faster collection
         
         except StopIteration:
             print("   Reached end of search results")
@@ -1443,15 +1472,16 @@ class RAMEfficientArxivCollector:
                     if papers_in_batch >= batch_size:
                         break
                     
-                    # Check RAM after every 5 papers
-                    if papers_in_batch % 5 == 0:
+                    # Check RAM less frequently for speed (every 10 papers instead of 5)
+                    if papers_in_batch % 10 == 0:
                         ram_percent = self._get_ram_percent()
                         if ram_percent > self.ram_target_percent:
                             print(f"   RAM at {ram_percent:.0f}%, stopping batch early")
                             break
                     
-                    # Rate limiting
-                    time.sleep(self.rate_limit)
+                    # Rate limiting - optimized for Colab speed
+                    # Use minimum 2 seconds (faster than 3, still safe)
+                    time.sleep(max(self.rate_limit, 2.0))
         
         except StopIteration:
             # End of results
@@ -1587,6 +1617,16 @@ def collect_arxiv_efficient(
     
     output_file = os.path.join(output_dir, "arxiv_papers.jsonl")
     checkpoint_file = os.path.join(output_dir, "collection_checkpoint.json")
+    
+    # Debug: Print the exact paths being used
+    print(f"\nCollection paths:")
+    print(f"  Output directory: {output_dir}")
+    print(f"  Output file: {output_file}")
+    print(f"  Checkpoint file: {checkpoint_file}")
+    print(f"  Output file exists: {os.path.exists(output_file)}")
+    if os.path.exists(output_file):
+        file_size = os.path.getsize(output_file)
+        print(f"  Output file size: {file_size:,} bytes")
     
     # Initialize collector
     collector = RAMEfficientArxivCollector(

@@ -13,9 +13,9 @@ pipeline:
 # Step 1: ArXiv Paper Collection
 collection:
   max_papers: 30000  # Target number of papers (for backward compatibility, also in pipeline section)
-  rate_limit: 0.33  # Requests per second (3 requests/sec = 0.33 delay)
+  rate_limit: 0.5  # Requests per second (2 requests/sec = 0.5 delay) - optimized for Colab speed
   retry_max: 5  # Maximum retry attempts with exponential backoff
-  batch_size: 25  # Papers per batch (optimized for time efficiency: 25 = ~24% faster than 10, minimal RAM impact)
+  batch_size: 30  # Papers per batch (increased from 25 for faster collection, still RAM-safe)
   ram_target: 50.0  # Target RAM percentage to stay below (default: 50.0)
 
 # Step 2: PDF Text Extraction

@@ -72,7 +72,8 @@ neuroseek-moe/
 ├── run_pipeline.py           # Pipeline orchestration
 ├── config.yaml               # Configuration file
 └── notebooks/
-    └── ArXiv_Pipeline_Colab.ipynb  # Colab notebook for easy execution
+    ├── ArXiv_Pipeline_Colab.ipynb  # Colab notebook for easy execution
+    └── model_analysis.ipynb        # Comprehensive model analysis and visualization
 ```
 
 ## Getting Started
@@ -134,56 +135,263 @@ python train_colab.py \
 
 ## Mixture of Experts (MoE) Architecture
 
-The model uses a DeepSeek-MoE inspired architecture that efficiently scales to large models while maintaining computational efficiency.
+The model uses a DeepSeek-MoE inspired architecture that efficiently scales to large models while maintaining computational efficiency. This section provides a comprehensive technical overview of the MoE structure, routing mechanism, and forward pass flow.
 
 ### Architecture Overview
 
-The MoE model consists of two types of experts:
+The MoE model is structured as a language model with a Mixture of Experts layer replacing the standard feedforward network. The architecture consists of:
+
+**Core Components:**
+1. **Token Embedding Layer**: Maps vocabulary tokens to dense embeddings (`embedding_dim` = 768 default)
+2. **MoE Expert Layer**: Processes tokens through multiple specialized expert networks
+3. **Joint Fusion Layer**: Combines expert outputs with normalization and residual connections
+4. **Output Decoder**: Projects embeddings to vocabulary logits for next-token prediction
+
+**Expert Types:**
 
 **1. Shared Experts (Always Active)**
-- **Purpose**: Provide baseline functionality for all tokens
-- **Count**: 2 experts (default)
-- **Activation**: Always process all tokens, regardless of routing decisions
-- **Role**: Ensure all tokens receive processing, act as fallback for unprocessed tokens
+- **Architecture**: 2-layer MLP (feedforward network)
+- **Count**: 2 experts (default, configurable)
+- **Activation**: Always process ALL tokens in every forward pass
+- **Purpose**: 
+  - Provide baseline functionality for all tokens
+  - Act as fail-safe for tokens not selected by routed experts
+  - Maintain general language understanding
+- **Structure**: 
+  ```
+  Input: [batch*seq_len, embedding_dim]
+  → Linear(embedding_dim → 4*embedding_dim)  [Expansion]
+  → ReLU()
+  → Linear(4*embedding_dim → embedding_dim)   [Projection]
+  → Output: [batch*seq_len, embedding_dim]
+  ```
 
 **2. Routed Experts (Dynamically Selected)**
-- **Purpose**: Specialize on different patterns and domains
-- **Count**: 4 experts (default, scalable to 60+ for larger models)
-- **Activation**: Selected via Expert Choice routing
-- **Role**: Each expert selects top_k tokens to process based on routing scores
+- **Architecture**: 2-layer MLP (identical structure to shared experts)
+- **Count**: 4-8 experts (default, scalable to 60+ for larger models)
+- **Activation**: Selected via Expert Choice routing (only top_k tokens per expert)
+- **Purpose**:
+  - Specialize on different patterns and domains
+  - Enable domain-specific processing (e.g., neurodegeneration, medical imaging)
+  - Reduce computation through sparsity (only subset of experts active per token)
+- **Structure**: Same as shared experts, but only processes selected tokens
 
-### Expert Choice Routing
+### Expert Network Architecture
 
-Unlike traditional Token Choice routing (where tokens choose experts), this implementation uses **Expert Choice routing** where experts select tokens:
+Each expert (both shared and routed) is a **simple 2-layer MLP** (Multi-Layer Perceptron), not a full transformer or LLM:
 
-1. **Routing Gate**: Computes logits for each token-expert pair
-2. **Expert Selection**: Each routed expert selects top_k tokens (default: k=2) with highest scores
-3. **Capacity Control**: Enforces sparsity via capacity factor (default: 1.5x average load)
-4. **Load Balancing**: Auxiliary loss encourages uniform expert utilization
-5. **Fail-safe**: Tokens not selected by routed experts fall back to shared experts
+```python
+Expert = Sequential(
+    Linear(embedding_dim, 4 * embedding_dim),  # Expansion: 768 → 3072
+    ReLU(),                                     # Activation
+    Linear(4 * embedding_dim, embedding_dim),   # Projection: 3072 → 768
+)
+```
 
-### Key Advantages
+**Why This Design?**
+- **Standard FFN Structure**: Matches the feedforward network pattern used in Transformer blocks
+- **Efficiency**: Lightweight per expert, enabling many experts without excessive computation
+- **Specialization**: Each expert learns different patterns through routing, despite identical architecture
+- **Scalability**: Can scale to 60+ experts without proportional increase in compute
 
-- **Efficiency**: Only activates a subset of experts per token, reducing computation
-- **Specialization**: Routed experts can specialize on different healthcare subdomains
-- **Scalability**: Can scale to 60+ experts without proportional increase in computation
-- **Robustness**: Shared experts ensure all tokens are processed even if routing fails
+**Key Point**: Experts are NOT full transformers or LLMs—they are simple feedforward networks that specialize through the routing mechanism.
 
-### Training Dynamics
+### Expert Choice Routing Mechanism
 
-The model learns to route tokens to appropriate experts through:
-- **Load Balance Loss**: Encourages uniform expert utilization
-- **Z-Loss**: Prevents extreme routing confidence, maintains exploration
-- **Capacity Loss**: Enforces sparsity constraints
-- **Temperature Scheduling**: Gradually reduces routing noise during training
+Unlike traditional **Token Choice routing** (where tokens choose experts), this implementation uses **Expert Choice routing** where experts select tokens. This approach provides better load balancing and more predictable computation.
+
+**Routing Flow:**
+
+1. **Gate Computation**
+   - Input: Token embeddings `[batch*seq_len, embedding_dim]`
+   - Gate: Linear layer `[embedding_dim → num_routed_experts]`
+   - Output: Routing logits `[batch*seq_len, num_routed_experts]`
+   - Each logit represents how well an expert matches a token
+
+2. **Noise Injection (Training Only)**
+   - Adds Gumbel noise to logits: `noisy_logits = logits + noise_scale * Gumbel_noise`
+   - Default `noise_scale = 0.5` (DeepSeek-MoE default)
+   - Encourages exploration during training, prevents early expert collapse
+
+3. **Temperature Scaling**
+   - Applies temperature to logits: `scaled_logits = logits / temperature`
+   - Temperature schedule: Linear decay from `2.0` → `0.1` over 1000 steps
+   - Higher temperature early = soft routing (exploration)
+   - Lower temperature later = sparse routing (exploitation)
+
+4. **Expert Selection**
+   - Each routed expert selects `top_k` tokens (default `k=2`) with highest scores
+   - Output: `token_indices [num_experts, top_k]` - which tokens each expert processes
+   - Output: `expert_probs [num_experts, top_k]` - routing probabilities for gradient flow
+
+5. **Capacity Control**
+   - Enforces sparsity via capacity factor (default `1.5x` average load)
+   - Formula: `max_tokens_per_expert = capacity_factor * (total_tokens / num_experts)`
+   - Tokens exceeding capacity are masked out (dropped)
+   - Capacity loss penalizes overflow to encourage balanced routing
+
+6. **Fail-Safe Mechanism**
+   - Tokens not selected by any routed expert fall back to shared experts
+   - Ensures all tokens receive processing, even if routing fails
+
+### Forward Pass Flow
+
+The complete forward pass through the MoE layer:
+
+```
+1. Token Embedding
+   Input: [batch, seq_len] token indices
+   → Embedding Layer
+   → Output: [batch, seq_len, embedding_dim]
+
+2. Routing Decision
+   → Gate computes logits: [batch*seq_len, num_routed_experts]
+   → Add noise (training) + temperature scaling
+   → Expert Choice routing: each expert selects top_k tokens
+   → Output: token_indices [num_experts, top_k], expert_probs [num_experts, top_k]
+
+3. Shared Expert Processing
+   → Process ALL tokens through shared experts
+   → Average outputs across shared experts
+   → Output: [batch, seq_len, embedding_dim]
+
+4. Routed Expert Processing
+   → Gather tokens selected by each routed expert
+   → Process through respective expert networks
+   → Weight by routing probabilities
+   → Scatter outputs back to token positions
+   → Output: [batch, seq_len, embedding_dim]
+
+5. Expert Output Combination
+   → Handle unprocessed tokens (fail-safe to shared experts)
+   → Learnable weighting: shared_scale * shared + routed_scale * routed
+   → shared_scale = sigmoid(shared_expert_weight) ≈ 0.3-0.5
+   → Output: [batch, seq_len, embedding_dim]
+
+6. Joint Fusion
+   → Process through joint fusion MLP
+   → Apply LayerNorm + residual connection
+   → Apply dropout (training only)
+   → Output: [batch, seq_len, embedding_dim]
+
+7. Output Projection
+   → Apply LayerNorm + residual connection to input embeddings
+   → Decoder MLP: [embedding_dim → 4*embedding_dim → vocab_size]
+   → Output: [batch, seq_len, vocab_size] logits for next-token prediction
+```
+
+### Training Dynamics & Auxiliary Losses
+
+The model learns effective routing through multiple auxiliary losses:
+
+**1. Load Balance Loss**
+- **Purpose**: Encourages uniform expert utilization
+- **Formula**: Penalizes variance in expert load distribution
+- **Weight**: `0.1` (DeepSeek-MoE default)
+- **Effect**: Prevents expert collapse (all tokens routing to one expert)
+
+**2. Z-Loss (Log-Sum-Exp Penalty)**
+- **Purpose**: Prevents extreme routing confidence, maintains exploration
+- **Formula**: `z_loss = mean((log_sum_exp(logits) - target_z)^2)`
+- **Weight**: `0.001` (DeepSeek-MoE default)
+- **Target Z**: `1.0` (moderate spread)
+- **Effect**: Keeps routing distribution balanced, not too confident
+
+**3. Capacity Loss**
+- **Purpose**: Enforces sparsity constraints
+- **Formula**: Penalizes tokens exceeding expert capacity
+- **Weight**: `0.01`
+- **Effect**: Encourages balanced token distribution across experts
+
+**4. Temperature Scheduling**
+- **Schedule**: Linear decay from `2.0` → `0.1` over 1000 steps
+- **Effect**: 
+  - Early training: High temperature = soft routing (exploration)
+  - Late training: Low temperature = sparse routing (exploitation)
+- **Alternative schedules**: Constant, exponential, cosine annealing
+
+**Total Loss:**
+```
+loss = cross_entropy_loss + 
+       0.1 * load_balance_loss + 
+       0.001 * z_loss + 
+       0.01 * capacity_loss
+```
 
 ### Domain Specialization
 
 Through training on curated healthcare data, routed experts naturally specialize:
-- Some experts focus on neurodegeneration terminology
-- Others specialize in medical imaging or clinical language
+
+- **Expert 1**: Focuses on neurodegeneration terminology (Alzheimer's, Parkinson's, etc.)
+- **Expert 2**: Specializes in medical imaging language (MRI, CT, segmentation, etc.)
+- **Expert 3**: Handles clinical terminology (diagnosis, treatment, prognosis, etc.)
+- **Expert 4**: Processes drug discovery language (compounds, trials, efficacy, etc.)
+- **Shared Experts**: Maintain general language understanding and scientific writing patterns
+
+The routing mechanism learns to match tokens to domain-appropriate experts through:
+- Training on domain-labeled data (neurodegeneration, neuroscience, medical imaging, etc.)
+- Domain-aware loss weighting (higher weight for neurodegeneration/neuroscience papers)
+- Natural specialization through gradient-based learning
+
+### Key Advantages
+
+**1. Computational Efficiency**
+- Only activates subset of experts per token (sparse activation)
+- Default: 2 shared experts (always active) + ~2 routed experts per token (top_k=2)
+- Total active parameters per forward pass: ~50M (vs ~100M total parameters)
+- Enables scaling to 60+ experts without proportional compute increase
+
+**2. Specialization**
+- Routed experts specialize on different healthcare subdomains
 - Shared experts maintain general language understanding
-- The routing mechanism learns to match tokens to domain-appropriate experts
+- Natural domain adaptation through routing
+
+**3. Scalability**
+- Can scale to 60+ experts for larger models
+- Computation scales with number of active experts, not total experts
+- Memory-efficient: experts share same architecture, only weights differ
+
+**4. Robustness**
+- Shared experts ensure all tokens processed (fail-safe)
+- Capacity control prevents expert overload
+- Load balancing prevents expert collapse
+
+### Configuration Parameters
+
+Default configuration (configurable via `config.yaml`):
+
+```yaml
+vocab_size: 50000
+embedding_dim: 768
+num_shared_experts: 2
+num_routed_experts: 8
+top_k: 2                    # Tokens per expert
+noise_scale: 0.5            # Gumbel noise for exploration
+capacity_factor: 1.5        # Expert capacity multiplier
+load_balance_loss_weight: 0.1
+z_loss_weight: 0.001
+temperature_schedule: "linear"
+temperature_start: 2.0
+temperature_end: 0.1
+temperature_steps: 1000
+```
+
+### Implementation Details
+
+**Vectorized Expert Processing:**
+- Uses `torch.scatter_add_` for efficient GPU-accelerated expert output aggregation
+- Batch processing: all experts process in parallel
+- Memory-efficient: only stores active expert outputs
+
+**Gradient Flow:**
+- Uses soft routing probabilities for gradient computation (differentiable)
+- Straight-through estimator (STE) for discrete routing decisions
+- All auxiliary losses are differentiable and backpropagate through routing
+
+**Monitoring & Debugging:**
+- Routing metrics: entropy, load imbalance, expert utilization, token concentration
+- Capacity tracking: dropped token fraction, expert utilization rate
+- Comprehensive logging for routing health monitoring
 
 ## NeMo Curator: Domain-Adaptive Pretraining
 
@@ -405,6 +613,261 @@ This allows you to resume exactly where you left off, even after days or weeks.
 - **Fast Inference**: <100ms per paper on CPU
 - **Embedding Generation**: For similarity search and literature review
 - **Domain Classification**: Automatic healthcare subdomain detection
+
+## Model Analysis & Visualization
+
+The `model_analysis.ipynb` notebook provides comprehensive analysis and visualization of the trained DeepSeek-MoE model, covering everything from dataset statistics to expert specialization patterns to deployment considerations.
+
+### Overview
+
+This Jupyter notebook contains **11 major sections** plus an Executive Summary and Future Directions, providing a complete analysis of:
+- Dataset characteristics and domain distribution
+- Model architecture and configuration
+- Training dynamics and convergence
+- Expert activation patterns and specialization
+- Model performance across domains
+- Attention patterns and embedding analysis
+- Vocabulary and tokenization statistics
+- Research trends and domain insights
+- Efficiency analysis and deployment considerations
+- Model interpretability and qualitative analysis
+- Reproducibility and documentation
+
+### Quick Start
+
+**Prerequisites:**
+```bash
+# Install required packages (if not already installed)
+pip install matplotlib seaborn plotly pandas numpy scikit-learn torch
+pip install umap-learn wordcloud networkx bertviz transformers matplotlib-venn
+pip install nltk  # For stopwords and tokenization
+```
+
+**Running the Notebook:**
+
+1. **Open the notebook:**
+   ```bash
+   jupyter notebook notebooks/model_analysis.ipynb
+   # Or in JupyterLab:
+   jupyter lab notebooks/model_analysis.ipynb
+   ```
+
+2. **Run all cells sequentially:**
+   - The notebook will automatically create output directories (`./outputs/figures/`, `./outputs/data/`, `./outputs/reports/`)
+   - Each section can be run independently if needed
+
+3. **Expected Data Files:**
+   The notebook expects the following files (will generate sample data if missing):
+   - `./data/arxiv/arxiv_papers.jsonl` - ArXiv papers dataset
+   - `./models/deepseek_moe/config.json` - Model configuration
+   - `./models/deepseek_moe/training_logs.json` - Training logs
+   - `./models/deepseek_moe/eval_results.json` - Evaluation results
+   - `./models/deepseek_moe/expert_activations.npz` - Expert activation data
+   - `./models/deepseek_moe/checkpoint.pt` - Model checkpoint
+
+   **Google Drive Support (Colab):**
+   - The notebook automatically detects if running in Google Colab
+   - If Google Drive is mounted, it uses paths in `/content/drive/MyDrive/neuroMOE_results/`
+   - Data files are automatically loaded from Drive if available
+   - Outputs (figures, data, reports) are saved to Drive for persistence
+   - Falls back to local paths if Drive is not available
+
+### Notebook Structure
+
+**Section 1: Dataset Overview & Statistics**
+- Loads and analyzes ArXiv papers dataset
+- Generates statistics: total papers, date range, categories, domain classification
+- Visualizations: papers over time, category distribution, word clouds, Venn diagrams
+
+**Section 2: Model Architecture & Configuration**
+- Loads model configuration and creates architecture summary
+- Calculates model statistics: parameters, FLOPs, memory footprint
+- Generates architecture diagram and expert configuration tables
+
+**Section 3: Training Dynamics & Loss Curves**
+- Analyzes training logs and generates loss curves
+- MoE-specific metrics: router loss, z-loss, expert capacity overflow
+- Expert utilization over training, convergence analysis
+
+**Section 4: Expert Activation Patterns & Specialization** ⭐ *Most Critical Section*
+- Extracts expert activation data from model
+- Heatmaps showing domain-specific expert specialization
+- Expert similarity matrix, dimensionality reduction (t-SNE/UMAP)
+- Expert routing analysis, "personas", dead expert analysis
+- Expert co-activation network visualization
+
+**Section 5: Model Performance & Evaluation Metrics**
+- Overall performance metrics (perplexity, bits per character)
+- Domain-specific performance analysis
+- Performance by year and category
+- Baseline comparisons, example predictions, error analysis
+- Generation quality metrics, cross-domain transfer analysis
+
+**Section 6: Attention Patterns & Embedding Space Analysis**
+- Attention heatmaps for example sentences
+- Attention head specialization analysis
+- Token embedding visualization (t-SNE)
+- Semantic clustering, embedding drift analysis
+- Contextual embeddings and K-means clustering
+
+**Section 7: Vocabulary & Tokenization Statistics**
+- Vocabulary statistics and frequency distributions
+- Domain-specific vocabulary analysis
+- Tokenization examples, OOV analysis
+- Token length distribution, rare term coverage, n-gram analysis
+
+**Section 8: Research Trends & Domain Insights**
+- Temporal trend analysis, ML technique evolution
+- Healthcare application areas timeline
+- Topic modeling (LDA), co-occurrence networks
+- Emerging topics identification
+
+**Section 9: Efficiency Analysis & Deployment Considerations**
+- Parameter and computational efficiency analysis
+- Inference latency breakdown, batch size scaling
+- Memory footprint, expert pruning, quantization impact
+- Deployment recommendations, cost analysis, scalability projections
+
+**Section 10: Model Interpretability & Qualitative Analysis**
+- Generation showcase, abstract completion task
+- Controlled generation experiments
+- Attention visualization, expert routing case studies
+- Failure mode analysis, bias analysis
+- Model capabilities assessment, cross-domain reasoning
+
+**Section 11: Reproducibility & Model Documentation**
+- Training configuration table
+- Data preprocessing documentation
+- Hardware & environment specs
+- Checkpoint information, model card
+- Evaluation protocol, random seed documentation
+- Known issues, reproduction instructions, version control
+
+**Executive Summary**
+- Top 10 key findings
+- Performance summary card
+- Expert specialization summary
+- Comparative advantages
+- Most surprising findings
+- Limitations acknowledged
+- Key visualizations recap
+
+**Future Directions**
+- Model improvements, training improvements
+- Data expansion, evaluation improvements
+- Application ideas, research questions
+- Deployment roadmap, timeline and milestones
+
+### Output Files
+
+The notebook generates comprehensive outputs:
+
+**Figures** (`./outputs/figures/`):
+- Training curves, expert activation heatmaps, performance comparisons
+- Attention visualizations, embedding projections, network graphs
+- Word clouds, trend charts, efficiency analyses
+- **50+ high-quality visualizations** (PNG format, 300 DPI)
+
+**Data** (`./outputs/data/`):
+- CSV files with statistics, metrics, and analysis results
+- JSON files with configuration and metadata
+- **30+ data files** for further analysis
+
+**Reports** (`./outputs/reports/`):
+- Summary reports and documentation
+
+### Key Features
+
+**Robust Data Handling:**
+- Automatically handles missing files by generating sample data
+- Graceful error handling with clear instructions
+- Supports multiple data formats (JSONL, CSV, NPZ, PyTorch checkpoints)
+
+**Professional Visualizations:**
+- High-quality figures suitable for publications
+- Consistent styling with seaborn and matplotlib
+- Interactive plots with Plotly where appropriate
+- Clear legends, annotations, and captions
+
+**Comprehensive Analysis:**
+- Statistical tests (Kolmogorov-Smirnov, t-tests, Chi-square)
+- Domain-specific analysis (ML vs Healthcare)
+- Temporal analysis (trends over time)
+- Expert specialization deep dives
+
+**Reproducibility:**
+- All random seeds documented
+- Complete configuration tracking
+- Step-by-step reproduction instructions
+- Version control information
+
+### Usage Tips
+
+1. **First Time Setup:**
+   - Run the initial setup cells to install packages and create directories
+   - Download NLTK data (stopwords, punkt tokenizer)
+
+2. **Missing Data:**
+   - If training logs or model checkpoints are missing, the notebook will generate sample data
+   - This allows you to explore the analysis structure even without a trained model
+   - Replace sample data with actual data when available
+
+3. **Path Configuration:**
+   - The notebook automatically configures paths for Google Drive (Colab) or local directories
+   - Path configuration is in the "Google Drive Setup (Colab)" section
+   - If your data is in a different location, update the path variables:
+     - `ARXIV_DATA_PATH` - ArXiv papers dataset
+     - `MODEL_CONFIG_PATH` - Model configuration
+     - `TRAINING_LOGS_PATH` - Training logs
+     - `EVAL_RESULTS_PATH` - Evaluation results
+     - `EXPERT_ACTIVATIONS_PATH` - Expert activation data
+     - `MODEL_CHECKPOINT_PATH` - Model checkpoint
+
+4. **Customization:**
+   - Modify paths in the setup cells to match your directory structure
+   - Adjust figure sizes, DPI, and styling in the matplotlib configuration
+   - Add custom analysis sections as needed
+
+5. **Performance:**
+   - Some sections (e.g., t-SNE, UMAP, topic modeling) can be slow on large datasets
+   - Consider sampling data for faster exploration
+   - Use GPU acceleration where available (UMAP, PyTorch operations)
+
+6. **Exporting Results:**
+   - All figures are automatically saved to `./outputs/figures/`
+   - Data tables are saved to `./outputs/data/`
+   - Use these for presentations, papers, or further analysis
+
+### Expected Runtime
+
+For a typical analysis run:
+- **Setup & Data Loading**: 1-2 minutes
+- **Section 1-3** (Dataset, Architecture, Training): 5-10 minutes
+- **Section 4** (Expert Analysis): 10-15 minutes (most computationally intensive)
+- **Section 5-7** (Performance, Attention, Vocabulary): 10-15 minutes
+- **Section 8-11** (Trends, Efficiency, Interpretability, Documentation): 15-20 minutes
+- **Executive Summary & Future Directions**: 5-10 minutes
+
+**Total Runtime**: ~1-2 hours for complete analysis (depending on data size and hardware)
+
+### Integration with Training Pipeline
+
+The analysis notebook complements the training pipeline:
+
+1. **After Training:**
+   - Run the notebook to analyze your trained model
+   - Generate visualizations for presentations or papers
+   - Identify areas for improvement
+
+2. **During Development:**
+   - Use Section 4 (Expert Analysis) to debug routing issues
+   - Use Section 3 (Training Dynamics) to monitor convergence
+   - Use Section 9 (Efficiency) to optimize deployment
+
+3. **For Publication:**
+   - Export figures from `./outputs/figures/` for papers
+   - Use tables from `./outputs/data/` for supplementary materials
+   - Reference reproducibility section (Section 11) for methodology
 
 ## Configuration
 

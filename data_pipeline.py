@@ -80,13 +80,6 @@ except ImportError:
         print("PDF library not available. Install with: pip install PyPDF2 or pip install pdfplumber")
 
 try:
-    import requests
-    REQUESTS_AVAILABLE = True
-except ImportError:
-    REQUESTS_AVAILABLE = False
-    print("requests package not available. Install with: pip install requests")
-
-try:
     import sentencepiece as spm
     SENTENCEPIECE_AVAILABLE = True
 except ImportError:
@@ -279,8 +272,8 @@ except (ImportError, ValueError) as e:
     print(f"   Error: {e}")
 
 
-# Rate limiting: 3 requests per second
-RATE_LIMIT_DELAY = 1.0 / 3.0  # ~0.33 seconds between requests
+# Rate limiting: ArXiv recommends 3 seconds between requests
+RATE_LIMIT_DELAY = 3.0  # 3 seconds between requests (ArXiv recommendation)
 CHECKPOINT_INTERVAL = 5000  # Save checkpoint every 5000 papers
 LOG_INTERVAL = 500  # Log progress every 500 papers
 
@@ -332,6 +325,60 @@ ARXIV_QUERIES = [
 # Query Feasibility Analysis Tool
 # ============================================================================
 
+def _parse_xml_total_results(root: ET.Element, debug: bool = False) -> Optional[int]:
+    """
+    Robustly parse totalResults from ArXiv XML response.
+    Tries multiple namespace approaches to handle different XML formats.
+    
+    Args:
+        root: XML root element
+        debug: If True, print XML structure on failure
+        
+    Returns:
+        Total results count, or None if not found
+    """
+    ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
+    opensearch_ns = 'http://a9.com/-/spec/opensearch/1.1/'
+    
+    # Method 1: Try with namespace prefix
+    total_elem = root.find('.//os:totalResults', ns)
+    
+    # Method 2: Try with full namespace in tag
+    if total_elem is None:
+        total_elem = root.find(f'.//{{{opensearch_ns}}}totalResults')
+    
+    # Method 3: Search all elements for totalResults tag
+    if total_elem is None:
+        for elem in root.iter():
+            if 'totalResults' in elem.tag:
+                total_elem = elem
+                break
+    
+    # Method 4: Try without namespace (direct tag name)
+    if total_elem is None:
+        total_elem = root.find('.//totalResults')
+    
+    if total_elem is not None and total_elem.text:
+        try:
+            return int(total_elem.text)
+        except ValueError:
+            if debug:
+                print(f"   DEBUG: totalResults found but invalid value: '{total_elem.text}'")
+            return None
+    
+    # Debug: Print XML structure if parsing failed
+    if debug:
+        print("   DEBUG: Could not find totalResults. XML structure:")
+        print(f"   Root tag: {root.tag}")
+        print(f"   Root children: {[child.tag for child in list(root)[:5]]}")
+        # Print first few elements
+        for i, elem in enumerate(root.iter()):
+            if i < 10:
+                print(f"   Element {i}: {elem.tag} = {elem.text[:50] if elem.text else 'None'}")
+    
+    return None
+
+
 def analyze_query_feasibility(query: str) -> Dict:
     """
     Test a single ArXiv query to determine:
@@ -350,12 +397,13 @@ def analyze_query_feasibility(query: str) -> Dict:
         'estimated_papers': 3571,
         'strategy': 'year_split',  # or 'direct', 'month_split'
         'time_estimate_seconds': 45,
+        'error': None or {'type': str, 'message': str},
     }
     """
     if not REQUESTS_AVAILABLE:
         return {
             'query': query,
-            'error': 'requests package not available. Install with: pip install requests',
+            'error': {'type': 'ImportError', 'message': 'requests package not available. Install with: pip install requests'},
             'total_results': 0,
             'by_year': {},
             'risky_years': [],
@@ -378,70 +426,237 @@ def analyze_query_feasibility(query: str) -> Dict:
     }
     
     base_url = "http://export.arxiv.org/api/query"
-    ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
     
-    # Get total results
-    try:
-        params = {
-            'search_query': query,
-            'start': 0,
-            'max_results': 1,
-            'sortBy': 'submittedDate',
-            'sortOrder': 'descending'
-        }
-        
-        response = requests.get(base_url, params=params, timeout=15)
-        response.raise_for_status()
-        
-        # Parse XML to get total
-        root = ET.fromstring(response.content)
-        total_elem = root.find('.//os:totalResults', ns)
-        
-        if total_elem is not None:
-            results['total_results'] = int(total_elem.text)
-        else:
-            results['error'] = "Could not find totalResults in API response"
-            return results
-        
-    except requests.exceptions.RequestException as e:
-        results['error'] = f"Network error: {e}"
-        return results
-    except Exception as e:
-        results['error'] = f"Error: {e}"
-        return results
+    # Retry logic with exponential backoff for getting total results
+    max_retries = 3
+    retry_delays = [5, 10, 20]  # Exponential backoff: 5s, 10s, 20s
     
-    # Test each year (2015-2024)
+    # Get total results with retry logic
+    for retry_attempt in range(max_retries + 1):
+        try:
+            params = {
+                'search_query': query,
+                'start': 0,
+                'max_results': 1,
+                'sortBy': 'submittedDate',
+                'sortOrder': 'descending'
+            }
+            
+            if retry_attempt > 0:
+                print(f"   Retry attempt {retry_attempt}/{max_retries} for total results...")
+            
+            response = requests.get(base_url, params=params, timeout=15)
+            response.raise_for_status()
+            
+            # Parse XML to get total with robust namespace handling
+            try:
+                root = ET.fromstring(response.content)
+            except ET.ParseError as e:
+                error_msg = f"Invalid XML response: {e}"
+                print(f"   DEBUG: {error_msg}")
+                print(f"   DEBUG: Response content (first 500 chars): {response.content[:500]}")
+                if retry_attempt < max_retries:
+                    delay = retry_delays[retry_attempt]
+                    print(f"   Retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    results['error'] = {'type': 'ParseError', 'message': error_msg}
+                    return results
+            
+            total_results = _parse_xml_total_results(root, debug=(retry_attempt == max_retries))
+            
+            if total_results is not None:
+                results['total_results'] = total_results
+                break  # Success - exit retry loop
+            else:
+                # Could not parse totalResults
+                if retry_attempt < max_retries:
+                    delay = retry_delays[retry_attempt]
+                    print(f"   Could not parse totalResults, retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    results['error'] = {'type': 'ParseError', 'message': 'Could not find totalResults in API response'}
+                    return results
+        
+        except requests.exceptions.Timeout as e:
+            error_msg = "Request timed out"
+            print(f"   {error_msg}: {e}")
+            if retry_attempt < max_retries:
+                delay = retry_delays[retry_attempt]
+                print(f"   Retrying in {delay}s...")
+                time.sleep(delay)
+                continue
+            else:
+                results['error'] = {'type': 'Timeout', 'message': error_msg}
+                return results
+        
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response else 'unknown'
+            error_msg = f"HTTP error: {status_code}"
+            print(f"   {error_msg}: {e}")
+            if retry_attempt < max_retries and status_code in [429, 500, 502, 503, 504]:
+                # Retry on rate limit or server errors
+                delay = retry_delays[retry_attempt]
+                print(f"   Retrying in {delay}s...")
+                time.sleep(delay)
+                continue
+            else:
+                results['error'] = {'type': 'HTTPError', 'message': f"{error_msg} ({status_code})"}
+                return results
+        
+        except requests.exceptions.ConnectionError as e:
+            error_msg = "Connection failed"
+            print(f"   {error_msg}: {e}")
+            if retry_attempt < max_retries:
+                delay = retry_delays[retry_attempt]
+                print(f"   Retrying in {delay}s...")
+                time.sleep(delay)
+                continue
+            else:
+                results['error'] = {'type': 'ConnectionError', 'message': error_msg}
+                return results
+        
+        except ValueError as e:
+            error_msg = f"Invalid result count: {e}"
+            print(f"   {error_msg}")
+            if retry_attempt < max_retries:
+                delay = retry_delays[retry_attempt]
+                print(f"   Retrying in {delay}s...")
+                time.sleep(delay)
+                continue
+            else:
+                results['error'] = {'type': 'ValueError', 'message': error_msg}
+                return results
+        
+        except Exception as e:
+            error_msg = f"Unexpected error: {e}"
+            print(f"   {error_msg}")
+            if retry_attempt < max_retries:
+                delay = retry_delays[retry_attempt]
+                print(f"   Retrying in {delay}s...")
+                time.sleep(delay)
+                continue
+            else:
+                results['error'] = {'type': type(e).__name__, 'message': str(e)}
+                return results
+    
+    # Test each year (2015-2024) with retry logic
     for year in range(2024, 2014, -1):
         date_filter = f" AND submittedDate:[{year}01010000 TO {year}12312359]"
         yearly_query = query + date_filter
         
-        try:
-            # Count results for this year
-            response = requests.get(base_url, params={
-                'search_query': yearly_query,
-                'start': 0,
-                'max_results': 1
-            }, timeout=15)
-            
-            response.raise_for_status()
-            root = ET.fromstring(response.content)
-            total_elem = root.find('.//os:totalResults', ns)
-            
-            if total_elem is not None:
-                yearly_total = int(total_elem.text)
-                results['by_year'][year] = yearly_total
+        # Retry logic for yearly queries
+        yearly_success = False
+        for retry_attempt in range(max_retries + 1):
+            try:
+                if retry_attempt > 0:
+                    print(f"   Year {year}: Retry attempt {retry_attempt}/{max_retries}...")
                 
-                # Flag risky years (>1000 means pagination limit possible)
-                if yearly_total > 1000:
-                    results['risky_years'].append(year)
-            else:
-                results['by_year'][year] = 0
+                # Count results for this year
+                response = requests.get(base_url, params={
+                    'search_query': yearly_query,
+                    'start': 0,
+                    'max_results': 1
+                }, timeout=15)
+                
+                response.raise_for_status()
+                
+                # Parse XML with robust namespace handling
+                try:
+                    root = ET.fromstring(response.content)
+                except ET.ParseError as e:
+                    if retry_attempt < max_retries:
+                        delay = retry_delays[retry_attempt]
+                        print(f"   Year {year}: XML parse error, retrying in {delay}s...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"   Year {year}: XML parse error after {max_retries} retries, skipping")
+                        results['by_year'][year] = 0
+                        break
+                
+                yearly_total = _parse_xml_total_results(root, debug=False)
+                
+                if yearly_total is not None:
+                    results['by_year'][year] = yearly_total
+                    
+                    # Flag risky years (>1000 means pagination limit possible)
+                    if yearly_total > 1000:
+                        results['risky_years'].append(year)
+                    yearly_success = True
+                    break  # Success - exit retry loop
+                else:
+                    # Could not parse
+                    if retry_attempt < max_retries:
+                        delay = retry_delays[retry_attempt]
+                        print(f"   Year {year}: Could not parse results, retrying in {delay}s...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        results['by_year'][year] = 0
+                        break
             
-            # Small delay to avoid rate limiting
-            time.sleep(0.5)
+            except requests.exceptions.Timeout:
+                if retry_attempt < max_retries:
+                    delay = retry_delays[retry_attempt]
+                    print(f"   Year {year}: Timeout, retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"   Year {year}: Timeout after {max_retries} retries, skipping")
+                    results['by_year'][year] = 0
+                    break
+            
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response else 'unknown'
+                if retry_attempt < max_retries and status_code in [429, 500, 502, 503, 504]:
+                    delay = retry_delays[retry_attempt]
+                    print(f"   Year {year}: HTTP {status_code}, retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"   Year {year}: HTTP error {status_code}, skipping")
+                    results['by_year'][year] = 0
+                    break
+            
+            except requests.exceptions.ConnectionError:
+                if retry_attempt < max_retries:
+                    delay = retry_delays[retry_attempt]
+                    print(f"   Year {year}: Connection error, retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"   Year {year}: Connection error after {max_retries} retries, skipping")
+                    results['by_year'][year] = 0
+                    break
+            
+            except ValueError as e:
+                if retry_attempt < max_retries:
+                    delay = retry_delays[retry_attempt]
+                    print(f"   Year {year}: Invalid result count, retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"   Year {year}: Invalid result count after {max_retries} retries, skipping")
+                    results['by_year'][year] = 0
+                    break
+            
+            except Exception as e:
+                if retry_attempt < max_retries:
+                    delay = retry_delays[retry_attempt]
+                    print(f"   Year {year}: Error {type(e).__name__}, retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"   Year {year}: Error after {max_retries} retries: {e}")
+                    results['by_year'][year] = 0
+                    break
         
-        except Exception as e:
-            results['by_year'][year] = 0
+        # Small delay to avoid rate limiting between years
+        if yearly_success:
+            time.sleep(0.5)
     
     # Calculate retrieval rate and strategy
     total_by_year = sum(results['by_year'].values())
@@ -731,12 +946,13 @@ def collect_with_pagination_safety(
     max_papers_to_retrieve: int = 1000,  # Stop at 1000 to avoid pagination limits
     existing_ids: Optional[Set[str]] = None,
     output_file_handle = None
-) -> Tuple[List[Dict], int]:
+) -> Tuple[List[Dict], int, bool]:
     """
     Collect papers with built-in pagination safety:
     - Stop after max_papers_to_retrieve papers (default 1000, ArXiv pagination limit)
+    - Detect when ArXiv truncates results silently
     - Track which pagination level we hit
-    - Return papers collected + count
+    - Return papers collected + count + pagination status
     
     Args:
         client: arxiv.Client instance
@@ -746,13 +962,15 @@ def collect_with_pagination_safety(
         output_file_handle: Optional file handle to write papers immediately
     
     Returns:
-        Tuple of (list of papers dict, count of papers collected)
+        Tuple of (list of papers dict, count of papers collected, hit_pagination_limit: bool)
     """
     if existing_ids is None:
         existing_ids = set()
     
     papers = []
     papers_collected = 0
+    hit_pagination_limit = False
+    papers_in_last_100 = 0  # Track papers in current 100-paper window
     
     search = arxiv.Search(
         query=query,
@@ -761,66 +979,155 @@ def collect_with_pagination_safety(
         sort_order=arxiv.SortOrder.Descending
     )
     
-    try:
-        for i, result in enumerate(client.results(search)):
-            if papers_collected >= max_papers_to_retrieve:
-                # Stop at limit - ArXiv pagination depth limit
-                print(f"   Reached pagination limit ({max_papers_to_retrieve} papers) for query")
-                break
+    # Retry logic with exponential backoff for rate limiting
+    max_retries = 3
+    retry_delays = [5, 10, 20]  # Exponential backoff: 5s, 10s, 20s
+    
+    for retry_attempt in range(max_retries + 1):
+        try:
+            results_iter = iter(client.results(search))
+            papers_in_last_100 = 0
             
-            # Extract paper ID
-            paper_id = result.entry_id.split('/')[-1]
+            for i, result in enumerate(results_iter):
+                if papers_collected >= max_papers_to_retrieve:
+                    # Stop at limit - ArXiv pagination depth limit
+                    print(f"   ⚠️  Reached requested limit ({max_papers_to_retrieve} papers) for query")
+                    break
+                
+                # Extract paper ID
+                paper_id = result.entry_id.split('/')[-1]
+                
+                # Skip if already collected
+                if paper_id in existing_ids:
+                    continue
+                
+                # Extract year
+                year = None
+                if result.published:
+                    try:
+                        year = result.published.year
+                    except:
+                        pass
+                
+                # Extract categories
+                categories = []
+                if result.categories:
+                    for cat in result.categories:
+                        if isinstance(cat, str):
+                            categories.append(cat)
+                        elif hasattr(cat, 'term'):
+                            categories.append(cat.term)
+                        else:
+                            categories.append(str(cat))
+                
+                # Format abstract
+                abstract = ""
+                if result.summary:
+                    abstract = result.summary.strip()[:300]
+                
+                paper = {
+                    'id': paper_id,
+                    'title': result.title.strip() if result.title else "",
+                    'abstract': abstract,
+                    'year': year,
+                    'categories': categories,
+                    'pdf_url': f"https://arxiv.org/pdf/{paper_id}.pdf",
+                }
+                
+                papers.append(paper)
+                existing_ids.add(paper_id)
+                papers_collected += 1
+                papers_in_last_100 += 1
+                
+                # Write immediately if file handle provided
+                if output_file_handle:
+                    output_file_handle.write(json.dumps(paper, ensure_ascii=False) + '\n')
+                    output_file_handle.flush()
+                
+                # Detect pagination truncation: if we get very few papers when expecting more
+                # Check every 100 papers
+                if papers_collected % 100 == 0:
+                    if papers_in_last_100 < 10 and papers_collected < max_papers_to_retrieve:
+                        print(f"   ⚠️  Warning: Only {papers_in_last_100} papers in last 100 iterations (possible pagination truncation)")
+                        hit_pagination_limit = True
+                    papers_in_last_100 = 0  # Reset counter
             
-            # Skip if already collected
-            if paper_id in existing_ids:
-                continue
+            # Check if we stopped early due to low results
+            # If we collected fewer papers than expected and the last batch was small, likely truncation
+            if papers_collected < max_papers_to_retrieve:
+                if papers_collected > 0 and papers_in_last_100 < 10:
+                    # Small final batch suggests truncation
+                    print(f"   ⚠️  Warning: Collection stopped early with only {papers_collected} papers (expected up to {max_papers_to_retrieve})")
+                    print(f"   ⚠️  Final batch had only {papers_in_last_100} papers - possible ArXiv pagination truncation")
+                    hit_pagination_limit = True
+                elif papers_collected == 0:
+                    # No papers at all - might be query issue or pagination
+                    print(f"   ⚠️  Warning: No papers collected (possible query issue or pagination limit)")
+                    hit_pagination_limit = True
             
-            # Extract year
-            year = None
-            if result.published:
-                try:
-                    year = result.published.year
-                except:
-                    pass
+            # Success - break out of retry loop
+            break
             
-            # Extract categories
-            categories = []
-            if result.categories:
-                for cat in result.categories:
-                    if isinstance(cat, str):
-                        categories.append(cat)
-                    elif hasattr(cat, 'term'):
-                        categories.append(cat.term)
+        except Exception as e:
+            # Check for UnexpectedEmptyPageError (ArXiv pagination limit)
+            if UnexpectedEmptyPageError and isinstance(e, UnexpectedEmptyPageError):
+                print(f"   ⚠️  Hit ArXiv pagination limit (UnexpectedEmptyPageError) at {papers_collected} papers")
+                print(f"   ⚠️  ArXiv silently truncates results beyond ~1000 papers per query")
+                hit_pagination_limit = True
+                break  # Don't retry on pagination limit
+            
+            # Check for arxiv.HTTPError (rate limiting, etc.)
+            error_type_name = type(e).__name__
+            if 'HTTPError' in error_type_name or hasattr(e, 'status_code'):
+                status_code = getattr(e, 'status_code', None) or (str(e).split()[-1] if '429' in str(e) else None)
+                if status_code == 429 or '429' in str(e):
+                    print(f"   ⚠️  Rate limited (HTTP 429), waiting 30 seconds...")
+                    if retry_attempt < max_retries:
+                        delay = 30  # Longer delay for rate limits
+                        print(f"   Retrying in {delay}s (attempt {retry_attempt + 1}/{max_retries})...")
+                        time.sleep(delay)
+                        continue
                     else:
-                        categories.append(str(cat))
+                        print(f"   ⚠️  Rate limit error after {max_retries} retries, stopping collection for this query")
+                        break
+                else:
+                    # Other HTTP errors
+                    print(f"   ⚠️  HTTP error: {e}")
+                    if retry_attempt < max_retries:
+                        delay = retry_delays[retry_attempt]
+                        print(f"   Retrying in {delay}s (attempt {retry_attempt + 1}/{max_retries})...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"   ⚠️  HTTP error after {max_retries} retries, stopping collection")
+                        break
             
-            # Format abstract
-            abstract = ""
-            if result.summary:
-                abstract = result.summary.strip()[:300]
+            # Check for other rate limit indicators
+            error_str = str(e).lower()
+            is_rate_limit = (
+                "429" in str(e) or 
+                "rate limit" in error_str or 
+                "too many requests" in error_str
+            )
             
-            paper = {
-                'id': paper_id,
-                'title': result.title.strip() if result.title else "",
-                'abstract': abstract,
-                'year': year,
-                'categories': categories,
-                'pdf_url': f"https://arxiv.org/pdf/{paper_id}.pdf",
-            }
-            
-            papers.append(paper)
-            existing_ids.add(paper_id)
-            papers_collected += 1
-            
-            # Write immediately if file handle provided
-            if output_file_handle:
-                output_file_handle.write(json.dumps(paper, ensure_ascii=False) + '\n')
-                output_file_handle.flush()
+            if is_rate_limit and retry_attempt < max_retries:
+                delay = 30  # Longer delay for rate limits
+                print(f"   ⚠️  Rate limit error, retrying in {delay}s (attempt {retry_attempt + 1}/{max_retries})...")
+                time.sleep(delay)
+                continue
+            else:
+                # Not a rate limit error, or max retries reached
+                if is_rate_limit:
+                    print(f"   ⚠️  Rate limit error after {max_retries} retries, stopping collection for this query")
+                else:
+                    print(f"   ⚠️  Stopped at {papers_collected} papers: {e}")
+                break
     
-    except Exception as e:
-        print(f"   Stopped at {papers_collected} papers: {e}")
+    # Final pagination status check
+    if hit_pagination_limit:
+        print(f"   ⚠️  Pagination limit detected: Collected {papers_collected} papers (may be truncated)")
     
-    return papers, papers_collected
+    return papers, papers_collected, hit_pagination_limit
 
 
 def execute_optimized_queries(
@@ -881,9 +1188,10 @@ def execute_optimized_queries(
         except Exception as e:
             print(f"   Could not read output file: {e}")
     
-    # Create ArXiv client
+    # Create ArXiv client with ArXiv-recommended 3 second delay
+    # Use 3.0 seconds regardless of rate_limit_delay parameter to comply with ArXiv API
     client = arxiv.Client(
-        delay_seconds=rate_limit_delay,
+        delay_seconds=3.0,  # ArXiv recommends 3 seconds between requests
         num_retries=3,
         page_size=100
     )
@@ -929,42 +1237,75 @@ def execute_optimized_queries(
                 
                 print(f"   [{year_idx}/{len(sub_queries)}] Year {year_str}: ", end="", flush=True)
                 
-                try:
-                    # Collect papers with pagination safety
-                    papers, count = collect_with_pagination_safety(
-                        client=client,
-                        query=sub_query,
-                        max_papers_to_retrieve=max_papers_per_query,
-                        existing_ids=collected_ids,
-                        output_file_handle=None  # We'll write manually to filter duplicates
-                    )
-                    
-                    # Filter out already-collected papers
-                    new_papers = []
-                    for paper in papers:
-                        if paper['id'] not in collected_ids:
-                            new_papers.append(paper)
-                            collected_ids.add(paper['id'])
-                    
-                    # Write new papers to file
-                    for paper in new_papers:
-                        out_f.write(json.dumps(paper, ensure_ascii=False) + '\n')
-                        out_f.flush()
-                        total_collected += 1
-                    
-                    print(f"✓ {len(new_papers)} new papers (checked {count} total)")
-                    
-                    if len(new_papers) == 0 and count > 0:
-                        print(f"   (All {count} papers were duplicates)")
+                # Retry logic with exponential backoff for rate limiting
+                max_retries = 3
+                retry_delays = [5, 10, 20]  # Exponential backoff: 5s, 10s, 20s
+                papers = []
+                count = 0
                 
-                except KeyboardInterrupt:
-                    print("\n\nInterrupted by user")
-                    raise
-                except Exception as e:
-                    print(f"⚠️  Error: {str(e)[:60]}")
-                    import traceback
-                    print(f"   Traceback: {traceback.format_exc()[:200]}")
-                    continue
+                for retry_attempt in range(max_retries + 1):
+                    try:
+                        # Collect papers with pagination safety
+                        papers, count, hit_limit = collect_with_pagination_safety(
+                            client=client,
+                            query=sub_query,
+                            max_papers_to_retrieve=max_papers_per_query,
+                            existing_ids=collected_ids,
+                            output_file_handle=None  # We'll write manually to filter duplicates
+                        )
+                        
+                        if hit_limit:
+                            print(f"   ⚠️  Query hit pagination limit: {sub_query[:60]}...")
+                        
+                        # Success - break out of retry loop
+                        break
+                        
+                    except KeyboardInterrupt:
+                        print("\n\nInterrupted by user")
+                        raise
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        is_rate_limit = (
+                            "429" in str(e) or 
+                            "rate limit" in error_str or 
+                            "too many requests" in error_str or
+                            "http error" in error_str and "429" in str(e)
+                        )
+                        
+                        if is_rate_limit and retry_attempt < max_retries:
+                            delay = retry_delays[retry_attempt]
+                            print(f"   Rate limit error (HTTP 429), retrying in {delay}s (attempt {retry_attempt + 1}/{max_retries})...")
+                            time.sleep(delay)
+                            continue
+                        else:
+                            # Not a rate limit error, or max retries reached
+                            if is_rate_limit:
+                                print(f"   Rate limit error after {max_retries} retries, skipping this query")
+                            else:
+                                print(f"⚠️  Error: {str(e)[:60]}")
+                                import traceback
+                                print(f"   Traceback: {traceback.format_exc()[:200]}")
+                            papers = []
+                            count = 0
+                            break
+                
+                # Filter out already-collected papers
+                new_papers = []
+                for paper in papers:
+                    if paper['id'] not in collected_ids:
+                        new_papers.append(paper)
+                        collected_ids.add(paper['id'])
+                
+                # Write new papers to file
+                for paper in new_papers:
+                    out_f.write(json.dumps(paper, ensure_ascii=False) + '\n')
+                    out_f.flush()
+                    total_collected += 1
+                
+                print(f"✓ {len(new_papers)} new papers (checked {count} total)")
+                
+                if len(new_papers) == 0 and count > 0:
+                    print(f"   (All {count} papers were duplicates)")
                 
                 papers_from_query += len(new_papers)
                 
@@ -1713,10 +2054,10 @@ def search_arxiv_query_streaming(
     last_progress_time = query_start
     
     try:
-        # Create ArXiv client
+        # Create ArXiv client with ArXiv-recommended 3 second delay
         client = arxiv.Client(
             page_size=100,
-            delay_seconds=rate_limit_delay,
+            delay_seconds=3.0,  # ArXiv recommends 3 seconds between requests
             num_retries=2
         )
         
@@ -2043,8 +2384,9 @@ class RAMEfficientArxivCollector:
             return 0
         
         try:
+            # Use ArXiv-recommended 3 seconds between requests
             client = arxiv.Client(
-                delay_seconds=self.rate_limit,
+                delay_seconds=3.0,  # ArXiv recommends 3 seconds between requests
                 num_retries=2
             )
             
@@ -2171,9 +2513,9 @@ class RAMEfficientArxivCollector:
             print(f"   Split into {len(year_queries)} year-specific queries")
             
             # Collect from each year query
-            base_delay = max(self.rate_limit, 2.0)
+            # Use ArXiv-recommended 3 seconds between requests
             client = arxiv.Client(
-                delay_seconds=base_delay,
+                delay_seconds=3.0,  # ArXiv recommends 3 seconds between requests
                 num_retries=3,
                 page_size=100
             )
@@ -2196,13 +2538,16 @@ class RAMEfficientArxivCollector:
                 
                 # Use pagination-safe collection with 1000 limit per year
                 with open(self.output_file, 'a', encoding='utf-8') as f:
-                    year_papers, count = collect_with_pagination_safety(
+                    year_papers, count, hit_limit = collect_with_pagination_safety(
                         client=client,
                         query=year_query,
                         max_papers_to_retrieve=min(1000, max_for_year),  # ArXiv pagination limit
                         existing_ids=self.collected_ids,
                         output_file_handle=f
                     )
+                    
+                    if hit_limit:
+                        print(f"   ⚠️  Year {year_display} query hit pagination limit")
                 
                 papers_in_query += count
                 self.total_collected += count
@@ -2235,13 +2580,10 @@ class RAMEfficientArxivCollector:
         max_search_results = max(max_papers * 30, 200000)  # Increased: 30x target, min 200k results
         
         try:
-            # Optimized rate limiting for Colab
-            # ArXiv API allows ~1 request per second, but we can be slightly more aggressive
-            # Use adaptive delay: start conservative, reduce if no errors
-            # delay_seconds is the delay between requests
-            base_delay = max(self.rate_limit, 2.0)  # Reduced from 3.0 to 2.0 for speed (still safe)
+            # ArXiv API rate limiting: Use ArXiv-recommended 3 seconds between requests
+            # This prevents rate limiting failures and ensures reliable collection
             client = arxiv.Client(
-                delay_seconds=base_delay,  # 2 seconds between requests (faster but still safe)
+                delay_seconds=3.0,  # ArXiv recommends 3 seconds between requests
                 num_retries=3,  # Increased retries for better reliability
                 page_size=100  # Standard page size
             )

@@ -1540,16 +1540,9 @@ class SimpleMoEModel(nn.Module):
         # This maintains backward compatibility while enabling sequence-level processing
         # output = output[:, -1, :]  # [batch, vocab_size] - use last token for prediction
         
-        # Debug: Check output shape (should be [batch, vocab_size])
-        # Only print once to reduce noise
-        if len(output.shape) != 2:
-            if not hasattr(self, '_debug_shape_warned') or not self._debug_shape_warned:
-                print(f"Model decoder output shape is unexpected: {output.shape}")
-                print(f"   fused_output shape: {fused_output.shape}")
-                print(f"   text_sequence shape: {text_sequence.shape}")
-                print(f"   text_tokens shape: {text_tokens.shape}")
-                print(f"   This should not happen - model should output [batch, vocab_size]")
-                self._debug_shape_warned = True
+        # Output shape is [batch, seq_len, vocab_size] which is correct for language modeling
+        # The adapter expects this shape and handles it correctly
+        # No warning needed - this is the expected behavior
         
         if return_load_balance_loss or return_gate_logits:
             if return_gate_logits:

@@ -45,7 +45,8 @@ import csv
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler  # GradScaler is still in torch.cuda.amp
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
@@ -284,7 +285,7 @@ def find_max_batch_size(
             # Try to process a batch
             batch = next(iter(test_dataloader))
             
-            with autocast():
+            with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
                 result = adapter.process_batch(batch)
                 loss = result['loss']
                 # Simulate backward pass
@@ -441,7 +442,7 @@ def train(
         
         # Forward pass with mixed precision
         try:
-            with autocast():
+            with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
                 result = adapter.process_batch(batch)
                 loss = result['loss']
                 batch_metadata = result['batch_metadata']

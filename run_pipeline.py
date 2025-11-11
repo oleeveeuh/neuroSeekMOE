@@ -981,12 +981,35 @@ class PipelineOrchestrator:
                                     change_reasons.append("file modification time changed")
                             
                             # Check paper count
-                            if current_dataset_size > training_dataset_size:
+                            if current_dataset_size != training_dataset_size:
                                 dataset_changed = True
-                                change_reasons.append(f"paper count increased ({training_dataset_size} → {current_dataset_size} papers)")
-                            elif current_dataset_size < training_dataset_size:
-                                dataset_changed = True
-                                change_reasons.append(f"paper count decreased ({training_dataset_size} → {current_dataset_size} papers)")
+                                if current_dataset_size > training_dataset_size:
+                                    change_reasons.append(f"paper count increased ({training_dataset_size} → {current_dataset_size} papers)")
+                                else:
+                                    change_reasons.append(f"paper count decreased ({training_dataset_size} → {current_dataset_size} papers)")
+                            
+                            # IMPORTANT: Even if all values match, check if the last_trained_step in metadata
+                            # matches the actual checkpoint step. If metadata was updated without training,
+                            # this will catch it.
+                            last_trained_step_in_metadata = training_metadata.get('last_trained_step', 0)
+                            if latest_checkpoint:
+                                checkpoint_name = Path(latest_checkpoint).stem
+                                if 'step_' in checkpoint_name:
+                                    actual_checkpoint_step = int(checkpoint_name.split('_')[1])
+                                    # If metadata says it was trained on this dataset, but checkpoint is from different dataset
+                                    # (detected by comparing file stats), we need to retrain
+                                    if last_trained_step_in_metadata == actual_checkpoint_step:
+                                        # Metadata and checkpoint match - check if dataset actually matches
+                                        if not dataset_changed:
+                                            # All checks passed - dataset matches what was trained on
+                                            logger.info(f"Dataset matches previous training:")
+                                            logger.info(f"   Size: {current_dataset_size} papers (unchanged)")
+                                            logger.info(f"   File size: {current_file_size:,} bytes (unchanged)")
+                                            logger.info(f"   Last trained: step {last_trained_step_in_metadata}")
+                                    else:
+                                        # Metadata step doesn't match checkpoint - something is wrong
+                                        dataset_changed = True
+                                        change_reasons.append(f"metadata mismatch: last_trained_step={last_trained_step_in_metadata} but checkpoint is step_{actual_checkpoint_step}")
                             
                             if dataset_changed:
                                 should_retrain_due_to_dataset_change = True
@@ -1031,6 +1054,13 @@ class PipelineOrchestrator:
                                 logger.warning(f"   Current dataset: {current_dataset_size} papers")
                                 logger.warning(f"   To force retraining, delete the checkpoint or set force_retrain=True")
             
+            # IMPORTANT: Check if dataset has changed BEFORE checking if training is complete
+            # If dataset changed, we MUST retrain even if training was previously "complete"
+            if should_retrain_due_to_dataset_change:
+                logger.info(f"⚠️  Dataset has changed - will retrain even though training was previously complete")
+                logger.info(f"   This ensures the model matches the current dataset")
+                # Continue to training (don't skip)
+            
             # Check if we've reached max_steps (only if dataset hasn't changed)
             if latest_checkpoint and not should_retrain_due_to_dataset_change:
                 # Extract step number from checkpoint filename
@@ -1039,17 +1069,9 @@ class PipelineOrchestrator:
                     step_num = int(checkpoint_name.split('_')[1])
                     if step_num >= max_steps:
                         logger.info(f"Training already complete (step {step_num} >= {max_steps})")
-                        # Update dataset metadata even if training is complete
-                        if current_dataset_size > 0:
-                            with open(dataset_metadata_file, 'w') as f:
-                                json.dump({
-                                    'dataset_size': current_dataset_size,
-                                    'last_trained_step': step_num,
-                                    'last_updated': datetime.now().isoformat(),
-                                    'processed_jsonl': str(self.processed_jsonl),
-                                    'processed_jsonl_file_size': current_file_size,
-                                    'processed_jsonl_mtime': current_mtime
-                                }, f, indent=2)
+                        logger.info(f"   Dataset unchanged - skipping retraining")
+                        # DO NOT update metadata here - only update after actual training
+                        # This prevents false "trained" status when dataset changes
                         self._log_step_end(step_name, True)
                         return True
             

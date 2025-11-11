@@ -949,53 +949,87 @@ class PipelineOrchestrator:
             dataset_metadata_file = checkpoint_dir / "dataset_metadata.json"
             should_retrain_due_to_dataset_change = False
             
-            if latest_checkpoint and dataset_metadata_file.exists():
-                try:
-                    with open(dataset_metadata_file, 'r') as f:
-                        training_metadata = json.load(f)
-                        training_dataset_size = training_metadata.get('dataset_size', 0)
-                        stored_file_size = training_metadata.get('processed_jsonl_file_size', 0)
-                        stored_mtime = training_metadata.get('processed_jsonl_mtime', None)
-                        stored_input_file = training_metadata.get('processed_jsonl', '')
-                        
-                        # Check if dataset has changed (comprehensive check like tokenizer)
-                        dataset_changed = False
-                        change_reasons = []
-                        
-                        # Check file path
-                        if stored_input_file and stored_input_file != str(self.processed_jsonl):
-                            dataset_changed = True
-                            change_reasons.append(f"input file path changed")
-                        
-                        # Check file size
-                        if current_file_size != stored_file_size:
-                            dataset_changed = True
-                            change_reasons.append(f"file size changed ({stored_file_size:,} → {current_file_size:,} bytes)")
-                        
-                        # Check modification time (allow 1 second tolerance)
-                        if stored_mtime is not None and current_mtime is not None:
-                            if abs(current_mtime - stored_mtime) > 1.0:
+            # Always check for dataset changes if we have a checkpoint (even if metadata doesn't exist)
+            if latest_checkpoint:
+                if dataset_metadata_file.exists():
+                    try:
+                        with open(dataset_metadata_file, 'r') as f:
+                            training_metadata = json.load(f)
+                            training_dataset_size = training_metadata.get('dataset_size', 0)
+                            stored_file_size = training_metadata.get('processed_jsonl_file_size', 0)
+                            stored_mtime = training_metadata.get('processed_jsonl_mtime', None)
+                            stored_input_file = training_metadata.get('processed_jsonl', '')
+                            
+                            # Check if dataset has changed (comprehensive check like tokenizer)
+                            dataset_changed = False
+                            change_reasons = []
+                            
+                            # Check file path
+                            if stored_input_file and stored_input_file != str(self.processed_jsonl):
                                 dataset_changed = True
-                                change_reasons.append("file modification time changed")
-                        
-                        # Check paper count
-                        if current_dataset_size > training_dataset_size:
-                            dataset_changed = True
-                            change_reasons.append(f"paper count increased ({training_dataset_size} → {current_dataset_size} papers)")
-                        elif current_dataset_size < training_dataset_size:
-                            dataset_changed = True
-                            change_reasons.append(f"paper count decreased ({training_dataset_size} → {current_dataset_size} papers)")
-                        
-                        if dataset_changed:
-                            should_retrain_due_to_dataset_change = True
-                            logger.info(f"Dataset has changed since last training:")
-                            for reason in change_reasons:
-                                logger.info(f"   - {reason}")
-                            logger.info(f"   Retraining to include updated data...")
-                        elif current_dataset_size == 0:
-                            logger.warning(f"Dataset is empty - cannot train")
-                except Exception as e:
-                    logger.warning(f"Could not read training metadata: {e}. Will check training completion status...")
+                                change_reasons.append(f"input file path changed")
+                            
+                            # Check file size
+                            if current_file_size != stored_file_size:
+                                dataset_changed = True
+                                change_reasons.append(f"file size changed ({stored_file_size:,} → {current_file_size:,} bytes)")
+                            
+                            # Check modification time (allow 1 second tolerance)
+                            if stored_mtime is not None and current_mtime is not None:
+                                if abs(current_mtime - stored_mtime) > 1.0:
+                                    dataset_changed = True
+                                    change_reasons.append("file modification time changed")
+                            
+                            # Check paper count
+                            if current_dataset_size > training_dataset_size:
+                                dataset_changed = True
+                                change_reasons.append(f"paper count increased ({training_dataset_size} → {current_dataset_size} papers)")
+                            elif current_dataset_size < training_dataset_size:
+                                dataset_changed = True
+                                change_reasons.append(f"paper count decreased ({training_dataset_size} → {current_dataset_size} papers)")
+                            
+                            if dataset_changed:
+                                should_retrain_due_to_dataset_change = True
+                                logger.info(f"Dataset has changed since last training:")
+                                for reason in change_reasons:
+                                    logger.info(f"   - {reason}")
+                                logger.info(f"   Retraining to include updated data...")
+                            elif current_dataset_size == 0:
+                                logger.warning(f"Dataset is empty - cannot train")
+                    except Exception as e:
+                        logger.warning(f"Could not read training metadata: {e}")
+                        # If metadata exists but can't be read, check if dataset file has changed
+                        # by comparing with checkpoint timestamp or file stats
+                        logger.info(f"   Will check dataset file directly for changes...")
+                        # If we can't read metadata, assume dataset might have changed and check file
+                        if self.processed_jsonl.exists():
+                            # Check if processed_jsonl is newer than the checkpoint
+                            checkpoint_mtime = os.path.getmtime(latest_checkpoint) if os.path.exists(latest_checkpoint) else None
+                            if checkpoint_mtime and current_mtime:
+                                if current_mtime > checkpoint_mtime:
+                                    should_retrain_due_to_dataset_change = True
+                                    logger.info(f"Dataset file is newer than checkpoint - retraining needed")
+                else:
+                    # No metadata file exists - this could mean:
+                    # 1. Old training run without metadata tracking
+                    # 2. New dataset that hasn't been trained yet
+                    # Check if processed_jsonl exists and has content
+                    if self.processed_jsonl.exists() and current_dataset_size > 0:
+                        # Check if dataset file is newer than checkpoint
+                        checkpoint_mtime = os.path.getmtime(latest_checkpoint) if os.path.exists(latest_checkpoint) else None
+                        if checkpoint_mtime and current_mtime:
+                            if current_mtime > checkpoint_mtime:
+                                should_retrain_due_to_dataset_change = True
+                                logger.info(f"No training metadata found, but dataset file is newer than checkpoint")
+                                logger.info(f"   Dataset: {current_dataset_size} papers, modified {datetime.fromtimestamp(current_mtime).isoformat()}")
+                                logger.info(f"   Checkpoint: modified {datetime.fromtimestamp(checkpoint_mtime).isoformat()}")
+                                logger.info(f"   Retraining to ensure model matches current dataset...")
+                            else:
+                                # Dataset is older or same age - might be same dataset
+                                # But without metadata, we can't be sure, so log a warning
+                                logger.warning(f"No training metadata found - cannot verify dataset hasn't changed")
+                                logger.warning(f"   Current dataset: {current_dataset_size} papers")
+                                logger.warning(f"   To force retraining, delete the checkpoint or set force_retrain=True")
             
             # Check if we've reached max_steps (only if dataset hasn't changed)
             if latest_checkpoint and not should_retrain_due_to_dataset_change:

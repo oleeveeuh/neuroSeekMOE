@@ -936,33 +936,69 @@ class PipelineOrchestrator:
             latest_checkpoint = find_latest_checkpoint(str(checkpoint_dir))
             max_steps = training_config['max_steps']
             
-            # Count current dataset size
+            # Count current dataset size and get file stats
             current_dataset_size = 0
+            current_file_size = 0
+            current_mtime = None
             if self.processed_jsonl.exists():
                 current_dataset_size = sum(1 for line in open(self.processed_jsonl) if line.strip())
+                current_file_size = os.path.getsize(self.processed_jsonl)
+                current_mtime = os.path.getmtime(self.processed_jsonl)
             
-            # Check if dataset has grown since last training
+            # Check if dataset has changed since last training
             dataset_metadata_file = checkpoint_dir / "dataset_metadata.json"
-            should_retrain_due_to_dataset_growth = False
+            should_retrain_due_to_dataset_change = False
             
             if latest_checkpoint and dataset_metadata_file.exists():
                 try:
                     with open(dataset_metadata_file, 'r') as f:
                         training_metadata = json.load(f)
                         training_dataset_size = training_metadata.get('dataset_size', 0)
+                        stored_file_size = training_metadata.get('processed_jsonl_file_size', 0)
+                        stored_mtime = training_metadata.get('processed_jsonl_mtime', None)
+                        stored_input_file = training_metadata.get('processed_jsonl', '')
                         
+                        # Check if dataset has changed (comprehensive check like tokenizer)
+                        dataset_changed = False
+                        change_reasons = []
+                        
+                        # Check file path
+                        if stored_input_file and stored_input_file != str(self.processed_jsonl):
+                            dataset_changed = True
+                            change_reasons.append(f"input file path changed")
+                        
+                        # Check file size
+                        if current_file_size != stored_file_size:
+                            dataset_changed = True
+                            change_reasons.append(f"file size changed ({stored_file_size:,} → {current_file_size:,} bytes)")
+                        
+                        # Check modification time (allow 1 second tolerance)
+                        if stored_mtime is not None and current_mtime is not None:
+                            if abs(current_mtime - stored_mtime) > 1.0:
+                                dataset_changed = True
+                                change_reasons.append("file modification time changed")
+                        
+                        # Check paper count
                         if current_dataset_size > training_dataset_size:
-                            logger.info(f"Dataset has grown: {current_dataset_size} papers (was {training_dataset_size} when last trained)")
-                            logger.info(f"   Retraining to include new data...")
-                            should_retrain_due_to_dataset_growth = True
+                            dataset_changed = True
+                            change_reasons.append(f"paper count increased ({training_dataset_size} → {current_dataset_size} papers)")
                         elif current_dataset_size < training_dataset_size:
-                            logger.warning(f"Dataset size decreased: {current_dataset_size} papers (was {training_dataset_size})")
-                            logger.warning(f"   This may indicate data was removed. Continuing with current dataset...")
+                            dataset_changed = True
+                            change_reasons.append(f"paper count decreased ({training_dataset_size} → {current_dataset_size} papers)")
+                        
+                        if dataset_changed:
+                            should_retrain_due_to_dataset_change = True
+                            logger.info(f"Dataset has changed since last training:")
+                            for reason in change_reasons:
+                                logger.info(f"   - {reason}")
+                            logger.info(f"   Retraining to include updated data...")
+                        elif current_dataset_size == 0:
+                            logger.warning(f"Dataset is empty - cannot train")
                 except Exception as e:
                     logger.warning(f"Could not read training metadata: {e}. Will check training completion status...")
             
-            # Check if we've reached max_steps (only if dataset hasn't grown)
-            if latest_checkpoint and not should_retrain_due_to_dataset_growth:
+            # Check if we've reached max_steps (only if dataset hasn't changed)
+            if latest_checkpoint and not should_retrain_due_to_dataset_change:
                 # Extract step number from checkpoint filename
                 checkpoint_name = Path(latest_checkpoint).stem
                 if 'step_' in checkpoint_name:
@@ -975,7 +1011,10 @@ class PipelineOrchestrator:
                                 json.dump({
                                     'dataset_size': current_dataset_size,
                                     'last_trained_step': step_num,
-                                    'last_updated': datetime.now().isoformat()
+                                    'last_updated': datetime.now().isoformat(),
+                                    'processed_jsonl': str(self.processed_jsonl),
+                                    'processed_jsonl_file_size': current_file_size,
+                                    'processed_jsonl_mtime': current_mtime
                                 }, f, indent=2)
                         self._log_step_end(step_name, True)
                         return True
@@ -1084,7 +1123,8 @@ class PipelineOrchestrator:
                         'last_trained_step': latest_step,
                         'last_updated': datetime.now().isoformat(),
                         'processed_jsonl': str(self.processed_jsonl),
-                        'processed_jsonl_mtime': os.path.getmtime(self.processed_jsonl) if self.processed_jsonl.exists() else None
+                        'processed_jsonl_file_size': current_file_size,
+                        'processed_jsonl_mtime': current_mtime
                     }, f, indent=2)
                 logger.info(f"Saved dataset metadata: {current_dataset_size} papers, step {latest_step}")
             

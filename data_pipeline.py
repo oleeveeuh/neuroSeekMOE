@@ -6172,7 +6172,9 @@ def train_tokenizer(
     model_type: str = TOKENIZER_MODEL_TYPE,
     char_coverage: float = TOKENIZER_CHAR_COVERAGE,
     special_tokens: List[str] = None,
-    normalization: str = TOKENIZER_NORMALIZATION
+    normalization: str = TOKENIZER_NORMALIZATION,
+    skip_if_exists: bool = True,
+    force_retrain: bool = False
 ):
     """Train SentencePiece BPE tokenizer.
     
@@ -6184,6 +6186,8 @@ def train_tokenizer(
         char_coverage: Character coverage (0.9995 = 99.95%)
         special_tokens: List of special tokens to preserve
         normalization: Normalization rule name ('identity' = no normalization)
+        skip_if_exists: If True, skip training if model files already exist (default: True)
+        force_retrain: If True, retrain even if model files exist (default: False)
     """
     if not SENTENCEPIECE_AVAILABLE:
         print("Error: sentencepiece package not available.")
@@ -6192,6 +6196,29 @@ def train_tokenizer(
     
     if special_tokens is None:
         special_tokens = TOKENIZER_SPECIAL_TOKENS
+    
+    model_file = f"{model_prefix}.model"
+    vocab_file = f"{model_prefix}.vocab"
+    
+    # Check if tokenizer already exists (resume capability)
+    if not force_retrain and skip_if_exists:
+        if os.path.exists(model_file) and os.path.exists(vocab_file):
+            # Verify files are non-empty
+            model_size = os.path.getsize(model_file)
+            vocab_size_check = os.path.getsize(vocab_file)
+            
+            if model_size > 0 and vocab_size_check > 0:
+                print("=" * 60)
+                print("🔤 Tokenizer Training (Resume Check)")
+                print("=" * 60)
+                print(f"✅ Found existing tokenizer files:")
+                print(f"   Model: {model_file} ({model_size:,} bytes)")
+                print(f"   Vocab: {vocab_file} ({vocab_size_check:,} bytes)")
+                print()
+                print("   Skipping training (tokenizer already exists)")
+                print("   To force retraining, set force_retrain=True")
+                print("=" * 60)
+                return model_prefix
     
     print("=" * 60)
     print("🔤 Training SentencePiece BPE Tokenizer")
@@ -6202,6 +6229,8 @@ def train_tokenizer(
     print(f"Character coverage: {char_coverage}")
     print(f"🔤 Special tokens: {special_tokens}")
     print(f"📝 Normalization: {normalization}")
+    if force_retrain:
+        print("⚠️  Force retrain: True (will overwrite existing tokenizer)")
     print()
     
     # Build SentencePiece training command
@@ -6392,7 +6421,9 @@ def train_healthcare_tokenizer(
     input_jsonl: str,
     output_dir: str = './data/arxiv',
     model_prefix: str = 'healthcare_tokenizer',
-    vocab_size: int = TOKENIZER_VOCAB_SIZE
+    vocab_size: int = TOKENIZER_VOCAB_SIZE,
+    skip_if_exists: bool = True,
+    force_retrain: bool = False
 ):
     """Complete pipeline: extract texts, train tokenizer, validate.
     
@@ -6401,6 +6432,8 @@ def train_healthcare_tokenizer(
         output_dir: Output directory for tokenizer files
         model_prefix: Prefix for tokenizer model files
         vocab_size: Vocabulary size for tokenizer
+        skip_if_exists: If True, skip training if tokenizer already exists (default: True)
+        force_retrain: If True, retrain even if tokenizer exists (default: False)
     """
     print("=" * 60)
     print("🔤 Healthcare Tokenizer Training Pipeline")
@@ -6408,6 +6441,104 @@ def train_healthcare_tokenizer(
     print()
     
     os.makedirs(output_dir, exist_ok=True)
+    
+    model_path = os.path.join(output_dir, model_prefix)
+    model_file = f"{model_path}.model"
+    vocab_file = f"{model_path}.vocab"
+    metadata_file = os.path.join(output_dir, 'tokenizer_metadata.json')
+    
+    # Check if tokenizer already exists and if dataset has changed
+    should_retrain_due_to_dataset_change = False
+    
+    if not force_retrain and skip_if_exists:
+        if os.path.exists(model_file) and os.path.exists(vocab_file):
+            model_size = os.path.getsize(model_file)
+            vocab_size_check = os.path.getsize(vocab_file)
+            
+            if model_size > 0 and vocab_size_check > 0:
+                # Check if dataset has changed since last training
+                if os.path.exists(input_jsonl) and os.path.exists(metadata_file):
+                    try:
+                        with open(metadata_file, 'r') as f:
+                            tokenizer_metadata = json.load(f)
+                        
+                        # Get current dataset stats
+                        current_file_size = os.path.getsize(input_jsonl)
+                        current_mtime = os.path.getmtime(input_jsonl)
+                        current_paper_count = sum(1 for line in open(input_jsonl) if line.strip())
+                        
+                        # Get stored dataset stats
+                        stored_file_size = tokenizer_metadata.get('input_file_size', 0)
+                        stored_mtime = tokenizer_metadata.get('input_file_mtime', 0)
+                        stored_paper_count = tokenizer_metadata.get('input_paper_count', 0)
+                        stored_input_file = tokenizer_metadata.get('input_file', '')
+                        
+                        # Check if dataset has changed
+                        dataset_changed = False
+                        change_reasons = []
+                        
+                        if stored_input_file != input_jsonl:
+                            dataset_changed = True
+                            change_reasons.append("input file path changed")
+                        
+                        if current_file_size != stored_file_size:
+                            dataset_changed = True
+                            change_reasons.append(f"file size changed ({stored_file_size:,} → {current_file_size:,} bytes)")
+                        
+                        if abs(current_mtime - stored_mtime) > 1.0:  # Allow 1 second tolerance
+                            dataset_changed = True
+                            change_reasons.append("file modification time changed")
+                        
+                        if current_paper_count != stored_paper_count:
+                            dataset_changed = True
+                            change_reasons.append(f"paper count changed ({stored_paper_count} → {current_paper_count} papers)")
+                        
+                        if dataset_changed:
+                            should_retrain_due_to_dataset_change = True
+                            print("⚠️  Dataset has changed since last tokenizer training:")
+                            for reason in change_reasons:
+                                print(f"   - {reason}")
+                            print()
+                            print("   Retraining tokenizer to include new vocabulary...")
+                            print()
+                        else:
+                            print("✅ Found existing tokenizer files - skipping training")
+                            print(f"   Model: {model_file} ({model_size:,} bytes)")
+                            print(f"   Vocab: {vocab_file} ({vocab_size_check:,} bytes)")
+                            print()
+                            print(f"   Dataset unchanged: {current_paper_count} papers, {current_file_size:,} bytes")
+                            print("   To force retraining, set force_retrain=True")
+                            print("=" * 60)
+                            return model_path
+                    except Exception as e:
+                        print(f"⚠️  Could not read tokenizer metadata: {e}")
+                        print("   Will retrain to be safe...")
+                        print()
+                        should_retrain_due_to_dataset_change = True
+                else:
+                    # No metadata file - assume dataset might be different, but check if files exist
+                    if os.path.exists(metadata_file):
+                        # Metadata exists but couldn't read it - retrain to be safe
+                        should_retrain_due_to_dataset_change = True
+                    else:
+                        # No metadata - this is first training or metadata was deleted
+                        # Check if input file exists and has content
+                        if os.path.exists(input_jsonl):
+                            current_paper_count = sum(1 for line in open(input_jsonl) if line.strip())
+                            if current_paper_count > 0:
+                                print("✅ Found existing tokenizer files - skipping training")
+                                print(f"   Model: {model_file} ({model_size:,} bytes)")
+                                print(f"   Vocab: {vocab_file} ({vocab_size_check:,} bytes)")
+                                print()
+                                print("   ⚠️  No tokenizer metadata found - cannot verify dataset hasn't changed")
+                                print("   To force retraining, set force_retrain=True")
+                                print("=" * 60)
+                                return model_path
+    
+    # If we get here, we need to train (either files don't exist, or dataset changed, or force_retrain)
+    if should_retrain_due_to_dataset_change:
+        print("🔄 Retraining tokenizer due to dataset changes...")
+        print()
     
     # Step 1: Extract texts
     temp_txt_file = os.path.join(output_dir, 'training_texts.txt')
@@ -6422,7 +6553,6 @@ def train_healthcare_tokenizer(
     
     # Step 2: Train tokenizer
     print("Step 2: Training SentencePiece tokenizer...")
-    model_path = os.path.join(output_dir, model_prefix)
     trained_model = train_tokenizer(
         input_txt=temp_txt_file,
         model_prefix=model_path,
@@ -6430,7 +6560,9 @@ def train_healthcare_tokenizer(
         model_type=TOKENIZER_MODEL_TYPE,
         char_coverage=TOKENIZER_CHAR_COVERAGE,
         special_tokens=TOKENIZER_SPECIAL_TOKENS,
-        normalization=TOKENIZER_NORMALIZATION
+        normalization=TOKENIZER_NORMALIZATION,
+        skip_if_exists=skip_if_exists,
+        force_retrain=force_retrain
     )
     print()
     
@@ -6445,11 +6577,36 @@ def train_healthcare_tokenizer(
     validation_report = validate_tokenizer(model_file, medical_terms=MEDICAL_TERMS)
     print()
     
-    # Step 4: Save validation report
+    # Step 4: Save validation report and metadata
     if validation_report:
         report_file = os.path.join(output_dir, 'tokenizer_validation_report.json')
         save_validation_report(validation_report, report_file)
         print()
+        
+        # Save tokenizer metadata (for future dataset change detection)
+        if os.path.exists(input_jsonl):
+            current_file_size = os.path.getsize(input_jsonl)
+            current_mtime = os.path.getmtime(input_jsonl)
+            current_paper_count = sum(1 for line in open(input_jsonl) if line.strip())
+            
+            tokenizer_metadata = {
+                'input_file': input_jsonl,
+                'input_file_size': current_file_size,
+                'input_file_mtime': current_mtime,
+                'input_paper_count': current_paper_count,
+                'vocab_size': vocab_size,
+                'model_type': TOKENIZER_MODEL_TYPE,
+                'char_coverage': TOKENIZER_CHAR_COVERAGE,
+                'trained_at': datetime.now().isoformat(),
+                'model_file': model_file,
+                'vocab_file': f"{model_path}.vocab"
+            }
+            
+            metadata_file = os.path.join(output_dir, 'tokenizer_metadata.json')
+            with open(metadata_file, 'w') as f:
+                json.dump(tokenizer_metadata, f, indent=2)
+            print(f"✅ Saved tokenizer metadata: {metadata_file}")
+            print()
         
         # Print summary
         print("=" * 60)

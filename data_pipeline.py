@@ -2439,7 +2439,8 @@ class RAMEfficientArxivCollector:
     def collect_all(
         self,
         queries: List[Tuple[str, int]],
-        total_target: int
+        total_target: int,
+        query_strategies: Optional[Dict[str, str]] = None
     ):
         """
         Collect papers from multiple queries.
@@ -2447,6 +2448,8 @@ class RAMEfficientArxivCollector:
         Args:
             queries: List of (query_str, max_papers_per_query) tuples
             total_target: Total papers to collect
+            query_strategies: Optional dict mapping query strings to strategies
+                (e.g., {"query": "year_split"}). If None, uses default "year_split" for all.
         """
         print("\n" + "="*70)
         print("RAM-Efficient ArXiv Collection")

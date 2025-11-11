@@ -6086,6 +6086,7 @@ def extract_texts_from_jsonl(input_jsonl: str, output_txt: str):
     
     total_papers = 0
     total_chars = 0
+    null_chars_removed = 0
     
     with open(input_jsonl, 'r', encoding='utf-8') as f_in, \
          open(output_txt, 'w', encoding='utf-8') as f_out:
@@ -6099,6 +6100,13 @@ def extract_texts_from_jsonl(input_jsonl: str, output_txt: str):
                 text = record.get('text', '')
                 
                 if text and text.strip():
+                    # Remove null characters (0x00) which cause SentencePiece warnings
+                    # Replace with space to preserve text structure
+                    null_count = text.count('\x00')
+                    if null_count > 0:
+                        null_chars_removed += null_count
+                        text = text.replace('\x00', ' ')
+                    
                     # Split long texts into chunks to avoid SentencePiece max length issues
                     # Each chunk should be <= 15000 chars to stay well under the 20000 limit
                     max_chunk_size = 15000
@@ -6159,6 +6167,8 @@ def extract_texts_from_jsonl(input_jsonl: str, output_txt: str):
     
     file_size_mb = os.path.getsize(output_txt) / (1024 * 1024)
     print(f"Extracted {total_papers} papers, {total_chars:,} characters")
+    if null_chars_removed > 0:
+        print(f"   Removed {null_chars_removed:,} null characters (to prevent SentencePiece warnings)")
     print(f"Output file size: {file_size_mb:.2f} MB")
     print(f"Output file: {output_txt}")
     

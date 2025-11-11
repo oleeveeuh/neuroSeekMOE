@@ -971,6 +971,7 @@ def collect_with_pagination_safety(
     papers_collected = 0
     hit_pagination_limit = False
     papers_in_last_100 = 0  # Track papers in current 100-paper window
+    duplicates_skipped = 0  # Track duplicates skipped during collection
     
     search = arxiv.Search(
         query=query,
@@ -987,6 +988,7 @@ def collect_with_pagination_safety(
         try:
             results_iter = iter(client.results(search))
             papers_in_last_100 = 0
+            duplicates_in_last_100 = 0
             
             for i, result in enumerate(results_iter):
                 if papers_collected >= max_papers_to_retrieve:
@@ -999,6 +1001,14 @@ def collect_with_pagination_safety(
                 
                 # Skip if already collected
                 if paper_id in existing_ids:
+                    duplicates_skipped += 1
+                    duplicates_in_last_100 += 1
+                    # Log periodically if high duplicate rate
+                    if (i + 1) % 100 == 0:
+                        if duplicates_in_last_100 >= 80:
+                            print(f"   ⚠️  High duplicate rate in last 100 results: {duplicates_in_last_100} duplicates, {papers_in_last_100} new")
+                        duplicates_in_last_100 = 0
+                        papers_in_last_100 = 0
                     continue
                 
                 # Extract year
@@ -1127,6 +1137,14 @@ def collect_with_pagination_safety(
     if hit_pagination_limit:
         print(f"   ⚠️  Pagination limit detected: Collected {papers_collected} papers (may be truncated)")
     
+    # Log deduplication summary
+    total_processed = papers_collected + duplicates_skipped
+    if duplicates_skipped > 0:
+        duplicate_pct = (duplicates_skipped / total_processed * 100) if total_processed > 0 else 0
+        print(f"   📊 Deduplication: {papers_collected} new papers, {duplicates_skipped} duplicates skipped ({duplicate_pct:.1f}% duplicate rate)")
+        if duplicate_pct >= 80:
+            print(f"   ⚠️  Very high duplicate rate - query may be redundant")
+    
     return papers, papers_collected, hit_pagination_limit
 
 
@@ -1223,6 +1241,7 @@ def execute_optimized_queries(
                 print(f"   Using direct query (no year split)")
             
             papers_from_query = 0
+            total_papers_processed = 0  # Track total papers from all sub-queries (before deduplication)
             
             for year_idx, sub_query in enumerate(sub_queries, 1):
                 # Extract year for display
@@ -1289,12 +1308,18 @@ def execute_optimized_queries(
                             count = 0
                             break
                 
+                # Track total papers processed (before deduplication)
+                total_papers_processed += count
+                
                 # Filter out already-collected papers
                 new_papers = []
+                duplicates_in_batch = 0
                 for paper in papers:
                     if paper['id'] not in collected_ids:
                         new_papers.append(paper)
                         collected_ids.add(paper['id'])
+                    else:
+                        duplicates_in_batch += 1
                 
                 # Write new papers to file
                 for paper in new_papers:
@@ -1302,10 +1327,23 @@ def execute_optimized_queries(
                     out_f.flush()
                     total_collected += 1
                 
-                print(f"✓ {len(new_papers)} new papers (checked {count} total)")
+                # Log deduplication statistics
+                if duplicates_in_batch > 0:
+                    duplicate_pct = (duplicates_in_batch / count * 100) if count > 0 else 0
+                    if duplicate_pct >= 90:
+                        print(f"⚠️  {len(new_papers)} new papers, {duplicates_in_batch} duplicates ({duplicate_pct:.1f}% duplicate rate)")
+                        if duplicate_pct >= 95:
+                            print(f"   ⚠️  High duplication rate - query may be overlapping with previous queries")
+                    elif duplicate_pct >= 50:
+                        print(f"✓ {len(new_papers)} new papers, {duplicates_in_batch} duplicates ({duplicate_pct:.1f}% duplicate rate)")
+                    else:
+                        print(f"✓ {len(new_papers)} new papers, {duplicates_in_batch} duplicates")
+                else:
+                    print(f"✓ {len(new_papers)} papers")
                 
                 if len(new_papers) == 0 and count > 0:
-                    print(f"   (All {count} papers were duplicates)")
+                    print(f"   ⚠️  All {count} papers were duplicates - query returned no new papers")
+                    print(f"   💡 This query may be redundant or overlapping with previous queries")
                 
                 papers_from_query += len(new_papers)
                 
@@ -1313,7 +1351,19 @@ def execute_optimized_queries(
                 if year_idx < len(sub_queries):
                     time.sleep(1)
             
-            print(f"   Query subtotal: {papers_from_query} papers")
+            # Calculate deduplication statistics for this query
+            total_duplicates = total_papers_processed - papers_from_query
+            if total_duplicates > 0 and total_papers_processed > 0:
+                duplicate_pct = (total_duplicates / total_papers_processed * 100)
+                print(f"   Query subtotal: {papers_from_query} new papers (skipped {total_duplicates} duplicates, {duplicate_pct:.1f}% duplicate rate)")
+                if duplicate_pct >= 80:
+                    print(f"   ⚠️  Very high duplicate rate for this query - may be redundant")
+            elif len(sub_queries) > 1 and papers_from_query < len(sub_queries) * 10:
+                # Low yield across multiple sub-queries suggests high overlap
+                print(f"   Query subtotal: {papers_from_query} new papers from {len(sub_queries)} sub-queries")
+                print(f"   💡 Low yield suggests high overlap between sub-queries")
+            else:
+                print(f"   Query subtotal: {papers_from_query} papers")
             print(f"   Total collected so far: {total_collected} papers")
             
             # Save checkpoint after each query
@@ -1331,9 +1381,23 @@ def execute_optimized_queries(
                 except Exception as e:
                     print(f"   Warning: Could not save checkpoint: {e}")
     
+    # Calculate final deduplication statistics
     print("\n" + "="*70)
     print(f"✅ Total collected: {total_collected} papers")
     print(f"✅ Unique papers: {len(collected_ids)}")
+    
+    # Log deduplication summary if we have checkpoint data
+    if checkpoint_jsonl and os.path.exists(checkpoint_jsonl):
+        try:
+            with open(checkpoint_jsonl, 'r') as f:
+                checkpoint_data = json.load(f)
+                initial_count = checkpoint_data.get('total', 0)
+                if initial_count > 0:
+                    new_papers = total_collected - initial_count
+                    print(f"📊 Collection session: {new_papers} new papers added (started with {initial_count})")
+        except:
+            pass
+    
     print(f"✅ Output file: {output_jsonl}")
     if checkpoint_jsonl:
         print(f"✅ Checkpoint: {checkpoint_jsonl}")
@@ -2172,9 +2236,20 @@ def search_arxiv_query_streaming(
         # Final summary
         elapsed = time.time() - query_start
         rate = papers_found / elapsed if elapsed > 0 else 0
+        total_processed = papers_found + skipped_duplicate + skipped_no_abstract + skipped_date_range
+        
         print(f"   Query complete: {papers_found} papers ({rate:.2f} papers/sec)")
+        
+        # Log deduplication statistics with warnings for high rates
         if skipped_duplicate > 0:
-            print(f"   Skipped {skipped_duplicate} duplicates")
+            duplicate_pct = (skipped_duplicate / total_processed * 100) if total_processed > 0 else 0
+            if duplicate_pct >= 80:
+                print(f"   ⚠️  Skipped {skipped_duplicate} duplicates ({duplicate_pct:.1f}% duplicate rate - very high!)")
+                print(f"   💡 Query may be redundant or overlapping with previous queries")
+            elif duplicate_pct >= 50:
+                print(f"   ⚠️  Skipped {skipped_duplicate} duplicates ({duplicate_pct:.1f}% duplicate rate)")
+            else:
+                print(f"   Skipped {skipped_duplicate} duplicates ({duplicate_pct:.1f}% duplicate rate)")
         if skipped_no_abstract > 0:
             print(f"   Skipped {skipped_no_abstract} papers without abstracts")
         if skipped_date_range > 0:

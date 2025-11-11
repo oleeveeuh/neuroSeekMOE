@@ -2627,6 +2627,9 @@ class RAMEfficientArxivCollector:
                 papers_in_query += count
                 self.total_collected += count
                 
+                # Track papers returned from ArXiv (before deduplication)
+                papers_from_arxiv = len(year_papers)  # This is papers returned before deduplication check
+                
                 # Update collected_ids
                 for paper in year_papers:
                     self.collected_ids.add(paper['id'])
@@ -2638,9 +2641,25 @@ class RAMEfficientArxivCollector:
                 if count > 0:
                     print(f"   Year {year_display}: Collected {count} papers (total: {papers_in_query})")
                 else:
-                    print(f"   Year {year_display}: No new papers")
+                    # Explain why no papers were collected
+                    if papers_from_arxiv == 0:
+                        print(f"   Year {year_display}: No papers returned from ArXiv (query may have no results for this year)")
+                    else:
+                        duplicates = papers_from_arxiv - count
+                        duplicate_pct = (duplicates / papers_from_arxiv * 100) if papers_from_arxiv > 0 else 0
+                        print(f"   Year {year_display}: No new papers (ArXiv returned {papers_from_arxiv} papers, all were duplicates)")
+                        if duplicate_pct >= 80:
+                            print(f"      ⚠️  Very high duplicate rate ({duplicate_pct:.1f}%) - this year's papers already collected")
             
-            print(f"\nQuery complete: {papers_in_query} papers")
+            # Query-level summary with deduplication info
+            if papers_in_query == 0:
+                print(f"\n⚠️  Query complete: 0 papers collected")
+                print(f"   Possible reasons:")
+                print(f"   1. All papers from this query were already collected (duplicates)")
+                print(f"   2. Query returned no results from ArXiv")
+                print(f"   3. All results were filtered out (no abstract, date range, etc.)")
+            else:
+                print(f"\nQuery complete: {papers_in_query} papers")
             return papers_in_query
         
         # Direct strategy (for small queries)
@@ -2688,7 +2707,7 @@ class RAMEfficientArxivCollector:
                     current_batch_size = self.batch_size
                 
                 # Collect batch from the same iterator
-                papers, results_checked = self._collect_batch_from_iterator(
+                papers, results_checked, skip_reasons = self._collect_batch_from_iterator(
                     results_iter, query, batch_num, current_batch_size
                 )
                 
@@ -2696,17 +2715,32 @@ class RAMEfficientArxivCollector:
                 
                 if papers == 0:
                     consecutive_empty_batches += 1
-                    print(f"   Batch returned 0 papers (checked {results_checked} results, total checked: {total_results_checked})")
+                    # Check if results were returned but filtered (duplicates, no abstract, etc.)
+                    if results_checked > 0:
+                        total_skipped = sum(skip_reasons.values())
+                        if total_skipped > 0:
+                            # Already logged in _collect_batch_from_iterator, just summarize
+                            if skip_reasons['duplicates'] > 0:
+                                dup_pct = (skip_reasons['duplicates'] / results_checked * 100) if results_checked > 0 else 0
+                                if dup_pct >= 80:
+                                    print(f"      Total checked so far: {total_results_checked} results")
+                        else:
+                            print(f"      Total results checked so far: {total_results_checked}")
+                    else:
+                        print(f"      Total results checked so far: {total_results_checked}")
                     
                     # If we've checked many results with no new papers, move to next query
                     if consecutive_empty_batches >= 3:
-                        print(f"   {consecutive_empty_batches} consecutive empty batches, moving to next query")
+                        print(f"   ⚠️  {consecutive_empty_batches} consecutive empty batches, moving to next query")
+                        if total_results_checked > 0:
+                            print(f"   💡 Query may be exhausted or all results are duplicates")
                         break
                     elif total_results_checked > 5000 and papers_in_query == 0:
-                        print(f"   Query returned no papers after checking {total_results_checked} results, moving to next query")
+                        print(f"   ⚠️  Query returned no papers after checking {total_results_checked} results, moving to next query")
+                        print(f"   💡 All results may be duplicates or filtered out")
                         break
                     elif total_results_checked > 200000:  # Increased from 50000 to allow more results (200k = ~4x increase)
-                        print(f"   Query exhausted after checking {total_results_checked} results, moving to next query")
+                        print(f"   ⚠️  Query exhausted after checking {total_results_checked} results, moving to next query")
                         break
                     # Otherwise, try one more batch in case of temporary issues
                     time.sleep(2)  # Brief pause before retry
@@ -2736,7 +2770,23 @@ class RAMEfficientArxivCollector:
             print(f"   Traceback: {traceback.format_exc()}")
             # Continue to next query even on error
         
-        print(f"\nQuery complete: {papers_in_query} papers")
+        # Query-level summary with deduplication info
+        if papers_in_query == 0:
+            print(f"\n⚠️  Query complete: 0 papers collected")
+            if total_results_checked > 0:
+                print(f"   Checked {total_results_checked} results from ArXiv")
+                print(f"   Possible reasons:")
+                print(f"   1. All papers were duplicates (already collected)")
+                print(f"   2. All results filtered out (no abstract, date range, etc.)")
+                print(f"   3. Query syntax issue or no matching papers")
+            else:
+                print(f"   No results returned from ArXiv API")
+                print(f"   Possible reasons:")
+                print(f"   1. Query syntax issue")
+                print(f"   2. ArXiv API error or rate limiting")
+                print(f"   3. No papers match this query")
+        else:
+            print(f"\nQuery complete: {papers_in_query} papers")
         return papers_in_query
     
     def _collect_batch_from_iterator(
@@ -2745,13 +2795,13 @@ class RAMEfficientArxivCollector:
         query: str,
         batch_num: int,
         batch_size: int
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, int, Dict[str, int]]:
         """
         Collect one batch of papers from an existing results iterator.
         
         This avoids restarting the search and getting duplicate results.
         
-        Returns: Tuple of (number of papers collected, number of results checked)
+        Returns: Tuple of (number of papers collected, number of results checked, skip_reasons dict)
         """
         print(f"\n   Batch {batch_num}: Collecting up to {batch_size} papers...")
         self._log_memory("Before batch:")
@@ -2759,6 +2809,12 @@ class RAMEfficientArxivCollector:
         papers_in_batch = 0
         batch_start = time.time()
         results_checked = 0
+        skip_reasons = {
+            'duplicates': 0,
+            'no_abstract': 0,
+            'date_range': 0,
+            'other': 0
+        }
         
         try:
             with open(self.output_file, 'a', encoding='utf-8') as f:
@@ -2768,6 +2824,7 @@ class RAMEfficientArxivCollector:
                     
                     # Skip if already collected
                     if paper_id in self.collected_ids:
+                        skip_reasons['duplicates'] += 1
                         continue
                     
                     # Convert to dict (handle categories properly)
@@ -2790,12 +2847,15 @@ class RAMEfficientArxivCollector:
                     
                     # Skip if date filtering enabled and outside range
                     if MIN_YEAR is not None and year is not None and year < MIN_YEAR:
+                        skip_reasons['date_range'] += 1
                         continue
                     if MAX_YEAR is not None and year is not None and year > MAX_YEAR:
+                        skip_reasons['date_range'] += 1
                         continue
                     
                     # Skip if no abstract
                     if not result.summary or not result.summary.strip():
+                        skip_reasons['no_abstract'] += 1
                         continue
                     
                     paper = {
@@ -2854,10 +2914,35 @@ class RAMEfficientArxivCollector:
         elapsed = time.time() - batch_start
         rate = papers_in_batch / elapsed if elapsed > 0 else 0
         
-        print(f"   Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec, checked {results_checked} results)")
+        # Log batch results with skip reasons
+        if papers_in_batch > 0:
+            print(f"   Batch {batch_num}: {papers_in_batch} papers ({rate:.1f} papers/sec, checked {results_checked} results)")
+        else:
+            # Explain why batch returned 0 papers
+            total_skipped = sum(skip_reasons.values())
+            if total_skipped > 0:
+                skip_details = []
+                if skip_reasons['duplicates'] > 0:
+                    skip_details.append(f"{skip_reasons['duplicates']} duplicates")
+                if skip_reasons['no_abstract'] > 0:
+                    skip_details.append(f"{skip_reasons['no_abstract']} no abstract")
+                if skip_reasons['date_range'] > 0:
+                    skip_details.append(f"{skip_reasons['date_range']} date range")
+                if skip_reasons['other'] > 0:
+                    skip_details.append(f"{skip_reasons['other']} other")
+                
+                print(f"   Batch {batch_num}: 0 papers (checked {results_checked} results)")
+                print(f"      Skipped: {', '.join(skip_details)}")
+                if skip_reasons['duplicates'] > 0:
+                    dup_pct = (skip_reasons['duplicates'] / results_checked * 100) if results_checked > 0 else 0
+                    if dup_pct >= 80:
+                        print(f"      ⚠️  Very high duplicate rate ({dup_pct:.1f}%)")
+            else:
+                print(f"   Batch {batch_num}: 0 papers (checked {results_checked} results, no results from ArXiv)")
+        
         self._log_memory("After batch:")
         
-        return papers_in_batch, results_checked
+        return papers_in_batch, results_checked, skip_reasons
     
     def collect_all(
         self,
@@ -2926,7 +3011,9 @@ class RAMEfficientArxivCollector:
                 if papers > 0 and self.total_collected < total_target:
                     print(f"   Collected {papers} papers from this query, continuing...")
                 elif papers == 0 and self.total_collected < total_target:
-                    print(f"   Query returned 0 papers, but target not reached ({self.total_collected}/{total_target}). Continuing to next query...")
+                    print(f"   ⚠️  Query returned 0 papers, but target not reached ({self.total_collected}/{total_target})")
+                    print(f"   💡 This query may have no new results (all duplicates) or no matching papers")
+                    print(f"   Continuing to next query...")
             
             # After all queries, check if we need more papers
             if self.total_collected < total_target:

@@ -20,12 +20,21 @@ import threading
 import shutil
 import sys
 import gc
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Set, Optional, List, Tuple
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# For query analysis
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    print("requests package not available. Install with: pip install requests")
 
 # Configuration management
 try:
@@ -192,18 +201,35 @@ try:
         DocumentFilter = None
         try:
             from nemo_curator.datasets import DocumentDataset
+            DocumentDataset_AVAILABLE = True
         except ImportError:
-            pass
+            DocumentDataset = None
+            DocumentDataset_AVAILABLE = False
         
         try:
             from nemo_curator.modifiers import DocumentModifier
+            DocumentModifier_AVAILABLE = True
         except ImportError:
-            pass
+            DocumentModifier = None
+            DocumentModifier_AVAILABLE = False
         
         try:
             from nemo_curator.filters import DocumentFilter
+            DocumentFilter_AVAILABLE = True
         except ImportError:
-            pass
+            DocumentFilter = None
+            DocumentFilter_AVAILABLE = False
+        
+        try:
+            from nemo_curator.dedup import FuzzyDedup
+            FuzzyDedup_AVAILABLE = True
+        except ImportError:
+            try:
+                from nemo_curator.filters import FuzzyDedup
+                FuzzyDedup_AVAILABLE = True
+            except ImportError:
+                FuzzyDedup = None
+                FuzzyDedup_AVAILABLE = False
         
         import dask
         NEMO_CURATOR_AVAILABLE = True
@@ -218,6 +244,14 @@ try:
         JsonlReader_AVAILABLE = False
         ScoreFilter_AVAILABLE = False
         Filters_AVAILABLE = False
+        DocumentDataset = None
+        DocumentDataset_AVAILABLE = False
+        DocumentModifier = None
+        DocumentModifier_AVAILABLE = False
+        DocumentFilter = None
+        DocumentFilter_AVAILABLE = False
+        FuzzyDedup = None
+        FuzzyDedup_AVAILABLE = False
         ProcessingStage_AVAILABLE = False
         Stage_AVAILABLE = False
         download_arxiv_AVAILABLE = False
@@ -233,6 +267,14 @@ except (ImportError, ValueError) as e:
     Stage_AVAILABLE = False
     download_arxiv_AVAILABLE = False
     get_client_AVAILABLE = False
+    DocumentDataset = None
+    DocumentDataset_AVAILABLE = False
+    DocumentModifier = None
+    DocumentModifier_AVAILABLE = False
+    DocumentFilter = None
+    DocumentFilter_AVAILABLE = False
+    FuzzyDedup = None
+    FuzzyDedup_AVAILABLE = False
     print("nemo-curator package not available. Install with: pip install 'nemo-curator[text]' or 'nemo-curator[text_cuda12]'")
     print(f"   Error: {e}")
 
@@ -278,6 +320,822 @@ ARXIV_QUERIES = [
     "cat:cs.AI AND (neurodegeneration OR alzheimer OR parkinson)",
     "cat:cs.LG AND (mri OR ct OR medical imaging)",
 ]
+
+
+# ============================================================================
+# Query Feasibility Analysis Tool
+# ============================================================================
+
+def analyze_query_feasibility(query: str) -> Dict:
+    """
+    Test a single ArXiv query to determine:
+    - Total results available
+    - Results per year (2015-2024)
+    - Estimated retrieval rate with year-split
+    - Pagination risk indicators
+    - Recommended strategy (direct/year/month)
+    
+    Returns: {
+        'query': str,
+        'total_results': int,
+        'by_year': {2024: 412, 2023: 387, ...},
+        'risky_years': [2020, 2019],  # Years with >1000 results
+        'retrieval_rate': 0.87,  # Realistic % of papers we'll get
+        'estimated_papers': 3571,
+        'strategy': 'year_split',  # or 'direct', 'month_split'
+        'time_estimate_seconds': 45,
+    }
+    """
+    if not REQUESTS_AVAILABLE:
+        return {
+            'query': query,
+            'error': 'requests package not available. Install with: pip install requests',
+            'total_results': 0,
+            'by_year': {},
+            'risky_years': [],
+            'retrieval_rate': 0.0,
+            'estimated_papers': 0,
+            'strategy': None,
+            'time_estimate_seconds': 0,
+        }
+    
+    results = {
+        'query': query,
+        'total_results': 0,
+        'by_year': {},
+        'risky_years': [],
+        'retrieval_rate': 0.0,
+        'estimated_papers': 0,
+        'strategy': None,
+        'time_estimate_seconds': 0,
+        'error': None,
+    }
+    
+    base_url = "http://export.arxiv.org/api/query"
+    ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
+    
+    # Get total results
+    try:
+        params = {
+            'search_query': query,
+            'start': 0,
+            'max_results': 1,
+            'sortBy': 'submittedDate',
+            'sortOrder': 'descending'
+        }
+        
+        response = requests.get(base_url, params=params, timeout=15)
+        response.raise_for_status()
+        
+        # Parse XML to get total
+        root = ET.fromstring(response.content)
+        total_elem = root.find('.//os:totalResults', ns)
+        
+        if total_elem is not None:
+            results['total_results'] = int(total_elem.text)
+        else:
+            results['error'] = "Could not find totalResults in API response"
+            return results
+        
+    except requests.exceptions.RequestException as e:
+        results['error'] = f"Network error: {e}"
+        return results
+    except Exception as e:
+        results['error'] = f"Error: {e}"
+        return results
+    
+    # Test each year (2015-2024)
+    for year in range(2024, 2014, -1):
+        date_filter = f" AND submittedDate:[{year}01010000 TO {year}12312359]"
+        yearly_query = query + date_filter
+        
+        try:
+            # Count results for this year
+            response = requests.get(base_url, params={
+                'search_query': yearly_query,
+                'start': 0,
+                'max_results': 1
+            }, timeout=15)
+            
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+            total_elem = root.find('.//os:totalResults', ns)
+            
+            if total_elem is not None:
+                yearly_total = int(total_elem.text)
+                results['by_year'][year] = yearly_total
+                
+                # Flag risky years (>1000 means pagination limit possible)
+                if yearly_total > 1000:
+                    results['risky_years'].append(year)
+            else:
+                results['by_year'][year] = 0
+            
+            # Small delay to avoid rate limiting
+            time.sleep(0.5)
+        
+        except Exception as e:
+            results['by_year'][year] = 0
+    
+    # Calculate retrieval rate and strategy
+    total_by_year = sum(results['by_year'].values())
+    if total_by_year > 0:
+        # With year-split: lose papers from risky years (estimate ~200 per risky year)
+        papers_lost = len(results['risky_years']) * 200  # Rough estimate
+        results['retrieval_rate'] = max(0.0, min(1.0, (total_by_year - papers_lost) / total_by_year))
+        results['estimated_papers'] = int(total_by_year * results['retrieval_rate'])
+    else:
+        results['retrieval_rate'] = 0.0
+        results['estimated_papers'] = 0
+    
+    # Determine strategy
+    if results['total_results'] < 500:
+        results['strategy'] = 'direct'
+        results['time_estimate_seconds'] = 5
+    elif len(results['risky_years']) == 0:
+        results['strategy'] = 'year_split'
+        results['time_estimate_seconds'] = 60
+    else:
+        results['strategy'] = 'year_split'  # Still use year_split, lose some papers
+        results['time_estimate_seconds'] = 80
+    
+    return results
+
+
+def analyze_all_queries(queries: List[str]) -> Dict:
+    """Test all queries and generate report."""
+    
+    print("\n" + "="*70)
+    print("QUERY FEASIBILITY ANALYSIS")
+    print("="*70 + "\n")
+    
+    analyses = []
+    total_available = 0
+    total_retrievable = 0
+    total_time = 0
+    
+    for i, query in enumerate(queries, 1):
+        print(f"Testing query {i}/{len(queries)}: {query[:60]}...", end=" ", flush=True)
+        analysis = analyze_query_feasibility(query)
+        analyses.append(analysis)
+        
+        if analysis.get('error'):
+            print(f"ERROR: {analysis['error']}")
+        else:
+            total_available += analysis['total_results']
+            total_retrievable += analysis['estimated_papers']
+            total_time += analysis['time_estimate_seconds']
+            print(f"OK ({analysis['total_results']} -> {analysis['estimated_papers']} est.)")
+    
+    # Generate report
+    report = {
+        'queries_tested': len(queries),
+        'total_available': total_available,
+        'total_retrievable': total_retrievable,
+        'retrieval_rate': total_retrievable / total_available if total_available > 0 else 0,
+        'estimated_time_minutes': total_time / 60,
+        'analyses': analyses,
+    }
+    
+    print("\n" + "="*70)
+    print("SUMMARY")
+    print("="*70)
+    print(f"Total papers available: {total_available:,}")
+    print(f"Estimated retrievable: {total_retrievable:,} ({report['retrieval_rate']*100:.0f}%)")
+    print(f"Estimated time: {report['estimated_time_minutes']:.0f} minutes")
+    print(f"Risky queries: {len([a for a in analyses if a.get('risky_years')])}")
+    
+    # Detailed breakdown
+    print("\n" + "-"*70)
+    print("DETAILED BREAKDOWN BY QUERY")
+    print("-"*70)
+    for i, analysis in enumerate(analyses, 1):
+        if analysis.get('error'):
+            print(f"\nQuery {i}: {analysis['query'][:60]}...")
+            print(f"  ERROR: {analysis['error']}")
+        else:
+            print(f"\nQuery {i}: {analysis['query'][:60]}...")
+            print(f"  Total results: {analysis['total_results']:,}")
+            print(f"  Estimated retrievable: {analysis['estimated_papers']:,} ({analysis['retrieval_rate']*100:.0f}%)")
+            print(f"  Strategy: {analysis['strategy']}")
+            print(f"  Risky years: {analysis['risky_years'] if analysis['risky_years'] else 'None'}")
+            if analysis['risky_years']:
+                print(f"  Year breakdown (risky years marked with *):")
+                for year in range(2024, 2014, -1):
+                    count = analysis['by_year'].get(year, 0)
+                    marker = "*" if year in analysis['risky_years'] else " "
+                    print(f"    {marker} {year}: {count:,} papers")
+    
+    return report
+
+
+def analyze_optimized_queries() -> Dict:
+    """Analyze all queries from OPTIMIZED_QUERIES."""
+    # Flatten the tiered structure
+    queries = []
+    for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
+        for query, max_papers in tier_queries:
+            queries.append(query)
+    
+    return analyze_all_queries(queries)
+
+
+def refine_query_for_efficiency(query: str, current_results: int) -> List[str]:
+    """
+    If query returns too many results (>3000), refine it to be more specific:
+    - Replace broad ORs with narrower AND combinations
+    - Add date filters if needed
+    - Suggest splitting into multiple narrow queries
+    
+    Examples:
+    "cat:cs.LG AND (healthcare OR medical OR clinical)"
+    → Too broad (14k results)
+    → Refine to: "cat:cs.LG AND healthcare" (4k)
+    →           "cat:cs.LG AND medical diagnosis"
+    →           "cat:cs.LG AND clinical treatment"
+    
+    Returns: List of refined queries
+    """
+    if current_results < 1000:
+        return [query]  # Already good
+    
+    refined_queries = []
+    
+    # Strategy 1: Split OR clauses into separate queries
+    if " OR " in query.upper():
+        # Find OR clauses (case-insensitive)
+        import re
+        # Match patterns like: (term1 OR term2 OR term3)
+        or_pattern = r'\(([^)]+)\)'
+        matches = re.findall(or_pattern, query)
+        
+        for match in matches:
+            if " OR " in match.upper():
+                # Split OR terms
+                terms = re.split(r'\s+OR\s+', match, flags=re.IGNORECASE)
+                # Get the base query (everything before the OR clause)
+                base = query[:query.find(match) - 1].strip()  # Remove opening paren
+                base = base.rstrip(" AND").strip()
+                
+                # Create separate queries for each term
+                for term in terms:
+                    term = term.strip()
+                    if term:
+                        refined_query = f"{base} AND {term}"
+                        refined_queries.append(refined_query)
+        
+        # If we didn't find OR in parentheses, try splitting the whole query
+        if not refined_queries:
+            parts = re.split(r'\s+OR\s+', query, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                # Try to preserve category prefix
+                if query.startswith("cat:"):
+                    category = query.split()[0]
+                    for part in parts[1:]:  # Skip category part
+                        refined_queries.append(f"{category} AND {part.strip()}")
+                else:
+                    refined_queries = [p.strip() for p in parts if p.strip()]
+    
+    # Strategy 2: Add more specific terms for healthcare queries
+    elif "healthcare" in query.lower() and current_results > 3000:
+        # Try adding more specific terms
+        base = query.replace("healthcare", "").strip().rstrip("AND").strip()
+        refined_queries.append(f"{base} AND healthcare AND diagnosis")
+        refined_queries.append(f"{base} AND healthcare AND treatment")
+        refined_queries.append(f"{base} AND healthcare AND clinical")
+    
+    # Strategy 3: Add date filters for very large queries
+    elif current_results > 10000:
+        # Split by recent years (2020-2024) and older (2015-2019)
+        base = query
+        refined_queries.append(f"{base} AND submittedDate:[202001010000 TO 202412312359]")
+        refined_queries.append(f"{base} AND submittedDate:[201501010000 TO 201912312359]")
+    
+    # If no refinement strategy worked, return original
+    if not refined_queries:
+        refined_queries = [query]
+    
+    return refined_queries
+
+
+def build_optimized_queries(base_queries: List[str]) -> List[Tuple[str, str]]:
+    """
+    Convert base queries into optimized query list with strategies.
+    
+    Returns: List of (query, strategy) tuples
+    
+    Example output:
+    [
+        ("cat:cs.LG AND healthcare", "year_split"),
+        ("cat:cs.LG AND medical", "year_split"),
+        ("cat:cs.LG AND clinical", "year_split"),
+        ("cat:cs.AI AND healthcare", "year_split"),
+        ...
+    ]
+    """
+    optimized = []
+    
+    print(f"\nBuilding optimized query list from {len(base_queries)} base queries...")
+    
+    for i, query in enumerate(base_queries, 1):
+        print(f"Analyzing query {i}/{len(base_queries)}: {query[:60]}...", end=" ", flush=True)
+        
+        # Test query
+        analysis = analyze_query_feasibility(query)
+        
+        if analysis.get('error'):
+            print(f"ERROR: {analysis['error']}")
+            # Skip this query
+            continue
+        
+        total_results = analysis['total_results']
+        print(f"{total_results:,} results")
+        
+        if total_results < 500:
+            # Small result set - query directly
+            optimized.append((query, "direct"))
+        
+        elif total_results < 2000:
+            # Medium result set - year split is fine
+            optimized.append((query, "year_split"))
+        
+        elif total_results > 5000:
+            # Large result set - split query or use month_split
+            if " OR " in query.upper():
+                # Split broad query into narrower ones
+                print(f"  Refining query (too many results: {total_results:,})...")
+                refined = refine_query_for_efficiency(query, total_results)
+                for q in refined:
+                    # Test refined query
+                    refined_analysis = analyze_query_feasibility(q)
+                    if not refined_analysis.get('error'):
+                        refined_results = refined_analysis['total_results']
+                        if refined_results < 2000:
+                            optimized.append((q, "year_split"))
+                        else:
+                            optimized.append((q, "year_split_truncated"))
+                print(f"  Split into {len(refined)} refined queries")
+            else:
+                # Use as-is but expect to lose ~20% due to pagination
+                optimized.append((query, "year_split_truncated"))
+        
+        else:
+            optimized.append((query, "year_split"))
+    
+    print(f"\nOptimized query list: {len(optimized)} queries")
+    print(f"  Strategies: {len([q for q, s in optimized if s == 'direct'])} direct, "
+          f"{len([q for q, s in optimized if s == 'year_split'])} year_split, "
+          f"{len([q for q, s in optimized if s == 'year_split_truncated'])} year_split_truncated")
+    
+    return optimized
+
+
+def generate_year_split_queries(
+    base_query: str,
+    start_year: int = 2015,
+    end_year: int = 2024
+) -> List[str]:
+    """
+    Split query by year to avoid pagination limits.
+    
+    Returns list of year-specific queries:
+    ["cat:cs.LG AND healthcare AND submittedDate:[201501010000 TO 201512312359]",
+     "cat:cs.LG AND healthcare AND submittedDate:[201601010000 TO 201612312359]",
+     ...]
+    
+    Args:
+        base_query: Base ArXiv query (e.g., "cat:cs.LG AND healthcare")
+        start_year: Starting year (default: 2015)
+        end_year: Ending year (default: 2024)
+    
+    Returns:
+        List of year-specific queries
+    """
+    queries = []
+    for year in range(end_year, start_year - 1, -1):  # 2024 down to 2015
+        date_filter = f" AND submittedDate:[{year}01010000 TO {year}12312359]"
+        queries.append(base_query + date_filter)
+    
+    return queries
+
+
+def collect_with_pagination_safety(
+    client,
+    query: str,
+    max_papers_to_retrieve: int = 1000,  # Stop at 1000 to avoid pagination limits
+    existing_ids: Optional[Set[str]] = None,
+    output_file_handle = None
+) -> Tuple[List[Dict], int]:
+    """
+    Collect papers with built-in pagination safety:
+    - Stop after max_papers_to_retrieve papers (default 1000, ArXiv pagination limit)
+    - Track which pagination level we hit
+    - Return papers collected + count
+    
+    Args:
+        client: arxiv.Client instance
+        query: ArXiv query string
+        max_papers_to_retrieve: Maximum papers to retrieve (default: 1000)
+        existing_ids: Set of already collected paper IDs (for deduplication)
+        output_file_handle: Optional file handle to write papers immediately
+    
+    Returns:
+        Tuple of (list of papers dict, count of papers collected)
+    """
+    if existing_ids is None:
+        existing_ids = set()
+    
+    papers = []
+    papers_collected = 0
+    
+    search = arxiv.Search(
+        query=query,
+        max_results=10000,  # Request all, but limit retrieval
+        sort_by=arxiv.SortCriterion.SubmittedDate,
+        sort_order=arxiv.SortOrder.Descending
+    )
+    
+    try:
+        for i, result in enumerate(client.results(search)):
+            if papers_collected >= max_papers_to_retrieve:
+                # Stop at limit - ArXiv pagination depth limit
+                print(f"   Reached pagination limit ({max_papers_to_retrieve} papers) for query")
+                break
+            
+            # Extract paper ID
+            paper_id = result.entry_id.split('/')[-1]
+            
+            # Skip if already collected
+            if paper_id in existing_ids:
+                continue
+            
+            # Extract year
+            year = None
+            if result.published:
+                try:
+                    year = result.published.year
+                except:
+                    pass
+            
+            # Extract categories
+            categories = []
+            if result.categories:
+                for cat in result.categories:
+                    if isinstance(cat, str):
+                        categories.append(cat)
+                    elif hasattr(cat, 'term'):
+                        categories.append(cat.term)
+                    else:
+                        categories.append(str(cat))
+            
+            # Format abstract
+            abstract = ""
+            if result.summary:
+                abstract = result.summary.strip()[:300]
+            
+            paper = {
+                'id': paper_id,
+                'title': result.title.strip() if result.title else "",
+                'abstract': abstract,
+                'year': year,
+                'categories': categories,
+                'pdf_url': f"https://arxiv.org/pdf/{paper_id}.pdf",
+            }
+            
+            papers.append(paper)
+            existing_ids.add(paper_id)
+            papers_collected += 1
+            
+            # Write immediately if file handle provided
+            if output_file_handle:
+                output_file_handle.write(json.dumps(paper, ensure_ascii=False) + '\n')
+                output_file_handle.flush()
+    
+    except Exception as e:
+        print(f"   Stopped at {papers_collected} papers: {e}")
+    
+    return papers, papers_collected
+
+
+def execute_optimized_queries(
+    optimized_queries: List[Tuple[str, str]],
+    output_jsonl: str,
+    checkpoint_jsonl: str = None,
+    max_papers_per_query: int = 1000,
+    rate_limit_delay: float = 2.0
+) -> int:
+    """
+    Execute all optimized queries in order.
+    
+    Args:
+        optimized_queries: List of (query, strategy) tuples from build_optimized_queries()
+        output_jsonl: Where to write papers (JSONL file)
+        checkpoint_jsonl: Optional checkpoint file path (for resuming)
+        max_papers_per_query: Maximum papers to retrieve per sub-query (default: 1000)
+        rate_limit_delay: Delay between requests in seconds (default: 2.0)
+    
+    Returns: Total papers collected
+    """
+    if not ARXIV_AVAILABLE:
+        error_msg = "Error: arxiv package not available. Install with: pip install arxiv"
+        print(error_msg)
+        raise ImportError(error_msg)
+    
+    # Load checkpoint if exists
+    collected_ids = set()
+    total_collected = 0
+    
+    if checkpoint_jsonl and os.path.exists(checkpoint_jsonl):
+        print(f"Loading checkpoint from {checkpoint_jsonl}...")
+        try:
+            with open(checkpoint_jsonl, 'r') as f:
+                checkpoint = json.load(f)
+                total_collected = checkpoint.get('total', 0)
+                checkpoint_ids = checkpoint.get('collected_ids', [])
+                collected_ids = set(checkpoint_ids)
+            print(f"   Found {len(collected_ids)} existing papers in checkpoint")
+        except Exception as e:
+            print(f"   Could not load checkpoint: {e}")
+            print("   Starting fresh...")
+    
+    # Also load from output file if it exists (for deduplication)
+    if os.path.exists(output_jsonl):
+        print(f"Loading existing papers from {output_jsonl}...")
+        try:
+            with open(output_jsonl, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    if line.strip():
+                        try:
+                            paper = json.loads(line)
+                            if 'id' in paper:
+                                collected_ids.add(paper['id'])
+                        except json.JSONDecodeError:
+                            continue
+            print(f"   Found {len(collected_ids)} existing papers in output file")
+        except Exception as e:
+            print(f"   Could not read output file: {e}")
+    
+    # Create ArXiv client
+    client = arxiv.Client(
+        delay_seconds=rate_limit_delay,
+        num_retries=3,
+        page_size=100
+    )
+    
+    print("\n" + "="*70)
+    print("EXECUTING OPTIMIZED QUERIES")
+    print("="*70)
+    print(f"Total queries: {len(optimized_queries)}")
+    print(f"Starting from: {len(collected_ids)} existing papers")
+    print(f"Max papers per sub-query: {max_papers_per_query}")
+    print()
+    
+    # Open output file in append mode
+    with open(output_jsonl, 'a', encoding='utf-8') as out_f:
+        for query_idx, (query, strategy) in enumerate(optimized_queries, 1):
+            if total_collected >= 100000:  # Safety limit
+                print(f"\nReached safety limit of 100,000 papers")
+                break
+            
+            print(f"\n[{query_idx}/{len(optimized_queries)}] {query[:65]}...")
+            print(f"Strategy: {strategy}")
+            
+            # Generate year-split sub-queries if needed
+            if strategy.startswith("year_split"):
+                sub_queries = generate_year_split_queries(query)
+                print(f"   Split into {len(sub_queries)} year-specific queries")
+            else:
+                sub_queries = [query]
+                print(f"   Using direct query (no year split)")
+            
+            papers_from_query = 0
+            
+            for year_idx, sub_query in enumerate(sub_queries, 1):
+                # Extract year for display
+                year_str = "all"
+                if "submittedDate:[" in sub_query:
+                    try:
+                        year_match = re.search(r'(\d{4})01010000', sub_query)
+                        if year_match:
+                            year_str = year_match.group(1)
+                    except:
+                        pass
+                
+                print(f"   [{year_idx}/{len(sub_queries)}] Year {year_str}: ", end="", flush=True)
+                
+                try:
+                    # Collect papers with pagination safety
+                    papers, count = collect_with_pagination_safety(
+                        client=client,
+                        query=sub_query,
+                        max_papers_to_retrieve=max_papers_per_query,
+                        existing_ids=collected_ids,
+                        output_file_handle=None  # We'll write manually to filter duplicates
+                    )
+                    
+                    # Filter out already-collected papers
+                    new_papers = []
+                    for paper in papers:
+                        if paper['id'] not in collected_ids:
+                            new_papers.append(paper)
+                            collected_ids.add(paper['id'])
+                    
+                    # Write new papers to file
+                    for paper in new_papers:
+                        out_f.write(json.dumps(paper, ensure_ascii=False) + '\n')
+                        out_f.flush()
+                        total_collected += 1
+                    
+                    print(f"✓ {len(new_papers)} new papers (checked {count} total)")
+                    
+                    if len(new_papers) == 0 and count > 0:
+                        print(f"   (All {count} papers were duplicates)")
+                
+                except KeyboardInterrupt:
+                    print("\n\nInterrupted by user")
+                    raise
+                except Exception as e:
+                    print(f"⚠️  Error: {str(e)[:60]}")
+                    import traceback
+                    print(f"   Traceback: {traceback.format_exc()[:200]}")
+                    continue
+                
+                papers_from_query += len(new_papers)
+                
+                # Rate limiting between sub-queries
+                if year_idx < len(sub_queries):
+                    time.sleep(1)
+            
+            print(f"   Query subtotal: {papers_from_query} papers")
+            print(f"   Total collected so far: {total_collected} papers")
+            
+            # Save checkpoint after each query
+            if checkpoint_jsonl:
+                try:
+                    checkpoint_data = {
+                        'total': total_collected,
+                        'collected_ids': list(collected_ids),
+                        'last_query_idx': query_idx,
+                        'last_query': query,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    with open(checkpoint_jsonl, 'w') as f:
+                        json.dump(checkpoint_data, f, indent=2)
+                except Exception as e:
+                    print(f"   Warning: Could not save checkpoint: {e}")
+    
+    print("\n" + "="*70)
+    print(f"✅ Total collected: {total_collected} papers")
+    print(f"✅ Unique papers: {len(collected_ids)}")
+    print(f"✅ Output file: {output_jsonl}")
+    if checkpoint_jsonl:
+        print(f"✅ Checkpoint: {checkpoint_jsonl}")
+    print("="*70)
+    
+    return total_collected
+
+
+def optimize_and_execute_queries(
+    base_queries: List[str],
+    output_dir: str = "./data/arxiv",
+    run_diagnostic: bool = True,
+    run_collection: bool = True,
+    max_papers_per_query: int = 1000,
+    rate_limit_delay: float = 2.0
+) -> List[Tuple[str, str]]:
+    """
+    Complete query optimization pipeline:
+    
+    1. Analyze all queries (diagnostic)
+    2. Refine/optimize queries (build optimized list)
+    3. Generate year-split variants (handled automatically)
+    4. Execute with pagination safety
+    
+    Args:
+        base_queries: List of base query strings to optimize
+        output_dir: Output directory for papers and reports
+        run_diagnostic: If True, run query analysis diagnostics
+        run_collection: If True, execute optimized queries and collect papers
+        max_papers_per_query: Maximum papers per sub-query (default: 1000)
+        rate_limit_delay: Delay between requests in seconds (default: 2.0)
+    
+    Returns:
+        List of (query, strategy) tuples from optimization
+    """
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    
+    output_jsonl = os.path.join(output_dir, "arxiv_papers.jsonl")
+    checkpoint_file = os.path.join(output_dir, "collection_checkpoint.json")
+    optimized_file = os.path.join(output_dir, "optimized_queries.json")
+    diagnostic_file = os.path.join(output_dir, "diagnostic_report.json")
+    
+    print("\n" + "="*70)
+    print("QUERY OPTIMIZATION AND EXECUTION PIPELINE")
+    print("="*70)
+    print(f"Base queries: {len(base_queries)}")
+    print(f"Output directory: {output_dir}")
+    print(f"Run diagnostic: {run_diagnostic}")
+    print(f"Run collection: {run_collection}")
+    print()
+    
+    # Step 1: Analyze queries (diagnostic)
+    if run_diagnostic:
+        print("\n" + "="*70)
+        print("STEP 1: ANALYZING QUERIES")
+        print("="*70)
+        print("Running diagnostic analysis on all queries...")
+        
+        report = analyze_all_queries(base_queries)
+        
+        # Save diagnostic report
+        try:
+            with open(diagnostic_file, 'w') as f:
+                json.dump(report, f, indent=2)
+            print(f"\n✅ Diagnostic complete. Report saved to: {diagnostic_file}")
+        except Exception as e:
+            print(f"⚠️  Could not save diagnostic report: {e}")
+        
+        # Print summary
+        if report.get('total_available'):
+            print(f"\n📊 Summary:")
+            print(f"  Total available papers: {report['total_available']:,}")
+            print(f"  Estimated retrievable: {report['total_retrievable']:,}")
+            print(f"  Estimated time: {report['estimated_time_hours']:.1f} hours")
+            if report.get('risky_queries'):
+                print(f"  Risky queries (pagination issues): {len(report['risky_queries'])}")
+    else:
+        print("\n⏭️  Skipping diagnostic analysis")
+    
+    # Step 2: Optimize queries
+    print("\n" + "="*70)
+    print("STEP 2: OPTIMIZING QUERIES")
+    print("="*70)
+    print("Building optimized query list with strategies...")
+    
+    optimized = build_optimized_queries(base_queries)
+    
+    # Save optimized queries
+    try:
+        output_data = {
+            'optimized_queries': [{'query': q, 'strategy': s} for q, s in optimized],
+            'total_queries': len(optimized),
+            'strategies': {
+                'direct': len([q for q, s in optimized if s == 'direct']),
+                'year_split': len([q for q, s in optimized if s == 'year_split']),
+                'year_split_truncated': len([q for q, s in optimized if s == 'year_split_truncated']),
+            },
+            'base_queries': base_queries,
+            'timestamp': datetime.now().isoformat()
+        }
+        with open(optimized_file, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        print(f"\n✅ Optimized queries saved to: {optimized_file}")
+    except Exception as e:
+        print(f"⚠️  Could not save optimized queries: {e}")
+    
+    # Print optimization summary
+    print(f"\n📋 Query Optimization Summary:")
+    print(f"  Original queries: {len(base_queries)}")
+    print(f"  Optimized queries: {len(optimized)}")
+    strategies = set([s for _, s in optimized])
+    print(f"  Strategies used: {', '.join(sorted(strategies))}")
+    
+    strategy_counts = {}
+    for _, s in optimized:
+        strategy_counts[s] = strategy_counts.get(s, 0) + 1
+    for strategy, count in sorted(strategy_counts.items()):
+        print(f"    - {strategy}: {count} queries")
+    
+    # Step 3: Execute optimized queries
+    if run_collection:
+        print("\n" + "="*70)
+        print("STEP 3: EXECUTING OPTIMIZED QUERIES")
+        print("="*70)
+        print("Starting collection with pagination-safe execution...")
+        
+        total = execute_optimized_queries(
+            optimized_queries=optimized,
+            output_jsonl=output_jsonl,
+            checkpoint_jsonl=checkpoint_file,
+            max_papers_per_query=max_papers_per_query,
+            rate_limit_delay=rate_limit_delay
+        )
+        
+        print(f"\n✅ Collection complete: {total:,} papers")
+        print(f"   Output file: {output_jsonl}")
+        print(f"   Checkpoint: {checkpoint_file}")
+    else:
+        print("\n⏭️  Skipping collection (run_collection=False)")
+        print(f"   To collect papers, run:")
+        print(f"   python data_pipeline.py collect --use-optimized --output-dir {output_dir}")
+    
+    print("\n" + "="*70)
+    print("PIPELINE COMPLETE")
+    print("="*70)
+    
+    return optimized
+
 
 # Output fields (minimal metadata)
 OUTPUT_FIELDS = ['id', 'title', 'abstract', 'year', 'categories', 'pdf_url']
@@ -390,7 +1248,7 @@ def load_config(config_path: str = "config.yaml") -> Dict:
         'curation': {
             'use_nemo_curator': True,
             'skip_deduplication': False,
-            'min_relevance_score': 0.5
+            'min_relevance_score': 0.3
         },
         'preprocessing': {
             'workers': 4
@@ -1274,10 +2132,16 @@ class RAMEfficientArxivCollector:
         query: str,
         max_papers: int,
         query_num: int,
-        total_queries: int
+        total_queries: int,
+        strategy: str = "year_split"
     ) -> int:
         """
         Collect papers for one query, using multiple batches.
+        
+        Supports different strategies:
+        - "direct": Query directly (for small result sets)
+        - "year_split": Split query by year to avoid pagination
+        - "year_split_truncated": Year split but may lose some papers
         
         Uses a single large search and processes results incrementally to avoid
         getting the same papers in each batch.
@@ -1286,6 +2150,7 @@ class RAMEfficientArxivCollector:
         """
         print(f"\n{'='*70}")
         print(f"Query {query_num}/{total_queries}: {query[:60]}...")
+        print(f"Strategy: {strategy}")
         print(f"{'='*70}")
         
         if not ARXIV_AVAILABLE:
@@ -1293,6 +2158,66 @@ class RAMEfficientArxivCollector:
             return 0
         
         papers_in_query = 0
+        
+        # If strategy is year_split, split the query by year
+        if strategy in ["year_split", "year_split_truncated"]:
+            year_queries = generate_year_split_queries(query)
+            print(f"   Split into {len(year_queries)} year-specific queries")
+            
+            # Collect from each year query
+            base_delay = max(self.rate_limit, 2.0)
+            client = arxiv.Client(
+                delay_seconds=base_delay,
+                num_retries=3,
+                page_size=100
+            )
+            
+            papers_per_year = max_papers // len(year_queries) if len(year_queries) > 0 else max_papers
+            max_per_year = max(100, papers_per_year)  # At least 100 per year
+            
+            for year_query in year_queries:
+                if self.total_collected >= max_papers:
+                    break
+                
+                # Extract year from query for display
+                year_match = re.search(r'(\d{4})01010000', year_query)
+                year_display = year_match.group(1) if year_match else "unknown"
+                
+                remaining = max_papers - papers_in_query
+                max_for_year = min(max_per_year, remaining)
+                
+                print(f"\n   Year {year_display}: Collecting up to {max_for_year} papers...")
+                
+                # Use pagination-safe collection with 1000 limit per year
+                with open(self.output_file, 'a', encoding='utf-8') as f:
+                    year_papers, count = collect_with_pagination_safety(
+                        client=client,
+                        query=year_query,
+                        max_papers_to_retrieve=min(1000, max_for_year),  # ArXiv pagination limit
+                        existing_ids=self.collected_ids,
+                        output_file_handle=f
+                    )
+                
+                papers_in_query += count
+                self.total_collected += count
+                
+                # Update collected_ids
+                for paper in year_papers:
+                    self.collected_ids.add(paper['id'])
+                
+                # Save checkpoint after each year
+                self._save_checkpoint()
+                self._clear_memory()
+                
+                if count > 0:
+                    print(f"   Year {year_display}: Collected {count} papers (total: {papers_in_query})")
+                else:
+                    print(f"   Year {year_display}: No new papers")
+            
+            print(f"\nQuery complete: {papers_in_query} papers")
+            return papers_in_query
+        
+        # Direct strategy (for small queries)
         batch_num = 0
         total_results_checked = 0  # Track across all batches
         consecutive_empty_batches = 0  # Track consecutive batches with 0 papers
@@ -1550,12 +2475,25 @@ class RAMEfficientArxivCollector:
                 print(f"\nQuery {query_num}/{len(queries)}: {query}")
                 print(f"   Target: {max_for_query} papers (remaining: {remaining})")
                 
+                # Get strategy for this query
+                strategy = "year_split"  # Default
+                if query_strategies is not None:
+                    if query in query_strategies:
+                        strategy = query_strategies[query]
+                    else:
+                        # Try to match by query prefix (in case of slight variations)
+                        for q, s in query_strategies.items():
+                            if query.startswith(q[:30]) or q.startswith(query[:30]):
+                                strategy = s
+                                break
+                
                 # Collect query
                 papers = self.collect_query(
                     query=query,
                     max_papers=max_for_query,
                     query_num=query_num,
-                    total_queries=len(queries)
+                    total_queries=len(queries),
+                    strategy=strategy
                 )
                 
                 # If we got papers but haven't reached target, continue to next query
@@ -1637,23 +2575,54 @@ def collect_arxiv_efficient(
         rate_limit=rate_limit
     )
     
-    # Use optimized tiered queries
-    # Flatten the tiered structure into a list of (query, max_papers) tuples
-    queries = []
-    for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
-        for query, max_papers in tier_queries:
-            # Respect the per-query limit, but don't exceed total_target
-            adjusted_limit = min(max_papers, total_target)
-            queries.append((query, adjusted_limit))
+    # Option 1: Use optimized query list with strategies (recommended)
+    # Check if optimized queries file exists
+    optimized_file = os.path.join(output_dir, "optimized_queries.json")
+    if os.path.exists(optimized_file):
+        print(f"Loading optimized queries from {optimized_file}...")
+        try:
+            with open(optimized_file, 'r') as f:
+                optimized_data = json.load(f)
+            queries = []
+            query_strategies = {}
+            for item in optimized_data.get('optimized_queries', []):
+                query = item['query']
+                strategy = item.get('strategy', 'year_split')
+                # Use a reasonable max_papers per query
+                max_papers = min(total_target // len(optimized_data.get('optimized_queries', [])), 5000)
+                queries.append((query, max_papers))
+                query_strategies[query] = strategy
+            print(f"Loaded {len(queries)} optimized queries with strategies")
+        except Exception as e:
+            print(f"Could not load optimized queries: {e}")
+            print("Falling back to default queries...")
+            queries = []
+            query_strategies = None
+            for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
+                for query, max_papers in tier_queries:
+                    adjusted_limit = min(max_papers, total_target)
+                    queries.append((query, adjusted_limit))
+    else:
+        # Option 2: Use default tiered queries
+        queries = []
+        query_strategies = None
+        for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
+            for query, max_papers in tier_queries:
+                adjusted_limit = min(max_papers, total_target)
+                queries.append((query, adjusted_limit))
     
-    print(f"Using {len(queries)} optimized queries from {len(OPTIMIZED_QUERIES)} tiers")
-    print(f"Tier breakdown:")
-    for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
-        tier_total = sum(max_papers for _, max_papers in tier_queries)
-        print(f"  {tier_name}: {len(tier_queries)} queries, {tier_total} max papers")
+    print(f"Using {len(queries)} queries")
+    query_strategies_dict = query_strategies if query_strategies is not None else None
+    if query_strategies_dict:
+        strategy_counts = {}
+        for q, s in query_strategies_dict.items():
+            strategy_counts[s] = strategy_counts.get(s, 0) + 1
+        print(f"Strategies: {strategy_counts}")
+    else:
+        print("Using default year_split strategy for all queries")
     
     # Collect
-    collector.collect_all(queries, total_target)
+    collector.collect_all(queries, total_target, query_strategies=query_strategies_dict)
     
     print(f"\nPapers saved to: {output_file}")
     print(f"Checkpoint saved to: {checkpoint_file}")
@@ -2763,30 +3732,52 @@ class HealthcareDomainFilter(_HealthcareDomainFilterBase):
         for domain, keywords in self.domain_keywords.items():
             # Count keyword matches
             matches = sum(1 for keyword in keywords if keyword in text)
-            # Score: normalized by number of keywords (0-1)
-            score = min(matches / len(keywords), 1.0)
+            # Score: more lenient - use sqrt to give credit for partial matches
+            # If 1/3 of keywords match, score is ~0.58 instead of 0.33
+            if matches > 0:
+                score = min((matches / len(keywords)) ** 0.7, 1.0)  # More lenient scoring
+            else:
+                score = 0.0
             domain_scores[domain] = score
         
         # Calculate overall relevance
-        # Base score: average of domain scores
-        base_score = sum(domain_scores.values()) / len(domain_scores) if domain_scores else 0.0
+        # Use MAX domain score as base (more lenient - if paper matches any domain well, it's relevant)
+        max_domain_score = max(domain_scores.values()) if domain_scores else 0.0
+        
+        # Also consider average for multi-domain papers
+        avg_domain_score = sum(domain_scores.values()) / len(domain_scores) if domain_scores else 0.0
+        
+        # Base score: weighted combination of max and average (favor max for single-domain papers)
+        base_score = (max_domain_score * 0.7 + avg_domain_score * 0.3)
         
         # Boost for multiple domains (multi-domain papers are more relevant)
         active_domains = sum(1 for score in domain_scores.values() if score > 0.1)
         if active_domains > 1:
-            base_score *= (1.0 + 0.1 * (active_domains - 1))  # 10% boost per additional domain
+            base_score *= (1.0 + 0.15 * (active_domains - 1))  # 15% boost per additional domain
         
         # Boost for paper length (longer papers tend to be more substantial)
         word_count = len(text.split())
         if word_count > 500:
-            base_score *= 1.1  # 10% boost for longer papers
+            base_score *= 1.15  # 15% boost for longer papers
         elif word_count < 200:
-            base_score *= 0.9  # Penalty for very short papers
+            base_score *= 0.85  # Penalty for very short papers
         
-        # Count medical terms presence
+        # Count medical terms presence (more lenient)
         medical_term_count = sum(1 for term in self.medical_terms if term in text)
-        medical_boost = min(medical_term_count / 20.0, 0.2)  # Up to 20% boost
+        medical_boost = min(medical_term_count / 15.0, 0.25)  # Up to 25% boost, more lenient threshold
         base_score += medical_boost
+        
+        # ML keywords boost (papers with ML terms are more relevant for our use case)
+        ml_keywords = ['machine learning', 'deep learning', 'neural network', 'transformer', 
+                      'lstm', 'cnn', 'classification', 'prediction', 'model', 'algorithm',
+                      'training', 'supervised', 'unsupervised', 'reinforcement learning']
+        ml_matches = sum(1 for keyword in ml_keywords if keyword in text)
+        ml_boost = min(ml_matches / 10.0, 0.2)  # Up to 20% boost for ML terms
+        base_score += ml_boost
+        
+        # Minimum boost if ANY domain has matches (ensures healthcare papers aren't filtered out)
+        if max_domain_score > 0:
+            base_score = max(base_score, 0.3)  # At least 0.3 if any domain matches
         
         # Normalize to 0-1 range
         relevance = min(base_score, 1.0)
@@ -2796,12 +3787,12 @@ class HealthcareDomainFilter(_HealthcareDomainFilterBase):
         
         return domain_scores
     
-    def filter_document(self, document: Dict, min_relevance: float = 0.4) -> bool:
+    def filter_document(self, document: Dict, min_relevance: float = 0.3) -> bool:
         """Filter document based on relevance score.
         
         Args:
             document: Document dictionary
-            min_relevance: Minimum relevance score to keep (default: 0.4)
+            min_relevance: Minimum relevance score to keep (default: 0.3)
             
         Returns:
             True if document should be kept, False otherwise
@@ -2823,7 +3814,7 @@ class HealthcareDomainFilter(_HealthcareDomainFilterBase):
         return relevance >= min_relevance
 
 
-def create_domain_relevance_filter(min_score: float = 0.5):
+def create_domain_relevance_filter(min_score: float = 0.3):
     """Create domain-specific relevance filter (legacy function for compatibility).
     
     Args:
@@ -3906,7 +4897,7 @@ def curate_with_nemo(
     output_jsonl: str,
     use_gpu: bool = False,
     skip_dedup: bool = False,
-    min_relevance_score: float = 0.5
+    min_relevance_score: float = 0.3
 ):
     """Curate healthcare papers using NeMo Curator pipeline.
     
@@ -4032,7 +5023,7 @@ def curate_with_nemo(
     
     # Create DocumentDataset (NeMo Curator format)
     # For compatibility, use list if NeMo Curator not available
-    if NEMO_CURATOR_AVAILABLE:
+    if NEMO_CURATOR_AVAILABLE and DocumentDataset_AVAILABLE and DocumentDataset is not None:
         try:
             dataset = DocumentDataset(documents)
             print("   Using NeMo Curator DocumentDataset")
@@ -4041,7 +5032,10 @@ def curate_with_nemo(
             dataset = documents
     else:
         dataset = documents
-        print("   Using list-based dataset (NeMo Curator not available)")
+        if not NEMO_CURATOR_AVAILABLE:
+            print("   Using list-based dataset (NeMo Curator not available)")
+        elif not DocumentDataset_AVAILABLE or DocumentDataset is None:
+            print("   Using list-based dataset (DocumentDataset not available)")
     
     # Stage 2: Text Cleaning & Normalization
     print("\n" + "=" * 60)
@@ -4216,7 +5210,7 @@ def curate_with_nemo(
         before_dedup = len(dataset)
         
         try:
-            if NEMO_CURATOR_AVAILABLE and FuzzyDedup is not None:
+            if NEMO_CURATOR_AVAILABLE and FuzzyDedup_AVAILABLE and FuzzyDedup is not None:
                 if use_gpu:
                     deduplicator = FuzzyDedup(similarity_threshold=0.95, use_gpu=True)
                 else:
@@ -4228,11 +5222,23 @@ def curate_with_nemo(
                     dataset = deduplicator(dataset)
                 else:
                     # List - convert to DocumentDataset for deduplication
-                    try:
-                        temp_dataset = DocumentDataset(dataset)
-                        temp_dataset = deduplicator(temp_dataset)
-                        dataset = list(temp_dataset)
-                    except:
+                    if DocumentDataset_AVAILABLE and DocumentDataset is not None:
+                        try:
+                            temp_dataset = DocumentDataset(dataset)
+                            temp_dataset = deduplicator(temp_dataset)
+                            dataset = list(temp_dataset)
+                        except Exception as e2:
+                            print(f"   FuzzyDedup on DocumentDataset failed: {e2}, using simple deduplication")
+                            # Fallback: simple deduplication by text hash
+                            seen_texts = set()
+                            unique_docs = []
+                            for doc in dataset:
+                                text_hash = hash(doc.get('text', ''))
+                                if text_hash not in seen_texts:
+                                    seen_texts.add(text_hash)
+                                    unique_docs.append(doc)
+                            dataset = unique_docs
+                    else:
                         # Fallback: simple deduplication by text hash
                         seen_texts = set()
                         unique_docs = []
@@ -4246,7 +5252,13 @@ def curate_with_nemo(
                 after_dedup = len(dataset) if isinstance(dataset, list) else len(list(dataset))
                 print(f"   Deduplication: {after_dedup}/{before_dedup} documents")
             else:
-                print("   NeMo Curator deduplication not available, using simple hash-based dedup")
+                # FuzzyDedup not available - use simple deduplication
+                if not NEMO_CURATOR_AVAILABLE:
+                    print("   NeMo Curator not available, using simple deduplication")
+                elif not FuzzyDedup_AVAILABLE or FuzzyDedup is None:
+                    print("   FuzzyDedup not available, using simple deduplication")
+                else:
+                    print("   NeMo Curator deduplication not available, using simple hash-based dedup")
                 # Simple deduplication by text hash
                 seen_texts = set()
                 unique_docs = []
@@ -5104,7 +6116,7 @@ def run_full_pipeline(config_path: str = "config.yaml"):
                             output_jsonl=curated_file,
                             use_gpu=curation_config.get('use_gpu', False),
                             skip_dedup=curation_config.get('skip_deduplication', False),
-                            min_relevance_score=curation_config.get('min_relevance_score', 0.5)
+                            min_relevance_score=curation_config.get('min_relevance_score', 0.3)
                         )
                         
                         if os.path.exists(curated_file):
@@ -5460,6 +6472,17 @@ Examples:
         default=50.0,
         help='Target RAM percentage to stay below (default: 50.0)'
     )
+    collect_parser.add_argument(
+        '--use-optimized',
+        action='store_true',
+        help='Use optimized queries from optimized_queries.json if available'
+    )
+    collect_parser.add_argument(
+        '--optimized-file',
+        type=str,
+        default=None,
+        help='Path to optimized_queries.json file (default: output_dir/optimized_queries.json)'
+    )
     
     # Extract command
     extract_parser = subparsers.add_parser('extract', help='Extract text from PDFs')
@@ -5603,6 +6626,44 @@ Examples:
         help=f'Vocabulary size (default: {TOKENIZER_VOCAB_SIZE})'
     )
     
+    # Analyze command
+    analyze_parser = subparsers.add_parser('analyze', help='Analyze query feasibility and recommend optimal strategies')
+    analyze_parser.add_argument('--query', type=str, help='Analyze a single query')
+    analyze_parser.add_argument('--all', action='store_true', help='Analyze all queries from OPTIMIZED_QUERIES')
+    analyze_parser.add_argument('--optimize', action='store_true', help='Build optimized query list with refined queries')
+    analyze_parser.add_argument('--output', type=str, help='Save report to JSON file')
+    
+    # Optimize and execute command (master script)
+    optimize_execute_parser = subparsers.add_parser('optimize-execute', help='Complete query optimization and execution pipeline')
+    optimize_execute_parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='./data/arxiv',
+        help='Output directory for papers and reports (default: ./data/arxiv)'
+    )
+    optimize_execute_parser.add_argument(
+        '--skip-diagnostic',
+        action='store_true',
+        help='Skip diagnostic analysis step'
+    )
+    optimize_execute_parser.add_argument(
+        '--skip-collection',
+        action='store_true',
+        help='Skip collection step (only optimize queries)'
+    )
+    optimize_execute_parser.add_argument(
+        '--max-papers-per-query',
+        type=int,
+        default=1000,
+        help='Maximum papers per sub-query (default: 1000)'
+    )
+    optimize_execute_parser.add_argument(
+        '--rate-limit',
+        type=float,
+        default=2.0,
+        help='Rate limit delay in seconds (default: 2.0)'
+    )
+    
     # Pipeline command (full orchestration)
     pipeline_parser = subparsers.add_parser('pipeline', help='Run full end-to-end pipeline')
     pipeline_parser.add_argument(
@@ -5617,15 +6678,67 @@ Examples:
     if args.command == 'pipeline':
         run_full_pipeline(config_path=args.config)
     elif args.command == 'collect':
-        rate_limit_delay = 1.0 / args.rate_limit
-        collect_arxiv_papers(
-            output_dir=args.output_dir,
-            max_papers=args.max_papers,
-            cache_file=args.cache_file,
-            rate_limit_delay=rate_limit_delay,
-            batch_size=args.batch_size,
-            ram_target=args.ram_target
-        )
+        # Check if user wants to use optimized queries
+        if args.use_optimized or args.optimized_file:
+            # Use optimized query execution
+            optimized_file = args.optimized_file
+            if not optimized_file:
+                optimized_file = os.path.join(args.output_dir, "optimized_queries.json")
+            
+            if not os.path.exists(optimized_file):
+                print(f"⚠️  Optimized queries file not found: {optimized_file}")
+                print("   Run 'python data_pipeline.py analyze --optimize --output <file>' first")
+                print("   Falling back to standard collection...")
+                rate_limit_delay = 1.0 / args.rate_limit
+                collect_arxiv_papers(
+                    output_dir=args.output_dir,
+                    max_papers=args.max_papers,
+                    cache_file=args.cache_file,
+                    rate_limit_delay=rate_limit_delay,
+                    batch_size=args.batch_size,
+                    ram_target=args.ram_target
+                )
+            else:
+                # Load optimized queries
+                print(f"Loading optimized queries from {optimized_file}...")
+                with open(optimized_file, 'r') as f:
+                    optimized_data = json.load(f)
+                
+                optimized_queries = []
+                for item in optimized_data.get('optimized_queries', []):
+                    query = item['query']
+                    strategy = item.get('strategy', 'year_split')
+                    optimized_queries.append((query, strategy))
+                
+                print(f"Loaded {len(optimized_queries)} optimized queries")
+                
+                # Set up output files
+                os.makedirs(args.output_dir, exist_ok=True)
+                output_jsonl = args.cache_file or os.path.join(args.output_dir, "arxiv_papers.jsonl")
+                checkpoint_jsonl = os.path.join(args.output_dir, "collection_checkpoint.json")
+                
+                # Execute optimized queries
+                total_collected = execute_optimized_queries(
+                    optimized_queries=optimized_queries,
+                    output_jsonl=output_jsonl,
+                    checkpoint_jsonl=checkpoint_jsonl,
+                    max_papers_per_query=1000,
+                    rate_limit_delay=1.0 / args.rate_limit
+                )
+                
+                print(f"\n✅ Collection complete: {total_collected} papers")
+                print(f"   Output: {output_jsonl}")
+        else:
+            # Use standard collection
+            rate_limit_delay = 1.0 / args.rate_limit
+            collect_arxiv_papers(
+                output_dir=args.output_dir,
+                max_papers=args.max_papers,
+                cache_file=args.cache_file,
+                rate_limit_delay=rate_limit_delay,
+                batch_size=args.batch_size,
+                ram_target=args.ram_target
+            )
     elif args.command == 'extract':
         extract_pdf_texts(
             input_jsonl=args.input,
@@ -5655,6 +6768,103 @@ Examples:
             output_dir=args.output_dir,
             model_prefix=args.model_prefix,
             vocab_size=args.vocab_size
+        )
+    elif args.command == 'analyze':
+        if args.query:
+            # Analyze single query
+            report = analyze_query_feasibility(args.query)
+            print("\n" + "="*70)
+            print("QUERY ANALYSIS RESULT")
+            print("="*70)
+            if report.get('error'):
+                print(f"ERROR: {report['error']}")
+            else:
+                print(f"Query: {report['query']}")
+                print(f"Total results: {report['total_results']:,}")
+                print(f"Estimated retrievable: {report['estimated_papers']:,} ({report['retrieval_rate']*100:.0f}%)")
+                print(f"Strategy: {report['strategy']}")
+                print(f"Time estimate: {report['time_estimate_seconds']} seconds")
+                print(f"Risky years: {report['risky_years'] if report['risky_years'] else 'None'}")
+                if report['by_year']:
+                    print("\nYear breakdown:")
+                    for year in range(2024, 2014, -1):
+                        count = report['by_year'].get(year, 0)
+                        marker = "*" if year in report['risky_years'] else " "
+                        print(f"  {marker} {year}: {count:,} papers")
+            
+            # Save report if requested
+            if args.output:
+                with open(args.output, 'w') as f:
+                    json.dump(report, f, indent=2)
+                print(f"\nReport saved to: {args.output}")
+        elif args.all:
+            # Analyze all optimized queries
+            report = analyze_optimized_queries()
+            # Save report if requested
+            if args.output:
+                with open(args.output, 'w') as f:
+                    json.dump(report, f, indent=2)
+                print(f"\nReport saved to: {args.output}")
+        elif args.optimize:
+            # Build optimized query list
+            # Flatten OPTIMIZED_QUERIES to get base queries
+            base_queries = []
+            for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
+                for query, max_papers in tier_queries:
+                    base_queries.append(query)
+            
+            optimized = build_optimized_queries(base_queries)
+            
+            # Print optimized list
+            print("\n" + "="*70)
+            print("OPTIMIZED QUERY LIST")
+            print("="*70)
+            for i, (query, strategy) in enumerate(optimized, 1):
+                print(f"{i}. [{strategy:20s}] {query}")
+            
+            # Save if requested
+            if args.output:
+                output_data = {
+                    'optimized_queries': [{'query': q, 'strategy': s} for q, s in optimized],
+                    'total_queries': len(optimized),
+                    'strategies': {
+                        'direct': len([q for q, s in optimized if s == 'direct']),
+                        'year_split': len([q for q, s in optimized if s == 'year_split']),
+                        'year_split_truncated': len([q for q, s in optimized if s == 'year_split_truncated']),
+                    }
+                }
+                with open(args.output, 'w') as f:
+                    json.dump(output_data, f, indent=2)
+                print(f"\nOptimized query list saved to: {args.output}")
+        else:
+            analyze_parser.print_help()
+            return
+    elif args.command == 'optimize-execute':
+        # Get base queries from OPTIMIZED_QUERIES
+        base_queries = []
+        for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
+            for query, max_papers in tier_queries:
+                base_queries.append(query)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_queries = []
+        for q in base_queries:
+            if q not in seen:
+                seen.add(q)
+                unique_queries.append(q)
+        base_queries = unique_queries
+        
+        print(f"Using {len(base_queries)} base queries from OPTIMIZED_QUERIES")
+        
+        # Run optimization and execution pipeline
+        optimize_and_execute_queries(
+            base_queries=base_queries,
+            output_dir=args.output_dir,
+            run_diagnostic=not args.skip_diagnostic,
+            run_collection=not args.skip_collection,
+            max_papers_per_query=args.max_papers_per_query,
+            rate_limit_delay=args.rate_limit
         )
     else:
         parser.print_help()

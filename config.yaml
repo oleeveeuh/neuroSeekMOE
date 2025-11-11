@@ -17,6 +17,12 @@ collection:
   retry_max: 5  # Maximum retry attempts with exponential backoff
   batch_size: 30  # Papers per batch (increased from 25 for faster collection, still RAM-safe)
   ram_target: 50.0  # Target RAM percentage to stay below (default: 50.0)
+  
+  # Optimized query execution (recommended for large collections)
+  use_optimized_queries: false  # Set to true to use query optimization pipeline
+  skip_diagnostic: false  # Skip diagnostic analysis (faster, if you already know queries)
+  max_papers_per_query: 1000  # Maximum papers per sub-query (ArXiv pagination limit)
+  rate_limit_delay: 2.0  # Delay between requests in seconds (for optimized execution)
 
 # Step 2: PDF Text Extraction
 extraction:
@@ -41,7 +47,7 @@ nemo_curator:
   # Legacy settings (if use_pipeline_api: false)
   use_gpu: false  # Use GPU for deduplication (Linux only)
   skip_dedup: false  # Skip deduplication if memory-constrained
-  min_relevance_score: 0.5  # Minimum domain relevance to keep paper
+  min_relevance_score: 0.3  # Minimum domain relevance to keep paper (lowered from 0.5 for better coverage)
   
   # Quality filters
   quality_filters:

@@ -45,7 +45,9 @@ from data_pipeline import (
     curate_with_nemo,
     run_nemo_curator_pipeline,  # New NeMo Curator Pipeline API
     process_curated_dataset,
-    train_healthcare_tokenizer
+    train_healthcare_tokenizer,
+    optimize_and_execute_queries,  # Optimized query execution
+    OPTIMIZED_QUERIES  # Base queries for optimization
 )
 
 try:
@@ -286,18 +288,57 @@ class PipelineOrchestrator:
             logger.info(f"   Batch size: {batch_size} papers/batch")
             logger.info(f"   RAM target: <{ram_target}%")
             
-            # Use Google Drive if configured
-            use_drive = self.config['pipeline'].get('use_drive', True)
+            # Check if we should use optimized query execution
+            use_optimized = collection_config.get('use_optimized_queries', False)
             
-            collect_arxiv_papers(
-                output_dir=str(self.output_dir),
-                max_papers=collection_config['max_papers'],
-                cache_file=collection_config.get('cache_file'),
-                rate_limit_delay=rate_limit_delay,
-                batch_size=batch_size,
-                ram_target=ram_target,
-                use_drive=use_drive
-            )
+            if use_optimized:
+                logger.info("Using optimized query execution pipeline...")
+                logger.info("   This will: analyze queries, optimize them, and execute with pagination safety")
+                
+                # Get base queries from OPTIMIZED_QUERIES
+                base_queries = []
+                for tier_name, tier_queries in OPTIMIZED_QUERIES.items():
+                    for query, max_papers in tier_queries:
+                        base_queries.append(query)
+                
+                # Remove duplicates while preserving order
+                seen = set()
+                unique_queries = []
+                for q in base_queries:
+                    if q not in seen:
+                        seen.add(q)
+                        unique_queries.append(q)
+                base_queries = unique_queries
+                
+                logger.info(f"   Using {len(base_queries)} base queries from OPTIMIZED_QUERIES")
+                
+                # Run optimization and execution
+                skip_diagnostic = collection_config.get('skip_diagnostic', False)
+                max_papers_per_query = collection_config.get('max_papers_per_query', 1000)
+                rate_limit_delay_opt = collection_config.get('rate_limit_delay', 2.0)
+                
+                optimize_and_execute_queries(
+                    base_queries=base_queries,
+                    output_dir=str(self.output_dir),
+                    run_diagnostic=not skip_diagnostic,
+                    run_collection=True,
+                    max_papers_per_query=max_papers_per_query,
+                    rate_limit_delay=rate_limit_delay_opt
+                )
+            else:
+                # Use standard collection
+                # Use Google Drive if configured
+                use_drive = self.config['pipeline'].get('use_drive', True)
+                
+                collect_arxiv_papers(
+                    output_dir=str(self.output_dir),
+                    max_papers=collection_config['max_papers'],
+                    cache_file=collection_config.get('cache_file'),
+                    rate_limit_delay=rate_limit_delay,
+                    batch_size=batch_size,
+                    ram_target=ram_target,
+                    use_drive=use_drive
+                )
             
             if not self.metadata_jsonl.exists():
                 raise FileNotFoundError(f"Metadata file not created: {self.metadata_jsonl}")

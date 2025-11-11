@@ -3,7 +3,7 @@
 # Core dependencies
 numpy>=1.21.0
 pillow>=8.0.0
-requests>=2.25.0
+requests>=2.28.0
 arxiv>=2.1.0
 pyyaml>=6.0
 

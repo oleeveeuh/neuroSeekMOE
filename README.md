@@ -67,6 +67,7 @@ neuroseek-moe/
 ├── training_adapter.py       # Model adapter (connects dataset to model)
 ├── train_colab.py            # Colab-optimized training loop
 ├── train_real.py             # Model implementation (SimpleMoEModel)
+├── train_baseline.py         # Baseline transformer training (for comparison)
 ├── evaluate.py               # Evaluation utilities
 ├── inference.py              # Production inference pipeline
 ├── extract_expert_activations.py  # Extract expert activation patterns for analysis
@@ -141,6 +142,18 @@ python evaluate.py \
     --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
     --output-dir ./evaluations
 # Note: expert_activations.npz is automatically saved during evaluation
+
+# Train baseline model (standard transformer without MoE)
+python train_baseline.py \
+    --dataset-text-dir ./data/arxiv/texts \
+    --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
+    --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
+    --output-dir ./evaluations \
+    --checkpoint-dir ./checkpoints/baseline \
+    --epochs 10 \
+    --batch-size 8 \
+    --learning-rate 5e-4
+# Note: This generates baseline_results.json for comparison with MoE model
 ```
 
 ## Mixture of Experts (MoE) Architecture
@@ -471,6 +484,7 @@ This is effectively **domain-adaptive pretraining** - the model learns healthcar
 - **Colab-Optimized**: Mixed precision, gradient accumulation, dynamic batch sizing
 - **Domain-Aware Loss**: Weighted loss for neurodegeneration and neuroscience papers
 - **Checkpointing**: Saves every 5000 steps with resume capability
+- **Baseline Model**: Standard transformer without MoE for performance comparison
 
 ## Expected Training Times
 
@@ -588,7 +602,9 @@ All data files are saved directly to Google Drive at:
 **Step 7: Evaluation**
 - ✅ `evaluations/` - Evaluation results and metrics
   - `eval_results.json` - Standard evaluation results file (for analysis notebook)
+  - `baseline_results.json` - Baseline transformer model results (for comparison)
   - `evaluation_{timestamp}.json` - Timestamped evaluation files (for tracking multiple runs)
+  - `expert_activations.npz` - Expert activation patterns (automatically generated during MoE evaluation)
 
 **Step 8: Inference**
 - ✅ `inference/` - Exported inference pipeline
@@ -622,6 +638,7 @@ This allows you to resume exactly where you left off, even after days or weeks.
 
 ### Evaluation & Inference
 - **Comprehensive Metrics**: Perplexity, domain accuracy, MRR@20, section classification
+- **Baseline Comparison**: Train and evaluate baseline transformer model for comparison
 - **Fast Inference**: <100ms per paper on CPU
 - **Embedding Generation**: For similarity search and literature review
 - **Domain Classification**: Automatic healthcare subdomain detection
@@ -676,6 +693,7 @@ pip install nltk  # For stopwords and tokenization
    - `./models/deepseek_moe/eval_results.json` - Evaluation results
    - `./models/deepseek_moe/expert_activations.npz` - Expert activation data (see note below)
    - `./models/deepseek_moe/checkpoint.pt` - Model checkpoint
+   - `./evaluations/baseline_results.json` - Baseline model results (optional, for comparison)
 
    **Google Drive Support (Colab):**
    - The notebook automatically detects if running in Google Colab
@@ -684,6 +702,7 @@ pip install nltk  # For stopwords and tokenization
    - Outputs (figures, data, reports) are saved to Drive for persistence
    - Falls back to local paths if Drive is not available
    - **Evaluation results**: Saved to `/content/drive/MyDrive/neuroMOE_results/evaluations/eval_results.json` (or `./evaluations/eval_results.json` locally)
+   - **Baseline results**: Saved to `/content/drive/MyDrive/neuroMOE_results/evaluations/baseline_results.json` (or `./evaluations/baseline_results.json` locally)
    - **Expert activations**: Saved to `/content/drive/MyDrive/neuroMOE_results/evaluations/expert_activations.npz` (or `./evaluations/expert_activations.npz` locally)
      - **Note**: Both files are **automatically generated** during evaluation when you run `evaluate.py`
      - The evaluation script captures expert routing decisions during the forward pass (single pass, no overhead)
@@ -715,13 +734,15 @@ pip install nltk  # For stopwords and tokenization
 - Expert similarity matrix, dimensionality reduction (t-SNE/UMAP)
 - Expert routing analysis, "personas", dead expert analysis
 - Expert co-activation network visualization
+- **Note**: Domain classification fix ensures proper ML/Healthcare/Both/Other classification
 
 **Section 5: Model Performance & Evaluation Metrics**
 - Overall performance metrics (perplexity, bits per character)
 - Domain-specific performance analysis
 - Performance by year and category
-- Baseline comparisons, example predictions, error analysis
+- Baseline comparisons (MoE vs baseline transformer), example predictions, error analysis
 - Generation quality metrics, cross-domain transfer analysis
+- **Note**: Baseline comparison requires `baseline_results.json` from `train_baseline.py`
 
 **Section 6: Attention Patterns & Embedding Space Analysis**
 - Attention heatmaps for example sentences

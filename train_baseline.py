@@ -253,11 +253,27 @@ def train_baseline_model(
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
     
     # Create checkpoint directory
+    # Handle case where checkpoint_dir might be a file path instead of directory
+    if os.path.isfile(checkpoint_dir):
+        # If it's an existing file, use its parent directory
+        checkpoint_dir = os.path.dirname(checkpoint_dir)
+    elif os.path.exists(checkpoint_dir) and not os.path.isdir(checkpoint_dir):
+        # If it exists but is not a directory (e.g., a file), use parent directory
+        checkpoint_dir = os.path.dirname(checkpoint_dir)
+    elif not os.path.exists(checkpoint_dir) and os.path.splitext(checkpoint_dir)[1]:
+        # If it doesn't exist but looks like a file path (has extension), extract directory
+        checkpoint_dir = os.path.dirname(checkpoint_dir)
+    
+    # Ensure the directory exists
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Training loop
     print(f"\nStarting training...")
-    print(f"Epochs: {epochs}")
+    if max_steps is not None:
+        print(f"Max steps: {max_steps}")
+        print(f"Epochs: unlimited (will stop at {max_steps} steps)")
+    else:
+        print(f"Epochs: {epochs}")
     print(f"Batch size: {batch_size}")
     print(f"Learning rate: {learning_rate}")
     

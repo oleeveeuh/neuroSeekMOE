@@ -204,22 +204,28 @@ class ExpertActivationHook:
             else:
                 self.paper_ids.append(f'paper_{len(self.paper_ids)}')
             
-            if i < len(domains) and domains[i]:
-                # Use first domain or classify
-                domain_list = domains[i] if isinstance(domains[i], list) else [domains[i]]
-                # Classify domain: ML, Healthcare, Both, Other
-                if any('cs.' in d or 'stat.' in d for d in domain_list):
-                    if any('q-bio' in d or 'bio' in d.lower() for d in domain_list):
-                        domain = 'Both'
-                    else:
-                        domain = 'ML'
-                elif any('q-bio' in d or 'bio' in d.lower() for d in domain_list):
-                    domain = 'Healthcare'
-                else:
-                    domain = 'Other'
-                self.paper_domains.append(domain)
-            else:
-                self.paper_domains.append('Other')
+            # Classify domain using the same logic as classify_paper_domain
+            # Get domains (ArXiv categories) from batch metadata
+            domain_list = domains[i] if (i < len(domains) and domains[i]) else []
+            if not isinstance(domain_list, list):
+                domain_list = [domain_list] if domain_list else []
+            
+            # Try to get title/abstract from batch metadata if available
+            title = ''
+            abstract = ''
+            if 'titles' in batch_metadata and i < len(batch_metadata.get('titles', [])):
+                title = batch_metadata['titles'][i] or ''
+            if 'abstracts' in batch_metadata and i < len(batch_metadata.get('abstracts', [])):
+                abstract = batch_metadata['abstracts'][i] or ''
+            
+            # Use classify_paper_domain for consistent classification
+            paper_dict = {
+                'categories': domain_list,
+                'title': title,
+                'abstract': abstract
+            }
+            domain = classify_paper_domain(paper_dict)
+            self.paper_domains.append(domain)
     
     def get_activations(self) -> Dict:
         """Get all stored activations in format expected by analysis notebook.

@@ -136,7 +136,24 @@ class PipelineOrchestrator:
         self.tokenizer_model = self.output_dir / f"{self.config['tokenizer']['model_prefix']}.model"
         self.tokenizer_vocab = self.output_dir / f"{self.config['tokenizer']['model_prefix']}.vocab"
         self.checkpoint_dir = Path(self.config['training']['checkpoint_dir'])
-        self.eval_dir = Path(self.config['evaluation']['output_dir'])
+        
+        # Evaluation directory - use Drive if available
+        eval_output_dir = self.config['evaluation']['output_dir']
+        if use_drive:
+            try:
+                # Use Drive base path for evaluations
+                drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                drive_base_path = Path(drive_base)
+                if drive_base_path.exists() and os.access(drive_base_path, os.W_OK):
+                    # Evaluations go in Drive base/evaluations
+                    eval_output_dir = str(drive_base_path / "evaluations")
+                    logger.info(f"Evaluation directory: {eval_output_dir} (Google Drive)")
+                else:
+                    logger.warning("Drive base path not accessible, using local evaluation directory")
+            except Exception as e:
+                logger.warning(f"Could not set Drive path for evaluations, using local: {e}")
+        self.eval_dir = Path(eval_output_dir)
+        
         self.inference_dir = Path(self.config['inference']['output_dir'])
         
         logger.info("=" * 80)

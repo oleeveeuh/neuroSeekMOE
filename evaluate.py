@@ -6,6 +6,10 @@ Computes comprehensive metrics on held-out test set:
 - Domain classification accuracy
 - Neurodegeneration relevance ranking (MRR@20)
 - Section classification accuracy
+- Expert activation patterns (automatically captured and saved)
+
+The evaluation script automatically captures expert routing decisions during inference
+and saves them to expert_activations.npz for analysis in the model_analysis.ipynb notebook.
 
 Usage:
     python evaluate.py \
@@ -15,6 +19,10 @@ Usage:
         --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
         --output-dir ./evaluations \
         --test-split 0.1
+
+Outputs:
+    - evaluations/eval_results.json: Evaluation metrics
+    - models/deepseek_moe/expert_activations.npz: Expert activation patterns (auto-generated)
 """
 
 from __future__ import annotations
@@ -35,6 +43,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
+from tqdm import tqdm
 
 # Import our components
 from arxiv_dataset import ArXivStreamingDataset, create_dataloader
@@ -52,6 +61,210 @@ try:
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
     print("matplotlib not available, visualization disabled")
+
+
+def classify_paper_domain(paper: Dict) -> str:
+    """Classify paper as ML, Healthcare, Both, or Other.
+    
+    Args:
+        paper: Dictionary with 'categories', 'title', 'abstract' fields
+        
+    Returns:
+        Domain label: 'ML', 'Healthcare', 'Both', or 'Other'
+    """
+    categories = paper.get('categories', [])
+    title = paper.get('title', '').lower() if paper.get('title') else ''
+    abstract = paper.get('abstract', '').lower() if paper.get('abstract') else ''
+    text = title + ' ' + abstract
+    
+    # Check categories
+    has_cs = any(cat.startswith('cs.') or 'stat.' in cat.lower() for cat in categories)
+    has_bio = any('q-bio' in cat or 'bio' in cat.lower() for cat in categories)
+    
+    # Check keywords
+    ml_keywords = ['neural network', 'deep learning', 'machine learning', 
+                   'convolutional', 'transformer', 'gradient', 'backpropagation',
+                   'optimization', 'algorithm', 'model training']
+    healthcare_keywords = ['patient', 'clinical', 'medical', 'diagnosis',
+                          'disease', 'treatment', 'brain', 'imaging', 'mri',
+                          'alzheimer', 'parkinson', 'neurodegeneration', 'therapy']
+    
+    # Count keyword matches
+    ml_keyword_count = sum(1 for kw in ml_keywords if kw in text)
+    healthcare_keyword_count = sum(1 for kw in healthcare_keywords if kw in text)
+    
+    has_ml = has_cs or ml_keyword_count >= 2
+    has_healthcare = has_bio or healthcare_keyword_count >= 2
+    
+    if has_ml and has_healthcare:
+        return 'Both'
+    elif has_ml:
+        return 'ML'
+    elif has_healthcare:
+        return 'Healthcare'
+    else:
+        return 'Other'
+
+
+class ExpertActivationHook:
+    """Lightweight hook to capture expert routing during evaluation.
+    
+    Works with SimpleMoEModel which has a single MoE layer.
+    Captures routing decisions by intercepting model forward passes.
+    """
+    
+    def __init__(self, model: nn.Module):
+        """Initialize hook.
+        
+        Args:
+            model: The model to hook into (should be SimpleMoEModel or wrapper)
+        """
+        self.expert_selections = []  # List of (batch_size, top_k) arrays
+        self.expert_probs = []  # List of (batch_size, num_experts) arrays
+        self.paper_ids = []  # List of paper IDs
+        self.paper_domains = []  # List of domain labels
+        self.model = model
+        
+        # Store original forward method
+        if hasattr(model, 'base_model'):
+            self.base_model = model.base_model
+        else:
+            self.base_model = model
+    
+    def capture_batch(
+        self,
+        gate_logits: torch.Tensor,
+        routing_metrics: Optional[Dict],
+        batch_metadata: Dict,
+        top_k: int = 2
+    ):
+        """Capture routing information from a batch.
+        
+        Args:
+            gate_logits: Router logits [batch*seq_len, num_experts] or [batch, seq_len, num_experts]
+            routing_metrics: Dictionary with routing metrics (optional)
+            batch_metadata: Batch metadata with paper IDs and domains
+            top_k: Number of top experts selected
+        """
+        # Move to CPU and detach
+        if isinstance(gate_logits, torch.Tensor):
+            gate_logits_np = gate_logits.detach().cpu()
+        else:
+            gate_logits_np = np.array(gate_logits)
+        
+        # Handle different gate_logits shapes
+        if len(gate_logits_np.shape) == 2:  # [batch*seq_len, num_experts]
+            # Reshape: need to know batch_size and seq_len
+            # For now, average over sequence dimension
+            batch_size = len(batch_metadata.get('arxiv_ids', []))
+            if batch_size > 0:
+                seq_len = gate_logits_np.shape[0] // batch_size
+                gate_logits_reshaped = gate_logits_np.reshape(batch_size, seq_len, -1)
+                # Average over sequence: [batch_size, num_experts]
+                gate_logits_avg = gate_logits_reshaped.mean(axis=1)
+            else:
+                gate_logits_avg = gate_logits_np.mean(axis=0, keepdims=True)
+        elif len(gate_logits_np.shape) == 3:  # [batch, seq_len, num_experts]
+            # Average over sequence: [batch, num_experts]
+            gate_logits_avg = gate_logits_np.mean(axis=1)
+        else:
+            # Already [batch, num_experts] or similar
+            gate_logits_avg = gate_logits_np
+        
+        # Get probabilities
+        if isinstance(gate_logits_avg, torch.Tensor):
+            probs = F.softmax(gate_logits_avg, dim=-1).numpy()
+        else:
+            probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
+        
+        # Get top-k expert selections
+        num_experts = probs.shape[-1]
+        top_k = min(top_k, num_experts)
+        
+        # For each sample, get top-k experts
+        top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]  # [batch, top_k]
+        
+        # Create binary activation matrix (which experts activated)
+        batch_size = probs.shape[0]
+        activations = np.zeros((batch_size, num_experts), dtype=bool)
+        for i in range(batch_size):
+            activations[i, top_k_indices[i]] = True
+        
+        # Store
+        self.expert_selections.append(top_k_indices)
+        self.expert_probs.append(probs)
+        
+        # Store paper metadata
+        arxiv_ids = batch_metadata.get('arxiv_ids', [])
+        domains = batch_metadata.get('domains', [])
+        
+        for i in range(batch_size):
+            if i < len(arxiv_ids):
+                self.paper_ids.append(arxiv_ids[i])
+            else:
+                self.paper_ids.append(f'paper_{len(self.paper_ids)}')
+            
+            if i < len(domains) and domains[i]:
+                # Use first domain or classify
+                domain_list = domains[i] if isinstance(domains[i], list) else [domains[i]]
+                # Classify domain: ML, Healthcare, Both, Other
+                if any('cs.' in d or 'stat.' in d for d in domain_list):
+                    if any('q-bio' in d or 'bio' in d.lower() for d in domain_list):
+                        domain = 'Both'
+                    else:
+                        domain = 'ML'
+                elif any('q-bio' in d or 'bio' in d.lower() for d in domain_list):
+                    domain = 'Healthcare'
+                else:
+                    domain = 'Other'
+                self.paper_domains.append(domain)
+            else:
+                self.paper_domains.append('Other')
+    
+    def get_activations(self) -> Dict:
+        """Get all stored activations in format expected by analysis notebook.
+        
+        Returns:
+            Dictionary with:
+            - expert_activations: (N_samples, N_experts) binary matrix
+            - expert_probs: (N_samples, N_experts) probability matrix
+            - paper_ids: List of paper IDs
+            - paper_domains: List of domain labels
+        """
+        if not self.expert_probs:
+            return {}
+        
+        # Concatenate all batches
+        expert_probs_all = np.concatenate(self.expert_probs, axis=0)  # (N_samples, N_experts)
+        
+        # Create binary activation matrix from probabilities
+        # Experts with probability > threshold are considered "activated"
+        # Or use top-k per sample
+        num_experts = expert_probs_all.shape[1]
+        expert_activations = np.zeros_like(expert_probs_all, dtype=bool)
+        
+        # For each sample, mark top-k experts as activated
+        # Use top_k from model if available, otherwise use 2
+        top_k = getattr(self.base_model, 'top_k', 2) if hasattr(self.base_model, 'top_k') else 2
+        top_k = min(top_k, num_experts)
+        
+        for i in range(expert_probs_all.shape[0]):
+            top_indices = np.argsort(expert_probs_all[i])[-top_k:]
+            expert_activations[i, top_indices] = True
+        
+        return {
+            'expert_activations': expert_activations,
+            'expert_probs': expert_probs_all,
+            'paper_ids': np.array(self.paper_ids),
+            'paper_domains': np.array(self.paper_domains)
+        }
+    
+    def clear(self):
+        """Clear stored activations."""
+        self.expert_selections = []
+        self.expert_probs = []
+        self.paper_ids = []
+        self.paper_domains = []
 
 
 class SectionClassifier:
@@ -93,7 +306,8 @@ def extract_embeddings(
     model: nn.Module,
     adapter: ModelAdapter,
     dataloader,
-    max_samples: Optional[int] = None
+    max_samples: Optional[int] = None,
+    activation_hook: Optional[ExpertActivationHook] = None
 ) -> Tuple[torch.Tensor, List[Dict]]:
     """Extract model embeddings for test samples.
     
@@ -160,28 +374,163 @@ def extract_embeddings(
 def compute_perplexity(
     model: nn.Module,
     adapter: ModelAdapter,
-    dataloader
-) -> float:
-    """Compute perplexity on test set.
+    dataloader,
+    activation_hook: Optional[ExpertActivationHook] = None
+) -> Tuple[float, Dict]:
+    """Compute perplexity on test set with domain-specific metrics.
     
     Args:
         model: Trained model
         adapter: Model adapter
         dataloader: DataLoader for test data
+        activation_hook: Optional hook to capture expert activations
         
     Returns:
-        Perplexity score
+        Tuple of (overall_perplexity, domain_metrics_dict)
+        - overall_perplexity: Overall perplexity score
+        - domain_metrics_dict: Dictionary with per-domain metrics
     """
     model.eval()
     total_loss = 0.0
     total_tokens = 0
     
+    # Track per-domain metrics
+    domain_losses = defaultdict(float)
+    domain_tokens = defaultdict(int)
+    domain_paper_counts = defaultdict(int)
+    
+    # Get base model for routing capture
+    base_model = model.base_model if hasattr(model, 'base_model') else model
+    top_k = getattr(base_model, 'top_k', 2) if hasattr(base_model, 'top_k') else 2
+    
     with torch.no_grad():
         for batch in dataloader:
             with torch.cuda.amp.autocast():
-                result = adapter.process_batch(batch)
-                loss = result['loss']
-                batch_metadata = result['batch_metadata']
+                # Forward pass
+                if activation_hook is not None:
+                    # Single forward pass: get both loss and routing info
+                    input_ids = batch['input_ids'].to(adapter.device)
+                    target_ids = batch['target_ids'].to(adapter.device)
+                    
+                    # Call base model with routing info
+                    output, routing_info = base_model(
+                        input_ids,
+                        image_features=None,
+                        return_load_balance_loss=True,
+                        return_gate_logits=True
+                    )
+                    
+                    # Compute loss manually (to avoid double forward pass)
+                    logits = output  # [batch, seq_len, vocab_size]
+                    # Reshape for cross-entropy
+                    logits_flat = logits.view(-1, logits.shape[-1])
+                    targets_flat = target_ids.view(-1)
+                    loss = F.cross_entropy(
+                        logits_flat,
+                        targets_flat,
+                        ignore_index=adapter.ignore_index,
+                        reduction='mean'
+                    )
+                    
+                    # Compute per-sample losses for domain tracking
+                    # Get attention mask (non-padding tokens)
+                    attention_mask = (target_ids != adapter.ignore_index).float()
+                    
+                    # Per-sample loss
+                    loss_per_token = F.cross_entropy(
+                        logits_flat,
+                        targets_flat,
+                        ignore_index=adapter.ignore_index,
+                        reduction='none'
+                    ).view(target_ids.shape[0], -1)  # [batch, seq_len]
+                    
+                    # Mask out padding tokens
+                    loss_per_sample = (loss_per_token * attention_mask).sum(dim=1)  # [batch]
+                    tokens_per_sample = attention_mask.sum(dim=1)  # [batch]
+                    
+                    # Extract routing information
+                    if routing_info is not None:
+                        gate_logits, _, _, _, _, routing_metrics = routing_info
+                        # Get batch metadata
+                        device_batch = adapter._move_to_device(batch)
+                        batch_metadata = {
+                            'arxiv_ids': device_batch.get('arxiv_ids', []),
+                            'domains': device_batch.get('domains', []),
+                            'years': device_batch.get('years', []),
+                            'titles': batch.get('titles', []),  # May not be in batch
+                            'abstracts': batch.get('abstracts', [])  # May not be in batch
+                        }
+                        
+                        # Classify domains and track per-domain metrics
+                        arxiv_ids = batch_metadata.get('arxiv_ids', [])
+                        domains_list = batch_metadata.get('domains', [])
+                        titles = batch_metadata.get('titles', [])
+                        abstracts = batch_metadata.get('abstracts', [])
+                        
+                        # Determine batch size from input_ids
+                        batch_size = input_ids.shape[0] if input_ids is not None else len(arxiv_ids)
+                        
+                        for i in range(batch_size):
+                            # Classify domain (use categories primarily, titles/abstracts if available)
+                            paper_dict = {
+                                'categories': domains_list[i] if i < len(domains_list) else [],
+                                'title': titles[i] if i < len(titles) else '',
+                                'abstract': abstracts[i] if i < len(abstracts) else ''
+                            }
+                            domain = classify_paper_domain(paper_dict)
+                            
+                            # Track domain metrics
+                            if i < len(loss_per_sample):
+                                domain_losses[domain] += loss_per_sample[i].item()
+                                domain_tokens[domain] += tokens_per_sample[i].item()
+                                domain_paper_counts[domain] += 1
+                        
+                        activation_hook.capture_batch(
+                            gate_logits=gate_logits,
+                            routing_metrics=routing_metrics,
+                            batch_metadata=batch_metadata,
+                            top_k=top_k
+                        )
+                else:
+                    result = adapter.process_batch(batch)
+                    loss = result['loss']
+                    batch_metadata = result['batch_metadata']
+                    
+                    # Still track domains even without hook
+                    device_batch = adapter._move_to_device(batch)
+                    domains_list = device_batch.get('domains', [])
+                    titles = batch.get('titles', [])  # May not be in batch
+                    abstracts = batch.get('abstracts', [])  # May not be in batch
+                    arxiv_ids = device_batch.get('arxiv_ids', [])
+                    
+                    # Compute per-sample loss for domain tracking
+                    logits = result['logits']
+                    target_ids_batch = batch['target_ids'].to(adapter.device)
+                    attention_mask = (target_ids_batch != adapter.ignore_index).float()
+                    
+                    loss_per_token = F.cross_entropy(
+                        logits.view(-1, logits.shape[-1]),
+                        target_ids_batch.view(-1),
+                        ignore_index=adapter.ignore_index,
+                        reduction='none'
+                    ).view(target_ids_batch.shape[0], -1)
+                    
+                    loss_per_sample = (loss_per_token * attention_mask).sum(dim=1)
+                    tokens_per_sample = attention_mask.sum(dim=1)
+                    
+                    batch_size = target_ids_batch.shape[0]
+                    for i in range(batch_size):
+                        paper_dict = {
+                            'categories': domains_list[i] if i < len(domains_list) else [],
+                            'title': titles[i] if i < len(titles) else '',
+                            'abstract': abstracts[i] if i < len(abstracts) else ''
+                        }
+                        domain = classify_paper_domain(paper_dict)
+                        
+                        if i < len(loss_per_sample):
+                            domain_losses[domain] += loss_per_sample[i].item()
+                            domain_tokens[domain] += tokens_per_sample[i].item()
+                            domain_paper_counts[domain] += 1
             
             # Get number of non-padding tokens
             target_ids = batch['target_ids'].to(adapter.device)
@@ -192,12 +541,24 @@ def compute_perplexity(
             total_tokens += num_tokens
     
     if total_tokens == 0:
-        return float('inf')
+        return float('inf'), {}
     
     avg_loss = total_loss / total_tokens
     perplexity = np.exp(avg_loss)
     
-    return perplexity
+    # Compute per-domain metrics
+    domain_metrics = {}
+    for domain in domain_losses:
+        if domain_tokens[domain] > 0:
+            domain_avg_loss = domain_losses[domain] / domain_tokens[domain]
+            domain_metrics[domain] = {
+                'loss': float(domain_avg_loss),
+                'perplexity': float(np.exp(domain_avg_loss)),
+                'num_papers': int(domain_paper_counts[domain]),
+                'num_tokens': int(domain_tokens[domain])
+            }
+    
+    return perplexity, domain_metrics
 
 
 def compute_domain_classification_accuracy(
@@ -416,6 +777,35 @@ def compute_section_classification_accuracy(
     return accuracy
 
 
+def get_drive_results_path(local_path: str = "./evaluations") -> str:
+    """Get path for saving results, preferring Google Drive if available.
+    
+    Args:
+        local_path: Local fallback path
+        
+    Returns:
+        Path string (Drive path if available, otherwise local)
+    """
+    # Check for Google Drive
+    drive_base = os.environ.get('DRIVE_BASE', '/content/drive/MyDrive/neuroMOE_results')
+    
+    # Check if Drive is mounted
+    if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
+        # Use Drive results folder
+        drive_results = os.path.join(drive_base, 'evaluations')
+        return drive_results
+    
+    # Also check if we're in Colab and Drive might be mounted at /content/drive
+    if os.path.exists('/content/drive/MyDrive'):
+        drive_base = '/content/drive/MyDrive/neuroMOE_results'
+        if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
+            drive_results = os.path.join(drive_base, 'evaluations')
+            return drive_results
+    
+    # Fall back to local path
+    return local_path
+
+
 def evaluate_model(
     model_checkpoint: str,
     dataset_text_dir: str,
@@ -538,18 +928,29 @@ def evaluate_model(
         pin_memory=True
     )
     
+    # Initialize activation hook for capturing expert routing
+    print("\nInitializing expert activation capture...")
+    activation_hook = ExpertActivationHook(model)
+    
     # Compute metrics
     print("\nComputing metrics...")
     
-    # 1. Perplexity
+    # 1. Perplexity (with activation capture and domain metrics)
     print("   Computing perplexity...")
-    perplexity = compute_perplexity(model, adapter, test_dataloader)
+    perplexity, domain_metrics = compute_perplexity(model, adapter, test_dataloader, activation_hook=activation_hook)
     print(f"   Perplexity: {perplexity:.2f}")
     
-    # 2. Extract embeddings
+    # Print domain-specific results
+    if domain_metrics:
+        print("\n   Domain-Specific Perplexity:")
+        for domain in sorted(domain_metrics.keys()):
+            metrics = domain_metrics[domain]
+            print(f"     {domain}: {metrics['perplexity']:.2f} ({metrics['num_papers']} papers)")
+    
+    # 2. Extract embeddings (activations already captured during perplexity, no need to capture again)
     print("   Extracting embeddings...")
     embeddings, metadata = extract_embeddings(
-        model, adapter, test_dataloader, max_samples=max_test_samples
+        model, adapter, test_dataloader, max_samples=max_test_samples, activation_hook=None
     )
     print(f"   Extracted embeddings: {embeddings.shape}")
     
@@ -584,18 +985,99 @@ def evaluate_model(
             'domain_classification_accuracy': float(domain_accuracy),
             'neurodegeneration_mrr_at_20': float(mrr_20),
             'section_classification_accuracy': float(section_accuracy),
-        }
+        },
+        'domain_metrics': domain_metrics  # NEW: Per-domain metrics
     }
     
-    # Save results
-    os.makedirs(output_dir, exist_ok=True)
-    results_file = os.path.join(output_dir, f"evaluation_{int(time.time())}.json")
-    with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
+    # Determine results directory (prefer Drive if available)
+    results_dir = get_drive_results_path(output_dir)
+    os.makedirs(results_dir, exist_ok=True)
+    print(f"\n📁 Saving results to: {results_dir}")
     
-    print(f"\nResults saved to: {results_file}")
+    # Save timestamped file (for tracking multiple evaluations)
+    timestamped_file = os.path.join(results_dir, f"evaluation_{int(time.time())}.json")
+    with open(timestamped_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"Timestamped results saved to: {timestamped_file}")
+    
+    # Also save standard eval_results.json (for easy access by analysis notebook)
+    standard_file = os.path.join(results_dir, "eval_results.json")
+    with open(standard_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"Standard results saved to: {standard_file}")
+    
+    # Update results dict with actual paths
+    results['eval_results_path'] = standard_file
+    
+    # Print domain breakdown summary
+    if domain_metrics:
+        print("\n" + "="*60)
+        print("DOMAIN-SPECIFIC RESULTS")
+        print("="*60)
+        for domain in sorted(domain_metrics.keys()):
+            metrics = domain_metrics[domain]
+            print(f"\n{domain}:")
+            print(f"  Papers: {metrics['num_papers']}")
+            print(f"  Tokens: {metrics['num_tokens']:,}")
+            print(f"  Perplexity: {metrics['perplexity']:.2f}")
+            print(f"  Loss: {metrics['loss']:.4f}")
+        print("="*60)
+    
+    # Save expert activations if captured
+    if activation_hook is not None:
+        activations = activation_hook.get_activations()
+        if activations:
+            # Determine output path - save to Drive results folder if available
+            drive_base = os.environ.get('DRIVE_BASE', '/content/drive/MyDrive/neuroMOE_results')
+            
+            # Check if Drive is available
+            if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
+                # Save to Drive results folder
+                activations_dir = os.path.join(drive_base, 'evaluations')
+            elif os.path.exists('/content/drive/MyDrive'):
+                # Alternative Drive path
+                drive_base = '/content/drive/MyDrive/neuroMOE_results'
+                if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
+                    activations_dir = os.path.join(drive_base, 'evaluations')
+                else:
+                    # Fall back to local results directory
+                    activations_dir = results_dir
+            else:
+                # Fall back to local results directory
+                activations_dir = results_dir
+            
+            os.makedirs(activations_dir, exist_ok=True)
+            activations_path = os.path.join(activations_dir, 'expert_activations.npz')
+            
+            save_expert_activations(activations, activations_path)
+            print(f"\n✅ Expert activations saved to: {activations_path}")
+            results['expert_activations_path'] = activations_path
     
     return results
+
+
+def save_expert_activations(activations: Dict, output_path: str):
+    """Save expert activations to compressed numpy file.
+    
+    Args:
+        activations: Dictionary with activation data from ExpertActivationHook
+        output_path: Path to save .npz file
+    """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Save in format expected by analysis notebook
+    np.savez_compressed(
+        output_path,
+        expert_activations=activations['expert_activations'],
+        expert_probs=activations['expert_probs'],
+        paper_ids=activations['paper_ids'],
+        paper_domains=activations['paper_domains']
+    )
+    
+    file_size_mb = os.path.getsize(output_path) / 1024 / 1024
+    print(f"   File size: {file_size_mb:.2f} MB")
+    print(f"   Samples: {len(activations['paper_ids'])}")
+    print(f"   Experts: {activations['expert_activations'].shape[1]}")
 
 
 def plot_training_curves(

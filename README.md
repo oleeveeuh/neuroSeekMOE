@@ -69,6 +69,7 @@ neuroseek-moe/
 ├── train_real.py             # Model implementation (SimpleMoEModel)
 ├── evaluate.py               # Evaluation utilities
 ├── inference.py              # Production inference pipeline
+├── extract_expert_activations.py  # Extract expert activation patterns for analysis
 ├── run_pipeline.py           # Pipeline orchestration
 ├── config.yaml               # Configuration file
 └── notebooks/
@@ -131,6 +132,15 @@ python train_colab.py \
     --gradient-accumulation 4 \
     --max-steps 50000 \
     --learning-rate 5e-4
+
+# Run evaluation (automatically captures expert activations)
+python evaluate.py \
+    --model-checkpoint ./checkpoints/step_50000.pt \
+    --dataset-text-dir ./data/arxiv/texts \
+    --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
+    --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
+    --output-dir ./evaluations
+# Note: expert_activations.npz is automatically saved during evaluation
 ```
 
 ## Mixture of Experts (MoE) Architecture
@@ -577,6 +587,8 @@ All data files are saved directly to Google Drive at:
 
 **Step 7: Evaluation**
 - ✅ `evaluations/` - Evaluation results and metrics
+  - `eval_results.json` - Standard evaluation results file (for analysis notebook)
+  - `evaluation_{timestamp}.json` - Timestamped evaluation files (for tracking multiple runs)
 
 **Step 8: Inference**
 - ✅ `inference/` - Exported inference pipeline
@@ -662,7 +674,7 @@ pip install nltk  # For stopwords and tokenization
    - `./models/deepseek_moe/config.json` - Model configuration
    - `./models/deepseek_moe/training_logs.json` - Training logs
    - `./models/deepseek_moe/eval_results.json` - Evaluation results
-   - `./models/deepseek_moe/expert_activations.npz` - Expert activation data
+   - `./models/deepseek_moe/expert_activations.npz` - Expert activation data (see note below)
    - `./models/deepseek_moe/checkpoint.pt` - Model checkpoint
 
    **Google Drive Support (Colab):**
@@ -671,6 +683,12 @@ pip install nltk  # For stopwords and tokenization
    - Data files are automatically loaded from Drive if available
    - Outputs (figures, data, reports) are saved to Drive for persistence
    - Falls back to local paths if Drive is not available
+   - **Evaluation results**: Saved to `/content/drive/MyDrive/neuroMOE_results/evaluations/eval_results.json` (or `./evaluations/eval_results.json` locally)
+   - **Expert activations**: Saved to `/content/drive/MyDrive/neuroMOE_results/evaluations/expert_activations.npz` (or `./evaluations/expert_activations.npz` locally)
+     - **Note**: Both files are **automatically generated** during evaluation when you run `evaluate.py`
+     - The evaluation script captures expert routing decisions during the forward pass (single pass, no overhead)
+     - Both files are saved to the evaluations folder (Drive if available, otherwise local)
+     - The notebook will generate sample data if these files are missing (for demonstration only)
 
 ### Notebook Structure
 
@@ -691,6 +709,8 @@ pip install nltk  # For stopwords and tokenization
 
 **Section 4: Expert Activation Patterns & Specialization** ⭐ *Most Critical Section*
 - Extracts expert activation data from model
+- **Note**: Requires `expert_activations.npz` file (see "Expected Data Files" section)
+- If file is missing, the notebook generates sample data for demonstration
 - Heatmaps showing domain-specific expert specialization
 - Expert similarity matrix, dimensionality reduction (t-SNE/UMAP)
 - Expert routing analysis, "personas", dead expert analysis

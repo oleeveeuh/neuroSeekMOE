@@ -281,66 +281,131 @@ def train_baseline_model(
     global_step = 0
     start_time = time.time()
     
-    for epoch in range(epochs):
-        epoch_loss = 0.0
-        num_batches = 0
-        
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs}")
-        
-        for batch in progress_bar:
-            if batch is None:
-                continue
+    # Determine training mode: step-based or epoch-based
+    if max_steps is not None:
+        # Step-based training: loop until max_steps reached
+        epoch = 0
+        while global_step < max_steps:
+            epoch += 1
+            epoch_loss = 0.0
+            num_batches = 0
+            
+            # Calculate remaining steps for progress bar
+            remaining_steps = max_steps - global_step
+            progress_bar = tqdm(train_dataloader, desc=f"Step {global_step}/{max_steps} (Epoch {epoch})")
+            
+            for batch in progress_bar:
+                if batch is None:
+                    continue
                 
-            input_ids = batch['input_ids'].to(device)
-            target_ids = batch['target_ids'].to(device)
+                # Check if we've reached max_steps before processing this batch
+                if global_step >= max_steps:
+                    break
+                    
+                input_ids = batch['input_ids'].to(device)
+                target_ids = batch['target_ids'].to(device)
+                
+                # Forward pass
+                logits = model(input_ids)
+                
+                # Reshape for loss calculation
+                # logits: [batch, seq_len, vocab_size]
+                # target_ids: [batch, seq_len]
+                logits_flat = logits.view(-1, vocab_size)
+                targets_flat = target_ids.view(-1)
+                
+                # Compute loss
+                loss = criterion(logits_flat, targets_flat)
+                
+                # Backward pass
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                
+                epoch_loss += loss.item()
+                num_batches += 1
+                global_step += 1
+                
+                # Check again after incrementing (in case we just hit max_steps)
+                if global_step >= max_steps:
+                    break
+                
+                # Update progress bar
+                progress_bar.set_postfix({'loss': f'{loss.item():.4f}', 'step': global_step})
+                
+                # Save checkpoint
+                if global_step % save_interval == 0:
+                    checkpoint_path = os.path.join(checkpoint_dir, f"baseline_step_{global_step}.pt")
+                    torch.save({
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'epoch': epoch,
+                        'step': global_step,
+                        'loss': loss.item(),
+                    }, checkpoint_path)
+                    print(f"\nCheckpoint saved: {checkpoint_path}")
             
-            # Forward pass
-            logits = model(input_ids)
-            
-            # Reshape for loss calculation
-            # logits: [batch, seq_len, vocab_size]
-            # target_ids: [batch, seq_len]
-            logits_flat = logits.view(-1, vocab_size)
-            targets_flat = target_ids.view(-1)
-            
-            # Compute loss
-            loss = criterion(logits_flat, targets_flat)
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-            num_batches += 1
-            global_step += 1
-            
-            # Update progress bar
-            progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
-            
-            # Save checkpoint
-            if global_step % save_interval == 0:
-                checkpoint_path = os.path.join(checkpoint_dir, f"baseline_step_{global_step}.pt")
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'step': global_step,
-                    'loss': loss.item(),
-                }, checkpoint_path)
-                print(f"\nCheckpoint saved: {checkpoint_path}")
-            
-            # Check max_steps
-            if max_steps is not None and global_step >= max_steps:
+            if global_step >= max_steps:
                 print(f"\nReached max_steps={max_steps}, stopping training")
                 break
-        
-        if max_steps is not None and global_step >= max_steps:
-            break
-        
-        avg_loss = epoch_loss / max(num_batches, 1)
-        print(f"Epoch {epoch+1} completed: avg_loss={avg_loss:.4f}")
+            
+            avg_loss = epoch_loss / max(num_batches, 1)
+            print(f"Epoch {epoch} completed: avg_loss={avg_loss:.4f}, total_steps={global_step}")
+    else:
+        # Epoch-based training: loop for specified epochs
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            num_batches = 0
+            
+            progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+            
+            for batch in progress_bar:
+                if batch is None:
+                    continue
+                    
+                input_ids = batch['input_ids'].to(device)
+                target_ids = batch['target_ids'].to(device)
+                
+                # Forward pass
+                logits = model(input_ids)
+                
+                # Reshape for loss calculation
+                # logits: [batch, seq_len, vocab_size]
+                # target_ids: [batch, seq_len]
+                logits_flat = logits.view(-1, vocab_size)
+                targets_flat = target_ids.view(-1)
+                
+                # Compute loss
+                loss = criterion(logits_flat, targets_flat)
+                
+                # Backward pass
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                
+                epoch_loss += loss.item()
+                num_batches += 1
+                global_step += 1
+                
+                # Update progress bar
+                progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
+                
+                # Save checkpoint
+                if global_step % save_interval == 0:
+                    checkpoint_path = os.path.join(checkpoint_dir, f"baseline_step_{global_step}.pt")
+                    torch.save({
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'epoch': epoch,
+                        'step': global_step,
+                        'loss': loss.item(),
+                    }, checkpoint_path)
+                    print(f"\nCheckpoint saved: {checkpoint_path}")
+            
+            avg_loss = epoch_loss / max(num_batches, 1)
+            print(f"Epoch {epoch+1} completed: avg_loss={avg_loss:.4f}")
     
     # Save final model
     final_model_path = os.path.join(checkpoint_dir, "baseline_final.pt")

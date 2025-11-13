@@ -614,6 +614,7 @@ def compute_perplexity(
                         # Classify domains and track per-domain metrics
                         arxiv_ids = batch_metadata.get('arxiv_ids', [])
                         domains_list = batch_metadata.get('domains', [])
+                        categories_list = batch_metadata.get('categories', [])
                         titles = batch_metadata.get('titles', [])
                         abstracts = batch_metadata.get('abstracts', [])
                         
@@ -621,9 +622,20 @@ def compute_perplexity(
                         batch_size = input_ids.shape[0] if input_ids is not None else len(arxiv_ids)
                         
                         for i in range(batch_size):
-                            # Classify domain (use categories primarily, titles/abstracts if available)
+                            # Classify domain (use both categories and domains, titles/abstracts if available)
+                            # Get categories (ArXiv categories for ML detection)
+                            categories = categories_list[i] if i < len(categories_list) else []
+                            if not isinstance(categories, list):
+                                categories = [categories] if categories else []
+                            
+                            # Get domains (NeMo Curator labels for healthcare detection)
+                            domains = domains_list[i] if i < len(domains_list) else []
+                            if not isinstance(domains, list):
+                                domains = [domains] if domains else []
+                            
                             paper_dict = {
-                                'categories': domains_list[i] if i < len(domains_list) else [],
+                                'categories': categories,  # ArXiv categories
+                                'domains': domains,  # NeMo Curator domain labels
                                 'title': titles[i] if i < len(titles) else '',
                                 'abstract': abstracts[i] if i < len(abstracts) else ''
                             }
@@ -649,8 +661,9 @@ def compute_perplexity(
                     # Still track domains even without hook
                     device_batch = adapter._move_to_device(batch)
                     domains_list = device_batch.get('domains', [])
-                    titles = batch.get('titles', [])  # May not be in batch
-                    abstracts = batch.get('abstracts', [])  # May not be in batch
+                    categories_list = device_batch.get('categories', [])
+                    titles = device_batch.get('title', batch.get('title', []))
+                    abstracts = device_batch.get('abstract', batch.get('abstract', []))
                     arxiv_ids = device_batch.get('arxiv_ids', [])
                     
                     # Compute per-sample loss for domain tracking
@@ -670,8 +683,19 @@ def compute_perplexity(
                     
                     batch_size = target_ids_batch.shape[0]
                     for i in range(batch_size):
+                        # Get categories (ArXiv categories for ML detection)
+                        categories = categories_list[i] if i < len(categories_list) else []
+                        if not isinstance(categories, list):
+                            categories = [categories] if categories else []
+                        
+                        # Get domains (NeMo Curator labels for healthcare detection)
+                        domains = domains_list[i] if i < len(domains_list) else []
+                        if not isinstance(domains, list):
+                            domains = [domains] if domains else []
+                        
                         paper_dict = {
-                            'categories': domains_list[i] if i < len(domains_list) else [],
+                            'categories': categories,  # ArXiv categories
+                            'domains': domains,  # NeMo Curator domain labels
                             'title': titles[i] if i < len(titles) else '',
                             'abstract': abstracts[i] if i < len(abstracts) else ''
                         }

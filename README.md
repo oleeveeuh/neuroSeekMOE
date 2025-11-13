@@ -5,17 +5,20 @@
 
 A full-stack machine learning project for training specialized language models on healthcare and neuroscience research papers. This project demonstrates end-to-end ML engineering: from data collection and curation to model training and deployment.
 
-## 🎯 Results & Achievements
+## Results & Achievements
 
 The pipeline successfully:
 
-- **✅ Processes 30-40k healthcare+ML papers** with memory-efficient streaming (<500MB RAM)
-- **✅ Trains specialized tokenizer** with 50k vocabulary optimized for medical terminology
-- **✅ Achieves >1000 samples/sec throughput** on Colab GPU (T4)
-- **✅ Domain-adaptive pretraining** through NeMo Curator curation
-- **✅ Expert specialization** - MoE experts naturally specialize on healthcare subdomains
-- **✅ Comprehensive evaluation** - Perplexity, domain accuracy, MRR@20, section classification
-- **✅ Baseline comparison** - Standard transformer baseline for performance benchmarking
+- **Processes 30-40k healthcare+ML papers** with memory-efficient streaming (<500MB RAM)
+- **Trains specialized tokenizer** with 50k vocabulary optimized for medical terminology
+- **Achieves >1000 samples/sec throughput** on Colab GPU (T4)
+- **Domain-adaptive pretraining** through NeMo Curator curation
+- **Expert specialization** - MoE experts naturally specialize on healthcare subdomains
+- **Comprehensive evaluation** - Perplexity, domain accuracy, MRR@20, section classification
+- **Baseline comparison** - Standard transformer baseline for performance benchmarking
+
+![Performance Comparison](docs/images/performance_comparison.png)
+*Figure 1: MoE vs Baseline Model Performance Comparison*
 
 ### Key Performance Metrics
 
@@ -25,9 +28,15 @@ The pipeline successfully:
 - **Domain Coverage**: Neurodegeneration, neuroscience, medical imaging, clinical, drug discovery
 - **Data Quality**: 99.9% retention rate after NeMo Curator filtering
 
-## 🏗️ Mixture of Experts (MoE) Architecture
+![Performance Metrics](docs/images/performance_metrics.png)
+*Figure 2: Key Performance Metrics Summary*
+
+## Mixture of Experts (MoE) Architecture
 
 The model uses a DeepSeek-MoE inspired architecture that efficiently scales to large models while maintaining computational efficiency.
+
+![MoE Architecture Diagram](docs/images/moe_architecture.png)
+*Figure 3: MoE Model Architecture Overview*
 
 ### Architecture Overview
 
@@ -88,9 +97,15 @@ Expert = Sequential(
 
 **Key Point**: Experts are NOT full transformers or LLMs—they are simple feedforward networks that specialize through the routing mechanism.
 
+![Expert Network Architecture](docs/images/expert_network.png)
+*Figure 4: Expert Network Structure (2-layer MLP)*
+
 ### Expert Choice Routing Mechanism
 
 Unlike traditional **Token Choice routing** (where tokens choose experts), this implementation uses **Expert Choice routing** where experts select tokens. This approach provides better load balancing and more predictable computation.
+
+![Expert Choice Routing](docs/images/expert_choice_routing.png)
+*Figure 5: Expert Choice Routing Mechanism*
 
 **Routing Flow:**
 
@@ -127,6 +142,9 @@ Unlike traditional **Token Choice routing** (where tokens choose experts), this 
    - Ensures all tokens receive processing, even if routing fails
 
 ### Forward Pass Flow
+
+![Forward Pass Diagram](docs/images/forward_pass_flow.png)
+*Figure 6: Complete Forward Pass Through MoE Layer*
 
 The complete forward pass through the MoE layer:
 
@@ -210,7 +228,13 @@ loss = cross_entropy_loss +
        0.01 * capacity_loss
 ```
 
+![Training Loss Curves](docs/images/training_loss_curves.png)
+*Figure 7: Training Loss Curves and Auxiliary Losses*
+
 ### Domain Specialization
+
+![Expert Specialization](docs/images/expert_specialization.png)
+*Figure 8: Expert Specialization Patterns Across Healthcare Domains*
 
 Through training on curated healthcare data, routed experts naturally specialize:
 
@@ -285,7 +309,7 @@ temperature_steps: 1000
 - Capacity tracking: dropped token fraction, expert utilization rate
 - Comprehensive logging for routing health monitoring
 
-## 🔧 Technical Highlights
+## Technical Highlights
 
 ### Memory Efficiency
 One of the main challenges was handling large datasets without running out of memory. I solved this by:
@@ -312,7 +336,10 @@ The pipeline is designed to scale:
 - Parallel processing where possible (PDF extraction, text processing)
 - Configurable via YAML for easy experimentation
 
-## 📊 NeMo Curator: Domain-Adaptive Pretraining
+## NeMo Curator: Domain-Adaptive Pretraining
+
+![NeMo Curator Pipeline](docs/images/nemo_curator_pipeline.png)
+*Figure 9: NeMo Curator Processing Pipeline*
 
 NeMo Curator plays a crucial role in enabling effective domain-adaptive pretraining by creating a high-quality, domain-specific dataset tailored for healthcare language modeling.
 
@@ -366,7 +393,7 @@ The curation pipeline effectively performs domain-adaptive pretraining by:
 
 This is effectively **domain-adaptive pretraining** - the model learns healthcare-specific patterns, terminology, and research contexts from the very beginning of training, rather than being fine-tuned from a general-purpose model.
 
-## 📈 Key Features
+## Key Features
 
 ### Data Pipeline
 - **RAM-Efficient Collection**: Batch processing (25 papers/batch) with automatic memory monitoring
@@ -389,7 +416,7 @@ This is effectively **domain-adaptive pretraining** - the model learns healthcar
 - **Embedding Generation**: For similarity search and literature review
 - **Domain Classification**: Automatic healthcare subdomain detection
 
-## ⏱️ Expected Training Times
+## Expected Training Times
 
 ### Tokenizer Training
 Tokenizer training time depends on the size of your processed dataset:
@@ -443,6 +470,9 @@ Model training time depends on your hardware and configuration:
 
 ### Complete Pipeline Timeline
 
+![Pipeline Timeline](docs/images/pipeline_timeline.png)
+*Figure 12: Complete Pipeline Execution Timeline*
+
 For a typical run with **5,000-10,000 processed papers** on **Google Colab**:
 
 | Stage | Time | Notes |
@@ -463,7 +493,7 @@ For a typical run with **5,000-10,000 processed papers** on **Google Colab**:
 - Use gradient accumulation to simulate larger batches
 - Resume from checkpoints if interrupted
 
-## 💾 Google Drive Persistence
+## Google Drive Persistence
 
 When running on Google Colab with `use_drive: true` (default), **all pipeline outputs are automatically saved to Google Drive** for persistence across runtime interruptions.
 
@@ -475,42 +505,42 @@ All data files are saved directly to Google Drive at:
 ```
 
 **Step 1: Collection**
-- ✅ `arxiv_papers.jsonl` - Collected paper metadata
-- ✅ `collection_checkpoint.json` - Collection progress checkpoint
-- ✅ `collected_ids.db` - SQLite database for deduplication
+- `arxiv_papers.jsonl` - Collected paper metadata
+- `collection_checkpoint.json` - Collection progress checkpoint
+- `collected_ids.db` - SQLite database for deduplication
 
 **Step 2: PDF Extraction**
-- ✅ `texts/` - Directory with extracted `.txt` files (one per paper)
+- `texts/` - Directory with extracted `.txt` files (one per paper)
 
 **Step 3: NeMo Curator**
-- ✅ `curated_dataset.jsonl` - Curated and filtered papers
-- ✅ `curated_checkpoint.json` - Curation progress checkpoint
+- `curated_dataset.jsonl` - Curated and filtered papers
+- `curated_checkpoint.json` - Curation progress checkpoint
 
 **Step 4: Processing**
-- ✅ `processed_dataset.jsonl` - Processed papers with domain classification
+- `processed_dataset.jsonl` - Processed papers with domain classification
 
 **Step 5: Tokenizer Training**
-- ✅ `healthcare_tokenizer.model` - Trained tokenizer model
-- ✅ `healthcare_tokenizer.vocab` - Tokenizer vocabulary
-- ✅ `tokenizer_metadata.json` - Tokenizer training metadata
-- ✅ `tokenizer_validation_report.json` - Validation results
+- `healthcare_tokenizer.model` - Trained tokenizer model
+- `healthcare_tokenizer.vocab` - Tokenizer vocabulary
+- `tokenizer_metadata.json` - Tokenizer training metadata
+- `tokenizer_validation_report.json` - Validation results
 
 **Step 6: Model Training**
-- ✅ `checkpoints/` - Training checkpoints (saved every 5000 steps)
+- `checkpoints/` - Training checkpoints (saved every 5000 steps)
   - `step_5000.pt`, `step_10000.pt`, etc.
   - `dataset_metadata.json` - Dataset tracking for resume
-- ⚠️ **Note**: Checkpoints are saved to `./checkpoints/` (local) by default
+- **Note**: Checkpoints are saved to `./checkpoints/` (local) by default
   - To save checkpoints to Drive, set `checkpoint_dir` in `config.yaml` to a Drive path
 
 **Step 7: Evaluation**
-- ✅ `evaluations/` - Evaluation results and metrics
+- `evaluations/` - Evaluation results and metrics
   - `eval_results.json` - Standard evaluation results file (for analysis notebook)
   - `baseline_results.json` - Baseline transformer model results (for comparison)
   - `evaluation_{timestamp}.json` - Timestamped evaluation files (for tracking multiple runs)
   - `expert_activations.npz` - Expert activation patterns (automatically generated during MoE evaluation)
 
 **Step 8: Inference**
-- ✅ `inference/` - Exported inference pipeline
+- `inference/` - Exported inference pipeline
 
 ### Benefits
 
@@ -539,7 +569,10 @@ The Colab notebook includes a `restore_from_drive()` function that automatically
 
 This allows you to resume exactly where you left off, even after days or weeks.
 
-## 📊 Model Analysis & Visualization
+## Model Analysis & Visualization
+
+![Model Analysis Dashboard](docs/images/model_analysis_dashboard.png)
+*Figure 10: Model Analysis Notebook Overview*
 
 The `model_analysis.ipynb` notebook provides comprehensive analysis and visualization of the trained DeepSeek-MoE model, covering everything from dataset statistics to expert specialization patterns to deployment considerations.
 
@@ -622,7 +655,10 @@ pip install nltk  # For stopwords and tokenization
 - MoE-specific metrics: router loss, z-loss, expert capacity overflow
 - Expert utilization over training, convergence analysis
 
-**Section 4: Expert Activation Patterns & Specialization** ⭐ *Most Critical Section*
+**Section 4: Expert Activation Patterns & Specialization** *Most Critical Section*
+
+![Expert Activation Heatmap](docs/images/expert_activation_heatmap.png)
+*Figure 11: Expert Activation Patterns by Domain*
 - Extracts expert activation data from model
 - **Note**: Requires `expert_activations.npz` file (see "Expected Data Files" section)
 - If file is missing, the notebook generates sample data for demonstration
@@ -806,7 +842,7 @@ The analysis notebook complements the training pipeline:
    - Use tables from `./outputs/data/` for supplementary materials
    - Reference reproducibility section (Section 11) for methodology
 
-## ⚙️ Configuration
+## Configuration
 
 All parameters are configurable via `config.yaml`:
 - Number of papers to collect
@@ -815,7 +851,7 @@ All parameters are configurable via `config.yaml`:
 - Evaluation settings
 - Inference export options
 
-## 🛠️ Challenges & Solutions
+## Challenges & Solutions
 
 ### Challenge 1: Memory Management
 **Problem**: Processing 30-40k papers would exhaust RAM on most systems.
@@ -832,7 +868,7 @@ All parameters are configurable via `config.yaml`:
 
 **Solution**: Optimized training loop with mixed precision, gradient accumulation, frequent checkpointing, and automatic resume capability.
 
-## 🛠️ Technologies Used
+## Technologies Used
 
 - **Python 3.8+**: Core language
 - **PyTorch**: Deep learning framework
@@ -842,7 +878,7 @@ All parameters are configurable via `config.yaml`:
 - **Dask**: Parallel processing for NeMo Curator
 - **scikit-learn**: Evaluation metrics
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 neuroseek-moe/
@@ -862,7 +898,7 @@ neuroseek-moe/
     └── model_analysis.ipynb        # Comprehensive model analysis and visualization
 ```
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Quick Start (Google Colab)
 
@@ -950,7 +986,7 @@ python train_baseline.py \
     --learning-rate 5e-4
 ```
 
-## 🔮 Future Improvements
+## Future Improvements
 
 - [ ] Add support for multimodal data (images, diagrams)
 - [ ] Implement fine-tuning on specific healthcare subdomains
@@ -958,7 +994,7 @@ python train_baseline.py \
 - [ ] Create a web interface for literature review
 - [ ] Expand to other scientific domains
 
-## 💡 Learnings
+## Learnings
 
 This project taught me:
 - How to build memory-efficient data pipelines for large-scale ML
@@ -966,11 +1002,11 @@ This project taught me:
 - Techniques for optimizing training on resource-constrained systems
 - End-to-end ML engineering from data collection to deployment
 
-## 📄 License
+## License
 
 MIT License - feel free to use this project for learning or as a starting point for your own work.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **ArXiv** for open access to research papers
 - **NeMo Curator** for advanced text curation tools

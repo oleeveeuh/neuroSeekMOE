@@ -579,14 +579,19 @@ def create_dataloader(
             'abstract': abstracts_list,  # Include abstract in batch
         }
     
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        prefetch_factor=prefetch_factor,
-        collate_fn=collate_fn,
-    )
+    # prefetch_factor only works with num_workers > 0
+    dataloader_kwargs = {
+        'dataset': dataset,
+        'batch_size': batch_size,
+        'num_workers': num_workers,
+        'pin_memory': pin_memory,
+        'collate_fn': collate_fn,
+    }
+    
+    if num_workers > 0:
+        dataloader_kwargs['prefetch_factor'] = prefetch_factor
+    
+    return DataLoader(**dataloader_kwargs)
 
 
 # Example usage and testing

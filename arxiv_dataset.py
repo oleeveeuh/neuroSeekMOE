@@ -524,9 +524,12 @@ def create_dataloader(
         input_ids_list = []
         target_ids_list = []
         domains_list = []
+        categories_list = []
         years_list = []
         arxiv_ids_list = []
         has_nd_list = []
+        titles_list = []
+        abstracts_list = []
         
         for item in batch:
             input_ids = item['input_ids']
@@ -541,18 +544,24 @@ def create_dataloader(
             
             input_ids_list.append(input_ids)
             target_ids_list.append(target_ids)
-            domains_list.append(item['domains'])
-            years_list.append(item['year'])
-            arxiv_ids_list.append(item['arxiv_id'])
-            has_nd_list.append(item['has_neurodegeneration'])
+            domains_list.append(item.get('domains', []))
+            categories_list.append(item.get('categories', []))  # Include categories
+            years_list.append(item.get('year', None))
+            arxiv_ids_list.append(item.get('arxiv_id', ''))
+            has_nd_list.append(item.get('has_neurodegeneration', False))
+            titles_list.append(item.get('title', ''))  # Include title
+            abstracts_list.append(item.get('abstract', ''))  # Include abstract
         
         return {
             'input_ids': torch.stack(input_ids_list),
             'target_ids': torch.stack(target_ids_list),
             'domains': domains_list,
+            'categories': categories_list,  # Include categories in batch
             'years': years_list,
             'arxiv_ids': arxiv_ids_list,
             'has_neurodegeneration': torch.tensor(has_nd_list, dtype=torch.bool),
+            'title': titles_list,  # Include title in batch
+            'abstract': abstracts_list,  # Include abstract in batch
         }
     
     return DataLoader(

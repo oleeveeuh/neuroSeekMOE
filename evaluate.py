@@ -1160,10 +1160,11 @@ def evaluate_model(
     print(f"Created test dataset: {len(test_files)} papers")
     
     # Create test dataloader
+    # Use num_workers=0 to avoid worker serialization issues with metadata dict
     test_dataloader = create_dataloader(
         test_dataset,
         batch_size=batch_size,
-        num_workers=2,
+        num_workers=0,  # Single process to avoid metadata sharing issues
         pin_memory=True
     )
     

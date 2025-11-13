@@ -332,15 +332,22 @@ class ArXivStreamingDataset(IterableDataset):
             
             # Get metadata
             metadata = self.metadata.get(arxiv_id, {})
-            domains = metadata.get('domains', [])
-            categories = metadata.get('categories', [])  # Original ArXiv categories
             
-            # Debug: Check if categories are missing (only for first few papers)
+            # Debug: Check if metadata is missing (only for first few papers)
             if not hasattr(self, '_debug_count'):
                 self._debug_count = 0
-            if self._debug_count < 3 and not categories:
-                print(f"DEBUG _process_paper: {arxiv_id} - metadata keys: {list(metadata.keys())}, categories: {categories}")
+            if self._debug_count < 5:
+                if not metadata:
+                    # Check if arxiv_id exists in metadata at all
+                    exists = arxiv_id in self.metadata
+                    sample_keys = list(self.metadata.keys())[:3] if self.metadata else []
+                    print(f"DEBUG _process_paper: {arxiv_id} - metadata is EMPTY, arxiv_id in metadata: {exists}, sample keys: {sample_keys}, total metadata entries: {len(self.metadata) if self.metadata else 0}")
+                elif not metadata.get('categories'):
+                    print(f"DEBUG _process_paper: {arxiv_id} - metadata keys: {list(metadata.keys())}, categories: {metadata.get('categories', [])}")
                 self._debug_count += 1
+            
+            domains = metadata.get('domains', [])
+            categories = metadata.get('categories', [])  # Original ArXiv categories
             
             year = metadata.get('year', None)
             has_neurodegeneration = metadata.get('has_neurodegeneration', False)

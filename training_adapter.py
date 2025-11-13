@@ -256,6 +256,14 @@ class ModelAdapter:
         titles = device_batch.get('title', [])
         abstracts = device_batch.get('abstract', [])
         
+        # Debug: Verify categories are in device_batch and will be in batch_metadata
+        if not hasattr(self, '_debug_categories_checked'):
+            self._debug_categories_checked = True
+            print(f"DEBUG ModelAdapter: device_batch has 'categories': {'categories' in device_batch}")
+            print(f"DEBUG ModelAdapter: categories from device_batch: type={type(categories)}, len={len(categories) if categories else 0}")
+            if categories and len(categories) > 0:
+                print(f"DEBUG ModelAdapter: categories[0] = {categories[0]}")
+        
         # Prepare batch metadata
         batch_metadata = {
             'domains': domains,
@@ -267,6 +275,13 @@ class ModelAdapter:
             'batch_size': batch_size,
             'seq_len': seq_len,
         }
+        
+        # Debug: Verify categories are in batch_metadata
+        if not hasattr(self, '_debug_batch_metadata_checked'):
+            self._debug_batch_metadata_checked = True
+            print(f"DEBUG ModelAdapter: batch_metadata has 'categories': {'categories' in batch_metadata}")
+            batch_cats = batch_metadata.get('categories', [])
+            print(f"DEBUG ModelAdapter: batch_metadata['categories']: type={type(batch_cats)}, len={len(batch_cats) if batch_cats else 0}")
         
         return {
             'loss': loss,

@@ -127,6 +127,12 @@ def classify_paper_domain(paper: Dict) -> str:
     has_ml = has_cs or ml_keyword_count >= ml_threshold
     has_healthcare = has_bio or has_healthcare_domain or healthcare_terms_in_cats or healthcare_keyword_count >= healthcare_threshold
     
+    # Special case: If we have healthcare domains but no CS categories detected,
+    # but we have ML keywords in text, assume it's "Both" (papers from queries like "cat:cs.LG AND healthcare")
+    # This handles cases where categories weren't loaded from fallback
+    if has_healthcare_domain and not has_cs and ml_keyword_count >= 1:
+        has_ml = True
+    
     if has_ml and has_healthcare:
         return 'Both'
     elif has_ml:
@@ -293,6 +299,15 @@ class ExpertActivationHook:
             # Use classify_paper_domain for consistent classification
             # Combine both categories (ArXiv) and domains (NeMo Curator) for classification
             all_categories = categories_list + domain_list  # Combine both for classification
+            
+            # Debug: Show first 5 papers
+            if len(self.paper_domains) < 5:
+                arxiv_id = arxiv_ids[i] if i < len(arxiv_ids) else f'paper_{i}'
+                print(f"\n  {arxiv_id}:")
+                print(f"    Metadata domains: {domain_list} (type: {type(domain_list)})")
+                print(f"    Metadata categories: {categories_list} (type: {type(categories_list)})")
+                print(f"    Combined categories for classification: {all_categories}")
+            
             paper_dict = {
                 'categories': all_categories,  # Use combined list
                 'domains': domain_list,  # Also set 'domains' field explicitly
@@ -300,6 +315,8 @@ class ExpertActivationHook:
                 'abstract': abstract
             }
             domain = classify_paper_domain(paper_dict)
+            if len(self.paper_domains) < 5:
+                print(f"    Classified as: {domain}")
             self.paper_domains.append(domain)
     
     def get_activations(self) -> Dict:
@@ -986,12 +1003,19 @@ def evaluate_model(
     # Classify all papers to get domain distribution
     print("Classifying papers for stratified split...")
     file_domains = []
+    sample_count = 0
     for arxiv_id, _ in all_files:
         meta = metadata.get(arxiv_id, {})
         domains = meta.get('domains', [])
         categories = meta.get('categories', [])  # Get ArXiv categories
         title = meta.get('title', '')
         abstract = meta.get('abstract', '')
+        
+        # Debug: Show first 5 papers
+        if sample_count < 5:
+            print(f"\n  {arxiv_id}:")
+            print(f"    Metadata domains: {domains} (type: {type(domains)})")
+            print(f"    Metadata categories: {categories} (type: {type(categories)})")
         
         # Combine categories and domains for classification
         all_cats = []
@@ -1013,7 +1037,11 @@ def evaluate_model(
             'abstract': abstract
         }
         domain = classify_paper_domain(paper_dict)
+        if sample_count < 5:
+            print(f"    Combined categories for classification: {all_cats}")
+            print(f"    Classified as: {domain}")
         file_domains.append((arxiv_id, domain))
+        sample_count += 1
     
     # Group files by domain
     from collections import defaultdict

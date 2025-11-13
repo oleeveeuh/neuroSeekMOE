@@ -141,29 +141,34 @@ class ArXivStreamingDataset(IterableDataset):
         Args:
             metadata: Metadata dictionary to update in-place
         """
-        # Try common paths for original arxiv_papers.jsonl
+        # Try common paths for original arxiv_papers.jsonl or arxiv_raw_output.jsonl
+        # Note: curated_dataset.jsonl doesn't have categories, only domains
         possible_paths = [
             # Relative to metadata file
             os.path.join(os.path.dirname(self.metadata_jsonl), 'arxiv_papers.jsonl'),
+            os.path.join(os.path.dirname(self.metadata_jsonl), 'arxiv_raw_output.jsonl'),
             os.path.join(os.path.dirname(os.path.dirname(self.metadata_jsonl)), 'arxiv_papers.jsonl'),
+            os.path.join(os.path.dirname(os.path.dirname(self.metadata_jsonl)), 'arxiv_raw_output.jsonl'),
             # Common data directory locations
             './data/arxiv/arxiv_papers.jsonl',
+            './data/arxiv/arxiv_raw_output.jsonl',
             './arxiv_papers.jsonl',
             # Colab Drive paths
             '/content/drive/MyDrive/neuroMOE_results/data/arxiv/arxiv_papers.jsonl',
+            '/content/drive/MyDrive/neuroMOE_results/data/arxiv/arxiv_raw_output.jsonl',
             '/content/drive/MyDrive/neuroMOE/data/arxiv/arxiv_papers.jsonl',
+            '/content/drive/MyDrive/neuroMOE/data/arxiv/arxiv_raw_output.jsonl',
         ]
         
         # Also try to infer from processed_dataset.jsonl path
         if 'processed_dataset.jsonl' in self.metadata_jsonl:
             base_dir = os.path.dirname(self.metadata_jsonl)
+            possible_paths.insert(0, os.path.join(base_dir, 'arxiv_raw_output.jsonl'))
             possible_paths.insert(0, os.path.join(base_dir, 'arxiv_papers.jsonl'))
             # Try parent directory
             parent_dir = os.path.dirname(base_dir)
+            possible_paths.insert(0, os.path.join(parent_dir, 'arxiv_raw_output.jsonl'))
             possible_paths.insert(0, os.path.join(parent_dir, 'arxiv_papers.jsonl'))
-            # Try curated_dataset.jsonl (might have categories)
-            possible_paths.insert(0, os.path.join(base_dir, 'curated_dataset.jsonl'))
-            possible_paths.insert(0, os.path.join(parent_dir, 'curated_dataset.jsonl'))
         
         categories_loaded = 0
         fallback_file = None
@@ -182,12 +187,18 @@ class ArXivStreamingDataset(IterableDataset):
         # Load categories from fallback file
         print(f"   Loading categories from {fallback_file}...")
         try:
+            total_records = 0
+            matched_ids = 0
+            found_categories = 0
+            
             with open(fallback_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     if not line.strip():
                         continue
                     try:
                         record = json.loads(line)
+                        total_records += 1
+                        
                         # Try different ID field names
                         arxiv_id = record.get('arxiv_id') or record.get('id') or record.get('paper_id')
                         if not arxiv_id:
@@ -197,17 +208,40 @@ class ArXivStreamingDataset(IterableDataset):
                                 arxiv_id = entry_id.split('/')[-1]
                         
                         if arxiv_id and arxiv_id in metadata:
+                            matched_ids += 1
+                            
                             # Get categories from original file
+                            # Try different field names
                             categories = record.get('categories', [])
-                            if categories and not metadata[arxiv_id].get('categories'):
-                                metadata[arxiv_id]['categories'] = categories
-                                categories_loaded += 1
-                    except (json.JSONDecodeError, KeyError):
+                            if not categories:
+                                # Some files might have categories in a different format
+                                categories = record.get('category', [])
+                            if not categories:
+                                # Try to extract from primary_category
+                                primary_cat = record.get('primary_category', '')
+                                if primary_cat:
+                                    categories = [primary_cat]
+                            
+                            # Normalize categories to list
+                            if categories and not isinstance(categories, list):
+                                categories = [categories] if categories else []
+                            
+                            if categories:
+                                found_categories += 1
+                                if not metadata[arxiv_id].get('categories'):
+                                    metadata[arxiv_id]['categories'] = categories
+                                    categories_loaded += 1
+                    except (json.JSONDecodeError, KeyError) as e:
                         continue
             
+            print(f"   Processed {total_records} records from fallback file")
+            print(f"   Matched {matched_ids} IDs with metadata")
+            print(f"   Found categories in {found_categories} records")
             print(f"   Loaded categories for {categories_loaded} papers from fallback file")
         except Exception as e:
             print(f"   Warning: Error loading categories from fallback: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _get_text_files(self) -> List[Tuple[str, str]]:
         """Get list of (arxiv_id, file_path) tuples.

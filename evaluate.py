@@ -67,21 +67,40 @@ def classify_paper_domain(paper: Dict) -> str:
     """Classify paper as ML, Healthcare, Both, or Other.
     
     Args:
-        paper: Dictionary with 'categories', 'title', 'abstract' fields
+        paper: Dictionary with 'categories'/'domains', 'title', 'abstract' fields
         
     Returns:
         Domain label: 'ML', 'Healthcare', 'Both', or 'Other'
     """
-    categories = paper.get('categories', [])
+    # Handle both 'categories' and 'domains' field names
+    categories = paper.get('categories', paper.get('domains', []))
+    if not isinstance(categories, list):
+        categories = [categories] if categories else []
+    
     title = paper.get('title', '').lower() if paper.get('title') else ''
     abstract = paper.get('abstract', '').lower() if paper.get('abstract') else ''
     text = title + ' ' + abstract
     
-    # Check categories
-    has_cs = any(cat.startswith('cs.') or 'stat.' in cat.lower() for cat in categories)
-    has_bio = any('q-bio' in cat or 'bio' in cat.lower() for cat in categories)
+    # Check categories (ArXiv format: 'cs.CV', 'q-bio.NC', etc.)
+    # Also check for processed domain labels like 'medical_imaging', 'neuroscience', etc.
+    has_cs = any(
+        (isinstance(cat, str) and (cat.startswith('cs.') or 'stat.' in cat.lower())) 
+        for cat in categories
+    )
+    has_bio = any(
+        (isinstance(cat, str) and ('q-bio' in cat or 'bio' in cat.lower()))
+        for cat in categories
+    )
     
-    # Check keywords
+    # Check for processed domain labels (from NeMo Curator)
+    healthcare_domain_labels = ['medical_imaging', 'neuroscience', 'clinical', 
+                               'drug_discovery', 'neurodegeneration', 'general_ml_health']
+    has_healthcare_domain = any(
+        (isinstance(cat, str) and cat in healthcare_domain_labels)
+        for cat in categories
+    )
+    
+    # Check keywords in text
     ml_keywords = ['neural network', 'deep learning', 'machine learning', 
                    'convolutional', 'transformer', 'gradient', 'backpropagation',
                    'optimization', 'algorithm', 'model training']
@@ -94,7 +113,7 @@ def classify_paper_domain(paper: Dict) -> str:
     healthcare_keyword_count = sum(1 for kw in healthcare_keywords if kw in text)
     
     has_ml = has_cs or ml_keyword_count >= 2
-    has_healthcare = has_bio or healthcare_keyword_count >= 2
+    has_healthcare = has_bio or has_healthcare_domain or healthcare_keyword_count >= 2
     
     if has_ml and has_healthcare:
         return 'Both'

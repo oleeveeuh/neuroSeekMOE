@@ -218,6 +218,8 @@ class ArXivStreamingDataset(IterableDataset):
             domains = metadata.get('domains', [])
             year = metadata.get('year', None)
             has_neurodegeneration = metadata.get('has_neurodegeneration', False)
+            title = metadata.get('title', '')
+            abstract = metadata.get('abstract', '')
             
             return {
                 'input_ids': input_ids,
@@ -226,6 +228,8 @@ class ArXivStreamingDataset(IterableDataset):
                 'year': year,
                 'arxiv_id': arxiv_id,
                 'has_neurodegeneration': has_neurodegeneration,
+                'title': title,
+                'abstract': abstract,
             }
             
         except Exception as e:

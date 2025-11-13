@@ -241,6 +241,8 @@ class ModelAdapter:
             'domains': domains,
             'years': device_batch.get('years', []),
             'arxiv_ids': device_batch.get('arxiv_ids', []),
+            'titles': batch.get('title', []),  # Get from original batch (not device_batch)
+            'abstracts': batch.get('abstract', []),  # Get from original batch (not device_batch)
             'batch_size': batch_size,
             'seq_len': seq_len,
         }

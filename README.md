@@ -5,7 +5,28 @@
 
 A full-stack machine learning project for training specialized language models on healthcare and neuroscience research papers. This project demonstrates end-to-end ML engineering: from data collection and curation to model training and deployment.
 
-## Results & Achievements
+## Table of Contents
+
+- [Results & Achievements](#results--achievements)
+- [Mixture of Experts (MoE) Architecture](#mixture-of-experts-moe-architecture)
+  - [Architecture Overview](#architecture-overview)
+  - [Expert Choice Routing Mechanism](#expert-choice-routing-mechanism)
+  - [Training Dynamics & Auxiliary Losses](#training-dynamics--auxiliary-losses)
+  - [Domain Specialization](#domain-specialization)
+- [Technical Highlights](#technical-highlights)
+- [NeMo Curator: Domain-Adaptive Pretraining](#nemo-curator-domain-adaptive-pretraining)
+- [Key Features](#key-features)
+- [Pipeline Steps](#pipeline-steps)
+- [Expected Training Times](#expected-training-times)
+- [Google Drive Persistence](#google-drive-persistence)
+- [Model Analysis & Visualization](#model-analysis--visualization)
+- [Configuration](#configuration)
+- [Getting Started](#getting-started)
+- [Challenges & Solutions](#challenges--solutions)
+- [Technologies Used](#technologies-used)
+- [Project Structure](#project-structure)
+
+## Results & Achievements {#results--achievements}
 
 The pipeline successfully:
 
@@ -31,14 +52,14 @@ The pipeline successfully:
 ![Performance Metrics](docs/images/performance_metrics.png)
 *Figure 2: Key Performance Metrics Summary*
 
-## Mixture of Experts (MoE) Architecture
+## Mixture of Experts (MoE) Architecture {#mixture-of-experts-moe-architecture}
 
 The model uses a DeepSeek-MoE inspired architecture that efficiently scales to large models while maintaining computational efficiency.
 
 ![MoE Architecture Diagram](docs/images/moe_architecture.png)
 *Figure 3: MoE Model Architecture Overview*
 
-### Architecture Overview
+### Architecture Overview {#architecture-overview}
 
 The MoE model is structured as a language model with a Mixture of Experts layer replacing the standard feedforward network. The architecture consists of:
 
@@ -82,7 +103,7 @@ The MoE model is structured as a language model with a Mixture of Experts layer 
 
 **Key Point**: Each expert is a simple 2-layer MLP (not a full transformer), enabling efficient scaling to 60+ experts. Experts specialize through routing despite identical architecture.
 
-### Expert Choice Routing Mechanism
+### Expert Choice Routing Mechanism {#expert-choice-routing-mechanism}
 
 Unlike traditional **Token Choice routing** (where tokens choose experts), this implementation uses **Expert Choice routing** where experts select tokens. This approach provides better load balancing and more predictable computation.
 
@@ -130,7 +151,7 @@ Unlike traditional **Token Choice routing** (where tokens choose experts), this 
 
 The forward pass: (1) Token embedding, (2) Expert Choice routing with noise/temperature, (3) Shared experts process all tokens, (4) Routed experts process selected tokens, (5) Combine outputs with learnable weighting, (6) Joint fusion with LayerNorm, (7) Output projection to vocabulary logits.
 
-### Training Dynamics & Auxiliary Losses
+### Training Dynamics & Auxiliary Losses {#training-dynamics--auxiliary-losses}
 
 The model learns effective routing through multiple auxiliary losses:
 
@@ -171,7 +192,7 @@ loss = cross_entropy_loss +
 ![Training Loss Curves](docs/images/training_loss_curves.png)
 *Figure 7: Training Loss Curves and Auxiliary Losses*
 
-### Domain Specialization
+### Domain Specialization {#domain-specialization}
 
 ![Expert Specialization](docs/images/expert_specialization.png)
 *Figure 8: Expert Specialization Patterns Across Healthcare Domains*
@@ -208,26 +229,41 @@ temperature_steps: 1000
 
 Uses `torch.scatter_add_` for GPU-accelerated expert aggregation, soft routing probabilities for gradients, and comprehensive monitoring (entropy, load imbalance, expert utilization, capacity tracking).
 
-## Technical Highlights
+## Technical Highlights {#technical-highlights}
 
 - **Memory Efficiency**: Streaming I/O, batch-based collection, custom IterableDataset, aggressive garbage collection (<500MB RAM)
 - **Scalability**: Processes 30-40k papers efficiently with resume capability and parallel processing
 - **Configuration**: All parameters configurable via YAML
 
-## NeMo Curator: Domain-Adaptive Pretraining
+## NeMo Curator: Domain-Adaptive Pretraining {#nemo-curator-domain-adaptive-pretraining}
 
 ![NeMo Curator Pipeline](docs/images/nemo_curator_pipeline.png)
 *Figure 9: NeMo Curator Processing Pipeline*
 
 NeMo Curator enables domain-adaptive pretraining through: (1) Quality filtering (removes low-quality, non-English content), (2) Domain classification (identifies healthcare subdomains, relevance scoring >0.4), (3) Medical terminology preservation, (4) Research structure maintenance (section boundaries), (5) Fuzzy deduplication (MinHash similarity 0.95). This creates a curated, domain-specific dataset enabling the model to learn healthcare-specific patterns from the start.
 
-## Key Features
+## Key Features {#key-features}
 
 - **Data Pipeline**: RAM-efficient batch processing (25 papers/batch), 21 diverse query combinations, streaming to disk, automatic checkpointing
 - **Training**: Memory-efficient streaming (<500MB RAM), Colab-optimized (mixed precision, gradient accumulation), domain-aware loss, checkpointing every 5000 steps, baseline model for comparison
 - **Evaluation**: Comprehensive metrics (perplexity, domain accuracy, MRR@20, section classification), fast inference (<100ms/paper), embedding generation, domain classification
 
-## Expected Training Times
+## Pipeline Steps {#pipeline-steps}
+
+The complete pipeline consists of 8 sequential steps:
+
+1. **Collection**: Query ArXiv API for healthcare+ML papers, save metadata to `arxiv_papers.jsonl`
+2. **PDF Extraction**: Extract text from PDFs, save to `texts/` directory (one `.txt` file per paper)
+3. **NeMo Curator**: Quality filtering, domain classification, deduplication → `curated_dataset.jsonl`
+4. **Processing**: Text cleaning, domain classification, section extraction → `processed_dataset.jsonl`
+5. **Tokenizer Training**: Train SentencePiece tokenizer on processed text → `healthcare_tokenizer.model`
+6. **Model Training**: Train MoE model (or baseline) with checkpoints every 5000 steps
+7. **Evaluation**: Compute metrics, generate `eval_results.json` and `expert_activations.npz`
+8. **Inference**: Export model for production use
+
+See [Getting Started](#getting-started) for detailed commands.
+
+## Expected Training Times {#expected-training-times}
 
 ### Tokenizer Training
 Tokenizer training time depends on the size of your processed dataset:
@@ -290,7 +326,7 @@ For a typical run with **5,000-10,000 processed papers** on **Google Colab**:
 
 **Tips**: Use GPU, reduce `max_steps` for testing, increase `batch_size` if VRAM allows, use gradient accumulation, resume from checkpoints
 
-## Google Drive Persistence
+## Google Drive Persistence {#google-drive-persistence}
 
 When running on Google Colab with `use_drive: true` (default), **all pipeline outputs are automatically saved to Google Drive** for persistence across runtime interruptions.
 
@@ -308,7 +344,7 @@ All data files are saved to `/content/drive/MyDrive/neuroMOE_results/data/arxiv/
 
 **Benefits**: Persistent storage, automatic resume capability, no data loss on runtime timeout. Configure in `config.yaml` with `use_drive: true` and `drive_base` path. The Colab notebook includes `restore_from_drive()` to automatically restore all data.
 
-## Model Analysis & Visualization
+## Model Analysis & Visualization {#model-analysis--visualization}
 
 ![Model Analysis Dashboard](docs/images/model_analysis_dashboard.png)
 *Figure 10: Model Analysis Notebook Overview*
@@ -354,17 +390,17 @@ pip install umap-learn wordcloud networkx bertviz transformers matplotlib-venn n
 
 **Usage**: Run setup cells, download NLTK data. Notebook auto-configures paths (Drive/Colab or local). Update path variables if data is elsewhere. Some sections (t-SNE, UMAP, topic modeling) can be slow - consider sampling. **Expected Runtime**: ~1-2 hours total.
 
-## Configuration
+## Configuration {#configuration}
 
 All parameters configurable via `config.yaml`: paper collection limits, NeMo Curator thresholds, training hyperparameters, evaluation settings, inference options.
 
-## Challenges & Solutions
+## Challenges & Solutions {#challenges--solutions}
 
 - **Memory Management**: Streaming I/O, batch-based collection, custom IterableDataset for disk streaming
 - **Data Quality**: Multi-stage NeMo Curator filtering (quality checks, domain relevance, deduplication)
 - **Colab Constraints**: Mixed precision, gradient accumulation, frequent checkpointing, automatic resume
 
-## Technologies Used
+## Technologies Used {#technologies-used}
 
 - **Python 3.8+**: Core language
 - **PyTorch**: Deep learning framework
@@ -374,7 +410,7 @@ All parameters configurable via `config.yaml`: paper collection limits, NeMo Cur
 - **Dask**: Parallel processing for NeMo Curator
 - **scikit-learn**: Evaluation metrics
 
-## Project Structure
+## Project Structure {#project-structure}
 
 ```
 neuroseek-moe/
@@ -394,7 +430,7 @@ neuroseek-moe/
     └── model_analysis.ipynb        # Comprehensive model analysis and visualization
 ```
 
-## Getting Started
+## Getting Started {#getting-started}
 
 ### Quick Start (Google Colab)
 
@@ -423,22 +459,31 @@ pip install -r requirements.txt
 python run_pipeline.py --config config.yaml
 ```
 
-**Option 2: Step-by-Step**
+**Option 2: Step-by-Step** (See [Pipeline Steps](#pipeline-steps) for overview)
+
+**Step 1: Collection**
 ```bash
-# Collect papers
 python data_pipeline.py collect --max-papers 40000
+```
 
-# Extract PDF texts
+**Step 2: PDF Extraction**
+```bash
 python data_pipeline.py extract --input ./data/arxiv/arxiv_papers.jsonl --output-dir ./data/arxiv/texts
+```
 
-# Curate with NeMo Curator (Linux only)
+**Step 3: NeMo Curator** (Linux only)
+```bash
 python data_pipeline.py curate --text-dir ./data/arxiv/texts --metadata ./data/arxiv/arxiv_papers.jsonl --output ./data/arxiv/curated_dataset.jsonl
+```
 
-# Process and train tokenizer
+**Step 4: Processing & Tokenizer Training**
+```bash
 python data_pipeline.py process --input ./data/arxiv/curated_dataset.jsonl --output ./data/arxiv/processed_dataset.jsonl
 python data_pipeline.py tokenize --input ./data/arxiv/processed_dataset.jsonl --output-dir ./data/arxiv
+```
 
-# Train MoE model
+**Step 5: Train MoE Model**
+```bash
 python train_colab.py \
     --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
     --dataset-text-dir ./data/arxiv/texts \
@@ -448,8 +493,10 @@ python train_colab.py \
     --gradient-accumulation 4 \
     --max-steps 50000 \
     --learning-rate 5e-4
+```
 
-# Run evaluation (automatically captures expert activations)
+**Step 6: Evaluation**
+```bash
 python evaluate.py \
     --model-checkpoint ./checkpoints/step_50000.pt \
     --dataset-text-dir ./data/arxiv/texts \
@@ -457,8 +504,11 @@ python evaluate.py \
     --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
     --output-dir ./evaluations
 # Note: expert_activations.npz is automatically saved during evaluation
+```
 
-# Train baseline model (standard transformer without MoE)
+**Step 7: Train Baseline Model** (Optional, for comparison)
+```bash
+# Train with epochs
 python train_baseline.py \
     --dataset-text-dir ./data/arxiv/texts \
     --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
@@ -468,9 +518,8 @@ python train_baseline.py \
     --epochs 10 \
     --batch-size 8 \
     --learning-rate 5e-4
-# Note: This generates baseline_results.json for comparison with MoE model
 
-# Or train baseline with steps (to match train_colab.py):
+# Or train with steps (to match MoE training)
 python train_baseline.py \
     --dataset-text-dir ./data/arxiv/texts \
     --dataset-metadata ./data/arxiv/processed_dataset.jsonl \

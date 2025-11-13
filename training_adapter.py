@@ -122,6 +122,9 @@ class ModelAdapter:
         device_batch['domains'] = batch.get('domains', [])
         device_batch['years'] = batch.get('years', [])
         device_batch['arxiv_ids'] = batch.get('arxiv_ids', [])
+        device_batch['categories'] = batch.get('categories', [])  # Include categories
+        device_batch['title'] = batch.get('title', [])  # Include titles
+        device_batch['abstract'] = batch.get('abstract', [])  # Include abstracts
         
         return device_batch
     
@@ -248,18 +251,10 @@ class ModelAdapter:
         # Compute loss
         loss = self._compute_loss(logits, target_ids, domain_weights_tensor)
         
-        # Get categories from batch (categories are lists, not tensors, so get from original batch)
-        categories = batch.get('categories', device_batch.get('categories', []))
-        
-        # Debug: Check if categories are in batch (first batch only)
-        if not hasattr(self, '_debug_categories_checked'):
-            self._debug_categories_checked = True
-            has_categories_in_batch = 'categories' in batch
-            has_categories_in_device = 'categories' in device_batch
-            categories_len = len(categories) if categories else 0
-            print(f"DEBUG ModelAdapter: has_categories_in_batch={has_categories_in_batch}, has_categories_in_device={has_categories_in_device}, categories_len={categories_len}")
-            if categories and len(categories) > 0:
-                print(f"DEBUG ModelAdapter: sample categories[0]={categories[0]}")
+        # Get categories from device_batch (now included in _move_to_device)
+        categories = device_batch.get('categories', [])
+        titles = device_batch.get('title', [])
+        abstracts = device_batch.get('abstract', [])
         
         # Prepare batch metadata
         batch_metadata = {
@@ -267,8 +262,8 @@ class ModelAdapter:
             'categories': categories,  # Include original ArXiv categories
             'years': device_batch.get('years', []),
             'arxiv_ids': device_batch.get('arxiv_ids', []),
-            'titles': batch.get('title', []),  # Get from original batch (not device_batch)
-            'abstracts': batch.get('abstract', []),  # Get from original batch (not device_batch)
+            'titles': titles,  # Include titles
+            'abstracts': abstracts,  # Include abstracts
             'batch_size': batch_size,
             'seq_len': seq_len,
         }

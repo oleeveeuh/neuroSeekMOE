@@ -342,12 +342,20 @@ class ArXivStreamingDataset(IterableDataset):
                     exists = arxiv_id in self.metadata
                     sample_keys = list(self.metadata.keys())[:3] if self.metadata else []
                     print(f"DEBUG _process_paper: {arxiv_id} - metadata is EMPTY, arxiv_id in metadata: {exists}, sample keys: {sample_keys}, total metadata entries: {len(self.metadata) if self.metadata else 0}")
-                elif not metadata.get('categories'):
-                    print(f"DEBUG _process_paper: {arxiv_id} - metadata keys: {list(metadata.keys())}, categories: {metadata.get('categories', [])}")
+                else:
+                    categories_in_meta = metadata.get('categories', [])
+                    has_categories = bool(categories_in_meta)
+                    print(f"DEBUG _process_paper: {arxiv_id} - metadata keys: {list(metadata.keys())}, has_categories: {has_categories}, categories: {categories_in_meta}")
                 self._debug_count += 1
             
             domains = metadata.get('domains', [])
             categories = metadata.get('categories', [])  # Original ArXiv categories
+            
+            # Ensure categories is a list
+            if categories and not isinstance(categories, list):
+                categories = [categories] if categories else []
+            elif not categories:
+                categories = []
             
             year = metadata.get('year', None)
             has_neurodegeneration = metadata.get('has_neurodegeneration', False)

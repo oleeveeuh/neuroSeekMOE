@@ -150,12 +150,13 @@ class ExpertActivationHook:
     Captures routing decisions by intercepting model forward passes.
     """
     
-    def __init__(self, model: nn.Module, text_dir: Optional[str] = None):
+    def __init__(self, model: nn.Module, text_dir: Optional[str] = None, metadata_dict: Optional[Dict] = None):
         """Initialize hook.
         
         Args:
             model: The model to hook into (should be SimpleMoEModel or wrapper)
             text_dir: Optional path to text files directory (for fallback classification)
+            metadata_dict: Optional metadata dictionary for fallback category lookup
         """
         self.expert_selections = []  # List of (batch_size, top_k) arrays
         self.expert_probs = []  # List of (batch_size, num_experts) arrays
@@ -163,6 +164,7 @@ class ExpertActivationHook:
         self.paper_domains = []  # List of domain labels
         self.model = model
         self.text_dir = text_dir  # Store text directory for fallback
+        self._metadata_dict = metadata_dict  # Store metadata dict for fallback category lookup
         
         # Store original forward method
         if hasattr(model, 'base_model'):
@@ -270,12 +272,26 @@ class ExpertActivationHook:
                 else:
                     categories_list = []
             
+            # Fallback: If categories are empty, try to look them up from metadata file
+            # This handles cases where categories weren't passed through the batch
+            if not categories_list and i < len(arxiv_ids):
+                arxiv_id = arxiv_ids[i]
+                # Try to get categories from the dataset's metadata if available
+                # We'll need to store a reference to the dataset or metadata dict
+                if hasattr(self, '_metadata_dict') and self._metadata_dict:
+                    paper_meta = self._metadata_dict.get(arxiv_id, {})
+                    categories_list = paper_meta.get('categories', [])
+                    if categories_list and not isinstance(categories_list, list):
+                        categories_list = [categories_list] if categories_list else []
+            
             # Debug: Check if categories are missing in batch_metadata (first 5 papers)
             if len(self.paper_domains) < 5:
                 arxiv_id = arxiv_ids[i] if i < len(arxiv_ids) else f'paper_{i}'
                 has_categories_in_batch = 'categories' in batch_metadata
                 batch_categories_len = len(batch_metadata.get('categories', [])) if has_categories_in_batch else 0
                 print(f"DEBUG activation_hook: {arxiv_id} - has_categories_in_batch={has_categories_in_batch}, batch_categories_len={batch_categories_len}, categories_list={categories_list}")
+                if not categories_list:
+                    print(f"  WARNING: categories_list is empty for {arxiv_id}, trying fallback lookup...")
             
             # Try to get title/abstract from batch metadata if available
             title = ''
@@ -284,6 +300,16 @@ class ExpertActivationHook:
                 title = batch_metadata['titles'][i] or ''
             if 'abstracts' in batch_metadata and i < len(batch_metadata.get('abstracts', [])):
                 abstract = batch_metadata['abstracts'][i] or ''
+            
+            # Fallback: If title/abstract are empty, try to get them from metadata dict
+            if (not title or not abstract) and i < len(arxiv_ids):
+                arxiv_id = arxiv_ids[i]
+                if hasattr(self, '_metadata_dict') and self._metadata_dict:
+                    paper_meta = self._metadata_dict.get(arxiv_id, {})
+                    if not title:
+                        title = paper_meta.get('title', '')
+                    if not abstract:
+                        abstract = paper_meta.get('abstract', '')
             
             # If domains are empty and we have text_dir, try to read text file for classification
             if not domain_list and not categories_list and self.text_dir and i < len(arxiv_ids):
@@ -316,6 +342,7 @@ class ExpertActivationHook:
                 print(f"\n  {arxiv_id}:")
                 print(f"    Metadata domains: {domain_list} (type: {type(domain_list)})")
                 print(f"    Metadata categories: {categories_list} (type: {type(categories_list)})")
+                print(f"    Title length: {len(title)}, Abstract length: {len(abstract)}")
                 print(f"    Combined categories for classification: {all_categories}")
             
             paper_dict = {
@@ -1148,6 +1175,17 @@ def evaluate_model(
             self.metadata = metadata_dict
             self.text_files = text_files
             self._estimated_length = None
+            
+            # Debug: Verify metadata has categories for test files
+            if len(text_files) > 0:
+                sample_id = text_files[0][0]
+                sample_meta = metadata_dict.get(sample_id, {})
+                has_cats = 'categories' in sample_meta and sample_meta.get('categories')
+                print(f"DEBUG TestDataset: Sample paper {sample_id} has categories: {has_cats}, categories: {sample_meta.get('categories', [])}")
+        
+        def _get_text_files(self) -> List[Tuple[str, str]]:
+            """Override to use the provided text_files instead of scanning directory."""
+            return self.text_files
     
     test_dataset = TestDataset(
         test_files,
@@ -1180,7 +1218,11 @@ def evaluate_model(
     
     # Initialize activation hook for capturing expert routing
     print("\nInitializing expert activation capture...")
-    activation_hook = ExpertActivationHook(model, text_dir=dataset_text_dir)
+    activation_hook = ExpertActivationHook(
+        model, 
+        text_dir=dataset_text_dir,
+        metadata_dict=full_dataset.metadata  # Pass metadata for fallback category lookup
+    )
     
     # Compute metrics
     print("\nComputing metrics...")

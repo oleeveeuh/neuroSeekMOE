@@ -187,6 +187,20 @@ class ExpertActivationHook:
             batch_metadata: Batch metadata with paper IDs and domains
             top_k: Number of top experts selected
         """
+        # Debug: Check what batch_metadata contains when received
+        if not hasattr(self, '_debug_batch_metadata_received'):
+            self._debug_batch_metadata_received = True
+            if batch_metadata:
+                print(f"DEBUG activation_hook.capture_batch: batch_metadata keys: {list(batch_metadata.keys())}")
+                print(f"DEBUG activation_hook.capture_batch: 'categories' in batch_metadata: {'categories' in batch_metadata}")
+                if 'categories' in batch_metadata:
+                    cats = batch_metadata['categories']
+                    print(f"DEBUG activation_hook.capture_batch: batch_metadata['categories'] type: {type(cats)}, len: {len(cats) if cats else 0}")
+                else:
+                    print(f"DEBUG activation_hook.capture_batch: 'categories' key is MISSING from batch_metadata!")
+            else:
+                print(f"DEBUG activation_hook.capture_batch: batch_metadata is None!")
+        
         # Move to CPU and detach
         if isinstance(gate_logits, torch.Tensor):
             gate_logits_np = gate_logits.detach().cpu()

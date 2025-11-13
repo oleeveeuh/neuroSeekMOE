@@ -1149,6 +1149,14 @@ def evaluate_model(
         min_length=64
     )
     
+    # Debug: Check if categories are in metadata for test files
+    sample_test_ids = [arxiv_id for arxiv_id, _ in test_files[:3]]
+    print(f"\nDebug: Checking categories in metadata for sample test papers:")
+    for arxiv_id in sample_test_ids:
+        meta = full_dataset.metadata.get(arxiv_id, {})
+        has_categories = 'categories' in meta and meta.get('categories')
+        print(f"  {arxiv_id}: has_categories={has_categories}, categories={meta.get('categories', [])}")
+    
     print(f"Created test dataset: {len(test_files)} papers")
     
     # Create test dataloader

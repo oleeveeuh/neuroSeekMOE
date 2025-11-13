@@ -334,6 +334,14 @@ class ArXivStreamingDataset(IterableDataset):
             metadata = self.metadata.get(arxiv_id, {})
             domains = metadata.get('domains', [])
             categories = metadata.get('categories', [])  # Original ArXiv categories
+            
+            # Debug: Check if categories are missing (only for first few papers)
+            if not hasattr(self, '_debug_count'):
+                self._debug_count = 0
+            if self._debug_count < 3 and not categories:
+                print(f"DEBUG _process_paper: {arxiv_id} - metadata keys: {list(metadata.keys())}, categories: {categories}")
+                self._debug_count += 1
+            
             year = metadata.get('year', None)
             has_neurodegeneration = metadata.get('has_neurodegeneration', False)
             title = metadata.get('title', '')

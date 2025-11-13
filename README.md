@@ -77,28 +77,10 @@ The MoE model is structured as a language model with a Mixture of Experts layer 
   - Reduce computation through sparsity (only subset of experts active per token)
 - **Structure**: Same as shared experts, but only processes selected tokens
 
-### Expert Network Architecture
-
-Each expert (both shared and routed) is a **simple 2-layer MLP** (Multi-Layer Perceptron), not a full transformer or LLM:
-
-```python
-Expert = Sequential(
-    Linear(embedding_dim, 4 * embedding_dim),  # Expansion: 768 → 3072
-    ReLU(),                                     # Activation
-    Linear(4 * embedding_dim, embedding_dim),   # Projection: 3072 → 768
-)
-```
-
-**Why This Design?**
-- **Standard FFN Structure**: Matches the feedforward network pattern used in Transformer blocks
-- **Efficiency**: Lightweight per expert, enabling many experts without excessive computation
-- **Specialization**: Each expert learns different patterns through routing, despite identical architecture
-- **Scalability**: Can scale to 60+ experts without proportional increase in compute
-
-**Key Point**: Experts are NOT full transformers or LLMs—they are simple feedforward networks that specialize through the routing mechanism.
-
 ![Expert Network Architecture](docs/images/expert_network.png)
 *Figure 4: Expert Network Structure (2-layer MLP)*
+
+**Key Point**: Each expert is a simple 2-layer MLP (not a full transformer), enabling efficient scaling to 60+ experts. Experts specialize through routing despite identical architecture.
 
 ### Expert Choice Routing Mechanism
 
@@ -146,49 +128,7 @@ Unlike traditional **Token Choice routing** (where tokens choose experts), this 
 ![Forward Pass Diagram](docs/images/forward_pass_flow.png)
 *Figure 6: Complete Forward Pass Through MoE Layer*
 
-The complete forward pass through the MoE layer:
-
-```
-1. Token Embedding
-   Input: [batch, seq_len] token indices
-   → Embedding Layer
-   → Output: [batch, seq_len, embedding_dim]
-
-2. Routing Decision
-   → Gate computes logits: [batch*seq_len, num_routed_experts]
-   → Add noise (training) + temperature scaling
-   → Expert Choice routing: each expert selects top_k tokens
-   → Output: token_indices [num_experts, top_k], expert_probs [num_experts, top_k]
-
-3. Shared Expert Processing
-   → Process ALL tokens through shared experts
-   → Average outputs across shared experts
-   → Output: [batch, seq_len, embedding_dim]
-
-4. Routed Expert Processing
-   → Gather tokens selected by each routed expert
-   → Process through respective expert networks
-   → Weight by routing probabilities
-   → Scatter outputs back to token positions
-   → Output: [batch, seq_len, embedding_dim]
-
-5. Expert Output Combination
-   → Handle unprocessed tokens (fail-safe to shared experts)
-   → Learnable weighting: shared_scale * shared + routed_scale * routed
-   → shared_scale = sigmoid(shared_expert_weight) ≈ 0.3-0.5
-   → Output: [batch, seq_len, embedding_dim]
-
-6. Joint Fusion
-   → Process through joint fusion MLP
-   → Apply LayerNorm + residual connection
-   → Apply dropout (training only)
-   → Output: [batch, seq_len, embedding_dim]
-
-7. Output Projection
-   → Apply LayerNorm + residual connection to input embeddings
-   → Decoder MLP: [embedding_dim → 4*embedding_dim → vocab_size]
-   → Output: [batch, seq_len, vocab_size] logits for next-token prediction
-```
+The forward pass: (1) Token embedding, (2) Expert Choice routing with noise/temperature, (3) Shared experts process all tokens, (4) Routed experts process selected tokens, (5) Combine outputs with learnable weighting, (6) Joint fusion with LayerNorm, (7) Output projection to vocabulary logits.
 
 ### Training Dynamics & Auxiliary Losses
 
@@ -236,41 +176,13 @@ loss = cross_entropy_loss +
 ![Expert Specialization](docs/images/expert_specialization.png)
 *Figure 8: Expert Specialization Patterns Across Healthcare Domains*
 
-Through training on curated healthcare data, routed experts naturally specialize:
-
-- **Expert 1**: Focuses on neurodegeneration terminology (Alzheimer's, Parkinson's, etc.)
-- **Expert 2**: Specializes in medical imaging language (MRI, CT, segmentation, etc.)
-- **Expert 3**: Handles clinical terminology (diagnosis, treatment, prognosis, etc.)
-- **Expert 4**: Processes drug discovery language (compounds, trials, efficacy, etc.)
-- **Shared Experts**: Maintain general language understanding and scientific writing patterns
-
-The routing mechanism learns to match tokens to domain-appropriate experts through:
-- Training on domain-labeled data (neurodegeneration, neuroscience, medical imaging, etc.)
-- Domain-aware loss weighting (higher weight for neurodegeneration/neuroscience papers)
-- Natural specialization through gradient-based learning
+Routed experts naturally specialize on healthcare subdomains (neurodegeneration, medical imaging, clinical terminology, drug discovery) through training on curated domain-labeled data with domain-aware loss weighting. Shared experts maintain general language understanding.
 
 ### Key Advantages
 
-**1. Computational Efficiency**
-- Only activates subset of experts per token (sparse activation)
-- Default: 2 shared experts (always active) + ~2 routed experts per token (top_k=2)
-- Total active parameters per forward pass: ~50M (vs ~100M total parameters)
-- Enables scaling to 60+ experts without proportional compute increase
-
-**2. Specialization**
-- Routed experts specialize on different healthcare subdomains
-- Shared experts maintain general language understanding
-- Natural domain adaptation through routing
-
-**3. Scalability**
-- Can scale to 60+ experts for larger models
-- Computation scales with number of active experts, not total experts
-- Memory-efficient: experts share same architecture, only weights differ
-
-**4. Robustness**
-- Shared experts ensure all tokens processed (fail-safe)
-- Capacity control prevents expert overload
-- Load balancing prevents expert collapse
+- **Computational Efficiency**: Sparse activation (~50M active params vs 100M total), scales to 60+ experts
+- **Specialization**: Routed experts specialize on healthcare subdomains; shared experts maintain general understanding
+- **Robustness**: Fail-safe mechanism, capacity control, load balancing prevent expert collapse
 
 ### Configuration Parameters
 
@@ -294,127 +206,26 @@ temperature_steps: 1000
 
 ### Implementation Details
 
-**Vectorized Expert Processing:**
-- Uses `torch.scatter_add_` for efficient GPU-accelerated expert output aggregation
-- Batch processing: all experts process in parallel
-- Memory-efficient: only stores active expert outputs
-
-**Gradient Flow:**
-- Uses soft routing probabilities for gradient computation (differentiable)
-- Straight-through estimator (STE) for discrete routing decisions
-- All auxiliary losses are differentiable and backpropagate through routing
-
-**Monitoring & Debugging:**
-- Routing metrics: entropy, load imbalance, expert utilization, token concentration
-- Capacity tracking: dropped token fraction, expert utilization rate
-- Comprehensive logging for routing health monitoring
+Uses `torch.scatter_add_` for GPU-accelerated expert aggregation, soft routing probabilities for gradients, and comprehensive monitoring (entropy, load imbalance, expert utilization, capacity tracking).
 
 ## Technical Highlights
 
-### Memory Efficiency
-One of the main challenges was handling large datasets without running out of memory. I solved this by:
-- Implementing streaming I/O at every stage (no full dataset in RAM)
-- Batch-based collection with automatic memory monitoring
-- Custom IterableDataset that streams papers during training
-- Aggressive garbage collection and memory cleanup
-
-### Data Quality & Domain Adaptation
-NeMo Curator enables effective domain-adaptive pretraining through:
-- **Quality Filtering**: Removes low-quality content (short texts, high noise, non-English)
-- **Domain Classification**: Identifies and scores healthcare subdomains (neurodegeneration, neuroscience, medical imaging, clinical, drug discovery)
-- **Relevance Scoring**: Combines healthcare domain keywords with ML method keywords to ensure domain-specific relevance
-- **Medical Term Preservation**: Maintains critical terminology (disease names, abbreviations, scientific terms)
-- **Section Extraction**: Preserves research paper structure (Abstract, Introduction, Methods, Results, Discussion)
-- **Deduplication**: Fuzzy deduplication removes near-duplicate papers, ensuring diverse training data
-
-This curation process creates a domain-specific dataset that enables the model to learn healthcare-specific patterns, terminology, and research contexts, effectively performing domain-adaptive pretraining.
-
-### Scalability
-The pipeline is designed to scale:
-- Processes 30-40k papers efficiently
-- Resume capability at every stage (no data loss on interruption)
-- Parallel processing where possible (PDF extraction, text processing)
-- Configurable via YAML for easy experimentation
+- **Memory Efficiency**: Streaming I/O, batch-based collection, custom IterableDataset, aggressive garbage collection (<500MB RAM)
+- **Scalability**: Processes 30-40k papers efficiently with resume capability and parallel processing
+- **Configuration**: All parameters configurable via YAML
 
 ## NeMo Curator: Domain-Adaptive Pretraining
 
 ![NeMo Curator Pipeline](docs/images/nemo_curator_pipeline.png)
 *Figure 9: NeMo Curator Processing Pipeline*
 
-NeMo Curator plays a crucial role in enabling effective domain-adaptive pretraining by creating a high-quality, domain-specific dataset tailored for healthcare language modeling.
-
-### How NeMo Curator Enables Domain Adaptation
-
-**1. Quality-Based Filtering**
-- Removes low-quality content (short texts, high noise ratio, non-English)
-- Ensures minimum content quality (100-5000 tokens, >40% alphanumeric)
-- Filters out boilerplate and repeated content
-- Result: Only high-quality research content reaches the model
-
-**2. Domain-Specific Classification**
-- Identifies healthcare subdomains: neurodegeneration, neuroscience, medical imaging, clinical, drug discovery
-- Scores domain relevance using keyword matching and ML method detection
-- Filters papers to ensure healthcare+ML relevance (relevance score > 0.4)
-- Result: Training data is specifically curated for healthcare domain
-
-**3. Medical Terminology Preservation**
-- Preserves critical medical terms (disease names, abbreviations, scientific terms)
-- Maintains case sensitivity for proper nouns (Alzheimer, Parkinson, etc.)
-- Extracts and tags medical terms by domain
-- Result: Model learns domain-specific vocabulary and terminology
-
-**4. Research Structure Maintenance**
-- Extracts section boundaries (Abstract, Introduction, Methods, Results, Discussion)
-- Preserves scientific paper structure
-- Normalizes citations while maintaining context
-- Result: Model learns research paper structure and scientific writing patterns
-
-**5. Deduplication & Diversity**
-- Fuzzy deduplication removes near-duplicate papers (MinHash similarity 0.95)
-- Ensures diverse training examples
-- Prevents overfitting to repeated content
-- Result: Diverse, high-quality training corpus
-
-### Domain-Adaptive Pretraining Process
-
-The curation pipeline effectively performs domain-adaptive pretraining by:
-
-1. **Data Selection**: Filters 30-40k papers to only high-quality, healthcare-relevant content
-2. **Domain Enrichment**: Ensures each paper has both healthcare domain keywords and ML method keywords
-3. **Terminology Focus**: Preserves and highlights medical terminology throughout preprocessing
-4. **Structure Learning**: Maintains research paper structure so model learns scientific writing patterns
-5. **Quality Assurance**: Multi-stage filtering ensures only the best examples reach training
-
-**Result**: The model is pretrained on a curated, domain-specific dataset rather than generic text, enabling it to:
-- Understand medical terminology and context
-- Recognize healthcare subdomains
-- Generate domain-appropriate text
-- Perform better on healthcare-specific tasks
-
-This is effectively **domain-adaptive pretraining** - the model learns healthcare-specific patterns, terminology, and research contexts from the very beginning of training, rather than being fine-tuned from a general-purpose model.
+NeMo Curator enables domain-adaptive pretraining through: (1) Quality filtering (removes low-quality, non-English content), (2) Domain classification (identifies healthcare subdomains, relevance scoring >0.4), (3) Medical terminology preservation, (4) Research structure maintenance (section boundaries), (5) Fuzzy deduplication (MinHash similarity 0.95). This creates a curated, domain-specific dataset enabling the model to learn healthcare-specific patterns from the start.
 
 ## Key Features
 
-### Data Pipeline
-- **RAM-Efficient Collection**: Batch processing (25 papers/batch) with automatic memory monitoring
-- **21 Diverse Query Combinations**: ML+healthcare/neuroscience queries for broad coverage
-- **Streaming to Disk**: No memory accumulation, writes immediately
-- **Automatic Checkpointing**: Resume capability at every stage
-- **Quality Filtering**: Word count, alphanumeric ratio, language detection, domain relevance
-
-### Training
-- **Memory-Efficient Streaming**: <500MB RAM during training regardless of corpus size
-- **Colab-Optimized**: Mixed precision, gradient accumulation, dynamic batch sizing
-- **Domain-Aware Loss**: Weighted loss for neurodegeneration and neuroscience papers
-- **Checkpointing**: Saves every 5000 steps with resume capability
-- **Baseline Model**: Standard transformer without MoE for performance comparison
-
-### Evaluation & Inference
-- **Comprehensive Metrics**: Perplexity, domain accuracy, MRR@20, section classification
-- **Baseline Comparison**: Train and evaluate baseline transformer model for comparison
-- **Fast Inference**: <100ms per paper on CPU
-- **Embedding Generation**: For similarity search and literature review
-- **Domain Classification**: Automatic healthcare subdomain detection
+- **Data Pipeline**: RAM-efficient batch processing (25 papers/batch), 21 diverse query combinations, streaming to disk, automatic checkpointing
+- **Training**: Memory-efficient streaming (<500MB RAM), Colab-optimized (mixed precision, gradient accumulation), domain-aware loss, checkpointing every 5000 steps, baseline model for comparison
+- **Evaluation**: Comprehensive metrics (perplexity, domain accuracy, MRR@20, section classification), fast inference (<100ms/paper), embedding generation, domain classification
 
 ## Expected Training Times
 
@@ -428,11 +239,7 @@ Tokenizer training time depends on the size of your processed dataset:
 | Large | 15,000-30,000 | 15-30 minutes | Full ArXiv collection |
 | Very Large | 30,000+ | 30-60 minutes | Maximum vocabulary coverage |
 
-**Factors affecting tokenizer training:**
-- **Corpus size**: More papers = longer training
-- **Text length**: Longer papers = more processing
-- **CPU cores**: Uses 4 threads by default (configurable)
-- **Vocabulary size**: Default 50k (larger vocab = slightly longer)
+**Factors**: Corpus size, text length, CPU cores (4 threads default), vocabulary size (50k default)
 
 ### Model Training
 Model training time depends on your hardware and configuration:
@@ -461,12 +268,7 @@ Model training time depends on your hardware and configuration:
 |--------------|-------|----------------|-------|
 | Standard (50k steps) | 50,000 | 3-5 days | Very slow, use GPU if possible |
 
-**Factors affecting training time:**
-- **GPU type**: T4 < V100 < A100 (speed)
-- **Batch size**: Larger = faster but more memory
-- **Sequence length**: Longer sequences = slower
-- **Model size**: More experts/parameters = slower
-- **Gradient accumulation**: More steps = slower but better quality
+**Factors**: GPU type (T4 < V100 < A100), batch size, sequence length, model size, gradient accumulation
 
 ### Complete Pipeline Timeline
 
@@ -486,12 +288,7 @@ For a typical run with **5,000-10,000 processed papers** on **Google Colab**:
 | Evaluation | 10-30 minutes | Metrics computation |
 | **Total** | **12-20 hours** | End-to-end pipeline |
 
-**Tips for faster training:**
-- Use GPU (Colab T4 is free and sufficient)
-- Reduce `max_steps` for testing (e.g., 10k steps = 2-4 hours)
-- Increase `batch_size` if you have more VRAM
-- Use gradient accumulation to simulate larger batches
-- Resume from checkpoints if interrupted
+**Tips**: Use GPU, reduce `max_steps` for testing, increase `batch_size` if VRAM allows, use gradient accumulation, resume from checkpoints
 
 ## Google Drive Persistence
 
@@ -499,374 +296,73 @@ When running on Google Colab with `use_drive: true` (default), **all pipeline ou
 
 ### What Gets Saved to Drive
 
-All data files are saved directly to Google Drive at:
-```
-/content/drive/MyDrive/neuroMOE_results/data/arxiv/
-```
+All data files are saved to `/content/drive/MyDrive/neuroMOE_results/data/arxiv/`:
+- **Collection**: `arxiv_papers.jsonl`, `collection_checkpoint.json`, `collected_ids.db`
+- **Extraction**: `texts/` directory with `.txt` files
+- **Curation**: `curated_dataset.jsonl`, `curated_checkpoint.json`
+- **Processing**: `processed_dataset.jsonl`
+- **Tokenizer**: `healthcare_tokenizer.model`, `.vocab`, metadata files
+- **Training**: `checkpoints/` (step_5000.pt, step_10000.pt, etc.) - Note: local by default, set `checkpoint_dir` in config.yaml for Drive
+- **Evaluation**: `evaluations/` (eval_results.json, baseline_results.json, expert_activations.npz)
+- **Inference**: `inference/` directory
 
-**Step 1: Collection**
-- `arxiv_papers.jsonl` - Collected paper metadata
-- `collection_checkpoint.json` - Collection progress checkpoint
-- `collected_ids.db` - SQLite database for deduplication
-
-**Step 2: PDF Extraction**
-- `texts/` - Directory with extracted `.txt` files (one per paper)
-
-**Step 3: NeMo Curator**
-- `curated_dataset.jsonl` - Curated and filtered papers
-- `curated_checkpoint.json` - Curation progress checkpoint
-
-**Step 4: Processing**
-- `processed_dataset.jsonl` - Processed papers with domain classification
-
-**Step 5: Tokenizer Training**
-- `healthcare_tokenizer.model` - Trained tokenizer model
-- `healthcare_tokenizer.vocab` - Tokenizer vocabulary
-- `tokenizer_metadata.json` - Tokenizer training metadata
-- `tokenizer_validation_report.json` - Validation results
-
-**Step 6: Model Training**
-- `checkpoints/` - Training checkpoints (saved every 5000 steps)
-  - `step_5000.pt`, `step_10000.pt`, etc.
-  - `dataset_metadata.json` - Dataset tracking for resume
-- **Note**: Checkpoints are saved to `./checkpoints/` (local) by default
-  - To save checkpoints to Drive, set `checkpoint_dir` in `config.yaml` to a Drive path
-
-**Step 7: Evaluation**
-- `evaluations/` - Evaluation results and metrics
-  - `eval_results.json` - Standard evaluation results file (for analysis notebook)
-  - `baseline_results.json` - Baseline transformer model results (for comparison)
-  - `evaluation_{timestamp}.json` - Timestamped evaluation files (for tracking multiple runs)
-  - `expert_activations.npz` - Expert activation patterns (automatically generated during MoE evaluation)
-
-**Step 8: Inference**
-- `inference/` - Exported inference pipeline
-
-### Benefits
-
-- **Persistent Storage**: All data survives runtime disconnections
-- **Resume Capability**: Pipeline automatically resumes from Drive checkpoints
-- **No Data Loss**: Even if Colab runtime times out, your data is safe
-- **Automatic**: No manual copying needed - everything saves directly to Drive
-
-### Configuration
-
-In `config.yaml`:
-```yaml
-pipeline:
-  use_drive: true  # Enable Google Drive persistence (default: true)
-  drive_base: "/content/drive/MyDrive/neuroMOE_results"  # Drive path
-```
-
-### Restoring from Drive
-
-The Colab notebook includes a `restore_from_drive()` function that automatically restores:
-- Collected papers and metadata
-- Extracted text files
-- Curated datasets
-- Training checkpoints
-- Trained tokenizer
-
-This allows you to resume exactly where you left off, even after days or weeks.
+**Benefits**: Persistent storage, automatic resume capability, no data loss on runtime timeout. Configure in `config.yaml` with `use_drive: true` and `drive_base` path. The Colab notebook includes `restore_from_drive()` to automatically restore all data.
 
 ## Model Analysis & Visualization
 
 ![Model Analysis Dashboard](docs/images/model_analysis_dashboard.png)
 *Figure 10: Model Analysis Notebook Overview*
 
-The `model_analysis.ipynb` notebook provides comprehensive analysis and visualization of the trained DeepSeek-MoE model, covering everything from dataset statistics to expert specialization patterns to deployment considerations.
-
-### Overview
-
-This Jupyter notebook contains **11 major sections** plus an Executive Summary and Future Directions, providing a complete analysis of:
-- Dataset characteristics and domain distribution
-- Model architecture and configuration
-- Training dynamics and convergence
-- Expert activation patterns and specialization
-- Model performance across domains
-- Attention patterns and embedding analysis
-- Vocabulary and tokenization statistics
-- Research trends and domain insights
-- Efficiency analysis and deployment considerations
-- Model interpretability and qualitative analysis
-- Reproducibility and documentation
+The `model_analysis.ipynb` notebook provides comprehensive analysis with 11 major sections covering: dataset statistics, model architecture, training dynamics, expert specialization, performance metrics, attention patterns, vocabulary analysis, research trends, efficiency analysis, interpretability, and reproducibility.
 
 ### Quick Start
 
 **Prerequisites:**
 ```bash
-# Install required packages (if not already installed)
 pip install matplotlib seaborn plotly pandas numpy scikit-learn torch
-pip install umap-learn wordcloud networkx bertviz transformers matplotlib-venn
-pip install nltk  # For stopwords and tokenization
+pip install umap-learn wordcloud networkx bertviz transformers matplotlib-venn nltk
 ```
 
-**Running the Notebook:**
+**Running:** Open `notebooks/model_analysis.ipynb` in Jupyter and run all cells. The notebook auto-creates output directories and generates sample data if files are missing.
 
-1. **Open the notebook:**
-   ```bash
-   jupyter notebook notebooks/model_analysis.ipynb
-   # Or in JupyterLab:
-   jupyter lab notebooks/model_analysis.ipynb
-   ```
-
-2. **Run all cells sequentially:**
-   - The notebook will automatically create output directories (`./outputs/figures/`, `./outputs/data/`, `./outputs/reports/`)
-   - Each section can be run independently if needed
-
-3. **Expected Data Files:**
-   The notebook expects the following files (will generate sample data if missing):
-   - `./data/arxiv/arxiv_papers.jsonl` - ArXiv papers dataset
-   - `./models/deepseek_moe/config.json` - Model configuration
-   - `./models/deepseek_moe/training_logs.json` - Training logs
-   - `./models/deepseek_moe/eval_results.json` - Evaluation results
-   - `./models/deepseek_moe/expert_activations.npz` - Expert activation data (see note below)
-   - `./models/deepseek_moe/checkpoint.pt` - Model checkpoint
-   - `./evaluations/baseline_results.json` - Baseline model results (optional, for comparison)
-
-   **Google Drive Support (Colab):**
-   - The notebook automatically detects if running in Google Colab
-   - If Google Drive is mounted, it uses paths in `/content/drive/MyDrive/neuroMOE_results/`
-   - Data files are automatically loaded from Drive if available
-   - Outputs (figures, data, reports) are saved to Drive for persistence
-   - Falls back to local paths if Drive is not available
-   - **Evaluation results**: Saved to `/content/drive/MyDrive/neuroMOE_results/evaluations/eval_results.json` (or `./evaluations/eval_results.json` locally)
-   - **Baseline results**: Saved to `/content/drive/MyDrive/neuroMOE_results/evaluations/baseline_results.json` (or `./evaluations/baseline_results.json` locally)
-   - **Expert activations**: Saved to `/content/drive/MyDrive/neuroMOE_results/evaluations/expert_activations.npz` (or `./evaluations/expert_activations.npz` locally)
-     - **Note**: Both files are **automatically generated** during evaluation when you run `evaluate.py`
-     - The evaluation script captures expert routing decisions during the forward pass (single pass, no overhead)
-     - Both files are saved to the evaluations folder (Drive if available, otherwise local)
-     - The notebook will generate sample data if these files are missing (for demonstration only)
+**Expected Data Files:** `arxiv_papers.jsonl`, `config.json`, `training_logs.json`, `eval_results.json`, `expert_activations.npz`, `checkpoint.pt`, `baseline_results.json` (optional). **Note**: `eval_results.json` and `expert_activations.npz` are automatically generated during evaluation. The notebook supports Google Drive (auto-detects Colab, uses Drive paths if mounted, falls back to local).
 
 ### Notebook Structure
 
-**Section 1: Dataset Overview & Statistics**
-- Loads and analyzes ArXiv papers dataset
-- Generates statistics: total papers, date range, categories, domain classification
-- Visualizations: papers over time, category distribution, word clouds, Venn diagrams
+**11 Major Sections:**
+1. **Dataset Overview**: Statistics, domain distribution, visualizations
+2. **Model Architecture**: Configuration, parameters, FLOPs, memory footprint
+3. **Training Dynamics**: Loss curves, MoE-specific metrics (router loss, z-loss, capacity overflow)
+4. **Expert Activation Patterns** *(Most Critical)*: ![Expert Activation Heatmap](docs/images/expert_activation_heatmap.png) *Figure 11: Expert Activation Patterns by Domain* - Domain-specific specialization, similarity matrix, t-SNE/UMAP, routing analysis
+5. **Model Performance**: Overall metrics, domain-specific analysis, baseline comparisons
+6. **Attention Patterns**: Heatmaps, head specialization, embedding visualization (t-SNE)
+7. **Vocabulary Statistics**: Frequency distributions, domain-specific analysis, OOV analysis
+8. **Research Trends**: Temporal analysis, topic modeling (LDA), co-occurrence networks
+9. **Efficiency Analysis**: Computational efficiency, inference latency, deployment considerations
+10. **Interpretability**: Generation showcase, attention visualization, failure mode analysis
+11. **Reproducibility**: Configuration, preprocessing, hardware specs, model card
 
-**Section 2: Model Architecture & Configuration**
-- Loads model configuration and creates architecture summary
-- Calculates model statistics: parameters, FLOPs, memory footprint
-- Generates architecture diagram and expert configuration tables
-
-**Section 3: Training Dynamics & Loss Curves**
-- Analyzes training logs and generates loss curves
-- MoE-specific metrics: router loss, z-loss, expert capacity overflow
-- Expert utilization over training, convergence analysis
-
-**Section 4: Expert Activation Patterns & Specialization** *Most Critical Section*
-
-![Expert Activation Heatmap](docs/images/expert_activation_heatmap.png)
-*Figure 11: Expert Activation Patterns by Domain*
-- Extracts expert activation data from model
-- **Note**: Requires `expert_activations.npz` file (see "Expected Data Files" section)
-- If file is missing, the notebook generates sample data for demonstration
-- Heatmaps showing domain-specific expert specialization
-- Expert similarity matrix, dimensionality reduction (t-SNE/UMAP)
-- Expert routing analysis, "personas", dead expert analysis
-- Expert co-activation network visualization
-- **Note**: Domain classification fix ensures proper ML/Healthcare/Both/Other classification
-
-**Section 5: Model Performance & Evaluation Metrics**
-- Overall performance metrics (perplexity, bits per character)
-- Domain-specific performance analysis
-- Performance by year and category
-- Baseline comparisons (MoE vs baseline transformer), example predictions, error analysis
-- Generation quality metrics, cross-domain transfer analysis
-- **Note**: Baseline comparison requires `baseline_results.json` from `train_baseline.py`
-
-**Section 6: Attention Patterns & Embedding Space Analysis**
-- Attention heatmaps for example sentences
-- Attention head specialization analysis
-- Token embedding visualization (t-SNE)
-- Semantic clustering, embedding drift analysis
-- Contextual embeddings and K-means clustering
-
-**Section 7: Vocabulary & Tokenization Statistics**
-- Vocabulary statistics and frequency distributions
-- Domain-specific vocabulary analysis
-- Tokenization examples, OOV analysis
-- Token length distribution, rare term coverage, n-gram analysis
-
-**Section 8: Research Trends & Domain Insights**
-- Temporal trend analysis, ML technique evolution
-- Healthcare application areas timeline
-- Topic modeling (LDA), co-occurrence networks
-- Emerging topics identification
-
-**Section 9: Efficiency Analysis & Deployment Considerations**
-- Parameter and computational efficiency analysis
-- Inference latency breakdown, batch size scaling
-- Memory footprint, expert pruning, quantization impact
-- Deployment recommendations, cost analysis, scalability projections
-
-**Section 10: Model Interpretability & Qualitative Analysis**
-- Generation showcase, abstract completion task
-- Controlled generation experiments
-- Attention visualization, expert routing case studies
-- Failure mode analysis, bias analysis
-- Model capabilities assessment, cross-domain reasoning
-
-**Section 11: Reproducibility & Model Documentation**
-- Training configuration table
-- Data preprocessing documentation
-- Hardware & environment specs
-- Checkpoint information, model card
-- Evaluation protocol, random seed documentation
-- Known issues, reproduction instructions, version control
-
-**Executive Summary**
-- Top 10 key findings
-- Performance summary card
-- Expert specialization summary
-- Comparative advantages
-- Most surprising findings
-- Limitations acknowledged
-- Key visualizations recap
-
-**Future Directions**
-- Model improvements, training improvements
-- Data expansion, evaluation improvements
-- Application ideas, research questions
-- Deployment roadmap, timeline and milestones
+**Plus**: Executive Summary (key findings, performance summary) and Future Directions
 
 ### Output Files
 
-The notebook generates comprehensive outputs:
+- **Figures** (`./outputs/figures/`): 50+ high-quality visualizations (PNG, 300 DPI)
+- **Data** (`./outputs/data/`): 30+ CSV/JSON files with statistics and metrics
+- **Reports** (`./outputs/reports/`): Summary reports and documentation
 
-**Figures** (`./outputs/figures/`):
-- Training curves, expert activation heatmaps, performance comparisons
-- Attention visualizations, embedding projections, network graphs
-- Word clouds, trend charts, efficiency analyses
-- **50+ high-quality visualizations** (PNG format, 300 DPI)
+**Features**: Robust data handling (auto-generates sample data if missing), professional visualizations (publication-ready), comprehensive analysis (statistical tests, domain-specific), full reproducibility (seeds, configuration, version control).
 
-**Data** (`./outputs/data/`):
-- CSV files with statistics, metrics, and analysis results
-- JSON files with configuration and metadata
-- **30+ data files** for further analysis
-
-**Reports** (`./outputs/reports/`):
-- Summary reports and documentation
-
-### Key Features
-
-**Robust Data Handling:**
-- Automatically handles missing files by generating sample data
-- Graceful error handling with clear instructions
-- Supports multiple data formats (JSONL, CSV, NPZ, PyTorch checkpoints)
-
-**Professional Visualizations:**
-- High-quality figures suitable for publications
-- Consistent styling with seaborn and matplotlib
-- Interactive plots with Plotly where appropriate
-- Clear legends, annotations, and captions
-
-**Comprehensive Analysis:**
-- Statistical tests (Kolmogorov-Smirnov, t-tests, Chi-square)
-- Domain-specific analysis (ML vs Healthcare)
-- Temporal analysis (trends over time)
-- Expert specialization deep dives
-
-**Reproducibility:**
-- All random seeds documented
-- Complete configuration tracking
-- Step-by-step reproduction instructions
-- Version control information
-
-### Usage Tips
-
-1. **First Time Setup:**
-   - Run the initial setup cells to install packages and create directories
-   - Download NLTK data (stopwords, punkt tokenizer)
-
-2. **Missing Data:**
-   - If training logs or model checkpoints are missing, the notebook will generate sample data
-   - This allows you to explore the analysis structure even without a trained model
-   - Replace sample data with actual data when available
-
-3. **Path Configuration:**
-   - The notebook automatically configures paths for Google Drive (Colab) or local directories
-   - Path configuration is in the "Google Drive Setup (Colab)" section
-   - If your data is in a different location, update the path variables:
-     - `ARXIV_DATA_PATH` - ArXiv papers dataset
-     - `MODEL_CONFIG_PATH` - Model configuration
-     - `TRAINING_LOGS_PATH` - Training logs
-     - `EVAL_RESULTS_PATH` - Evaluation results
-     - `EXPERT_ACTIVATIONS_PATH` - Expert activation data
-     - `MODEL_CHECKPOINT_PATH` - Model checkpoint
-
-4. **Customization:**
-   - Modify paths in the setup cells to match your directory structure
-   - Adjust figure sizes, DPI, and styling in the matplotlib configuration
-   - Add custom analysis sections as needed
-
-5. **Performance:**
-   - Some sections (e.g., t-SNE, UMAP, topic modeling) can be slow on large datasets
-   - Consider sampling data for faster exploration
-   - Use GPU acceleration where available (UMAP, PyTorch operations)
-
-6. **Exporting Results:**
-   - All figures are automatically saved to `./outputs/figures/`
-   - Data tables are saved to `./outputs/data/`
-   - Use these for presentations, papers, or further analysis
-
-### Expected Runtime
-
-For a typical analysis run:
-- **Setup & Data Loading**: 1-2 minutes
-- **Section 1-3** (Dataset, Architecture, Training): 5-10 minutes
-- **Section 4** (Expert Analysis): 10-15 minutes (most computationally intensive)
-- **Section 5-7** (Performance, Attention, Vocabulary): 10-15 minutes
-- **Section 8-11** (Trends, Efficiency, Interpretability, Documentation): 15-20 minutes
-- **Executive Summary & Future Directions**: 5-10 minutes
-
-**Total Runtime**: ~1-2 hours for complete analysis (depending on data size and hardware)
-
-### Integration with Training Pipeline
-
-The analysis notebook complements the training pipeline:
-
-1. **After Training:**
-   - Run the notebook to analyze your trained model
-   - Generate visualizations for presentations or papers
-   - Identify areas for improvement
-
-2. **During Development:**
-   - Use Section 4 (Expert Analysis) to debug routing issues
-   - Use Section 3 (Training Dynamics) to monitor convergence
-   - Use Section 9 (Efficiency) to optimize deployment
-
-3. **For Publication:**
-   - Export figures from `./outputs/figures/` for papers
-   - Use tables from `./outputs/data/` for supplementary materials
-   - Reference reproducibility section (Section 11) for methodology
+**Usage**: Run setup cells, download NLTK data. Notebook auto-configures paths (Drive/Colab or local). Update path variables if data is elsewhere. Some sections (t-SNE, UMAP, topic modeling) can be slow - consider sampling. **Expected Runtime**: ~1-2 hours total.
 
 ## Configuration
 
-All parameters are configurable via `config.yaml`:
-- Number of papers to collect
-- NeMo Curator filter thresholds
-- Training hyperparameters (batch size, learning rate, etc.)
-- Evaluation settings
-- Inference export options
+All parameters configurable via `config.yaml`: paper collection limits, NeMo Curator thresholds, training hyperparameters, evaluation settings, inference options.
 
 ## Challenges & Solutions
 
-### Challenge 1: Memory Management
-**Problem**: Processing 30-40k papers would exhaust RAM on most systems.
-
-**Solution**: Implemented streaming I/O at every stage, batch-based collection with memory monitoring, and a custom IterableDataset that streams from disk during training.
-
-### Challenge 2: Data Quality
-**Problem**: Raw ArXiv papers include low-quality content, duplicates, and non-English text.
-
-**Solution**: Multi-stage filtering pipeline using NeMo Curator for quality checks, domain relevance scoring, and fuzzy deduplication.
-
-### Challenge 3: Colab Constraints
-**Problem**: Google Colab has limited GPU memory (~12GB) and runtime limits.
-
-**Solution**: Optimized training loop with mixed precision, gradient accumulation, frequent checkpointing, and automatic resume capability.
+- **Memory Management**: Streaming I/O, batch-based collection, custom IterableDataset for disk streaming
+- **Data Quality**: Multi-stage NeMo Curator filtering (quality checks, domain relevance, deduplication)
+- **Colab Constraints**: Mixed precision, gradient accumulation, frequent checkpointing, automatic resume
 
 ## Technologies Used
 

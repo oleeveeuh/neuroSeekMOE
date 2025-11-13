@@ -84,15 +84,16 @@ def classify_paper_domain(paper: Dict) -> str:
     # Check categories (ArXiv format: 'cs.CV', 'q-bio.NC', etc.)
     # Also check for processed domain labels like 'medical_imaging', 'neuroscience', etc.
     has_cs = any(
-        (isinstance(cat, str) and (cat.startswith('cs.') or 'stat.' in cat.lower())) 
+        (isinstance(cat, str) and (cat.startswith('cs.') or 'stat.' in cat.lower() or 'cs.' in cat.lower())) 
         for cat in categories
     )
     has_bio = any(
-        (isinstance(cat, str) and ('q-bio' in cat or 'bio' in cat.lower()))
+        (isinstance(cat, str) and ('q-bio' in cat or 'bio' in cat.lower() or cat.startswith('q-bio')))
         for cat in categories
     )
     
     # Check for processed domain labels (from NeMo Curator)
+    # These are the domain labels that NeMo Curator assigns
     healthcare_domain_labels = ['medical_imaging', 'neuroscience', 'clinical', 
                                'drug_discovery', 'neurodegeneration', 'general_ml_health']
     has_healthcare_domain = any(
@@ -100,20 +101,31 @@ def classify_paper_domain(paper: Dict) -> str:
         for cat in categories
     )
     
-    # Check keywords in text
+    # Also check if any category string contains healthcare-related terms
+    healthcare_terms_in_cats = any(
+        (isinstance(cat, str) and any(term in cat.lower() for term in ['medical', 'health', 'clinical', 'neuro', 'imaging', 'disease']))
+        for cat in categories
+    )
+    
+    # Check keywords in text (lower threshold if we have domain labels)
     ml_keywords = ['neural network', 'deep learning', 'machine learning', 
                    'convolutional', 'transformer', 'gradient', 'backpropagation',
-                   'optimization', 'algorithm', 'model training']
+                   'optimization', 'algorithm', 'model training', 'neural', 'cnn', 'rnn']
     healthcare_keywords = ['patient', 'clinical', 'medical', 'diagnosis',
                           'disease', 'treatment', 'brain', 'imaging', 'mri',
-                          'alzheimer', 'parkinson', 'neurodegeneration', 'therapy']
+                          'alzheimer', 'parkinson', 'neurodegeneration', 'therapy',
+                          'hospital', 'physician', 'symptom', 'pathology']
     
     # Count keyword matches
     ml_keyword_count = sum(1 for kw in ml_keywords if kw in text)
     healthcare_keyword_count = sum(1 for kw in healthcare_keywords if kw in text)
     
-    has_ml = has_cs or ml_keyword_count >= 2
-    has_healthcare = has_bio or has_healthcare_domain or healthcare_keyword_count >= 2
+    # Lower threshold if we have some domain information
+    ml_threshold = 1 if categories else 2
+    healthcare_threshold = 1 if (categories or healthcare_terms_in_cats) else 2
+    
+    has_ml = has_cs or ml_keyword_count >= ml_threshold
+    has_healthcare = has_bio or has_healthcare_domain or healthcare_terms_in_cats or healthcare_keyword_count >= healthcare_threshold
     
     if has_ml and has_healthcare:
         return 'Both'
@@ -132,17 +144,19 @@ class ExpertActivationHook:
     Captures routing decisions by intercepting model forward passes.
     """
     
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, text_dir: Optional[str] = None):
         """Initialize hook.
         
         Args:
             model: The model to hook into (should be SimpleMoEModel or wrapper)
+            text_dir: Optional path to text files directory (for fallback classification)
         """
         self.expert_selections = []  # List of (batch_size, top_k) arrays
         self.expert_probs = []  # List of (batch_size, num_experts) arrays
         self.paper_ids = []  # List of paper IDs
         self.paper_domains = []  # List of domain labels
         self.model = model
+        self.text_dir = text_dir  # Store text directory for fallback
         
         # Store original forward method
         if hasattr(model, 'base_model'):
@@ -225,9 +239,15 @@ class ExpertActivationHook:
             
             # Classify domain using the same logic as classify_paper_domain
             # Get domains (ArXiv categories) from batch metadata
-            domain_list = domains[i] if (i < len(domains) and domains[i]) else []
+            domain_list = domains[i] if (i < len(domains) and domains[i] is not None) else []
             if not isinstance(domain_list, list):
-                domain_list = [domain_list] if domain_list else []
+                # Handle case where domain_list might be a string, None, or other type
+                if domain_list is None:
+                    domain_list = []
+                elif isinstance(domain_list, str):
+                    domain_list = [domain_list] if domain_list.strip() else []
+                else:
+                    domain_list = [domain_list] if domain_list else []
             
             # Try to get title/abstract from batch metadata if available
             title = ''
@@ -237,9 +257,31 @@ class ExpertActivationHook:
             if 'abstracts' in batch_metadata and i < len(batch_metadata.get('abstracts', [])):
                 abstract = batch_metadata['abstracts'][i] or ''
             
+            # If domains are empty and we have text_dir, try to read text file for classification
+            if not domain_list and self.text_dir and i < len(arxiv_ids):
+                arxiv_id = arxiv_ids[i]
+                text_file_path = os.path.join(self.text_dir, f"{arxiv_id}.txt")
+                if os.path.exists(text_file_path):
+                    try:
+                        with open(text_file_path, 'r', encoding='utf-8') as f:
+                            text_content = f.read()[:2000]  # Read first 2000 chars for classification
+                            # Use text content for keyword-based classification
+                            paper_dict = {
+                                'categories': domain_list,
+                                'domains': domain_list,
+                                'title': title,
+                                'abstract': abstract if abstract else text_content[:500]  # Use text as abstract fallback
+                            }
+                            domain = classify_paper_domain(paper_dict)
+                        self.paper_domains.append(domain)
+                        continue
+                    except Exception:
+                        pass  # Fall through to normal classification
+            
             # Use classify_paper_domain for consistent classification
             paper_dict = {
                 'categories': domain_list,
+                'domains': domain_list,  # Also set 'domains' field explicitly
                 'title': title,
                 'abstract': abstract
             }
@@ -955,7 +997,7 @@ def evaluate_model(
     
     # Initialize activation hook for capturing expert routing
     print("\nInitializing expert activation capture...")
-    activation_hook = ExpertActivationHook(model)
+    activation_hook = ExpertActivationHook(model, text_dir=dataset_text_dir)
     
     # Compute metrics
     print("\nComputing metrics...")
@@ -1047,6 +1089,34 @@ def evaluate_model(
             print(f"  Perplexity: {metrics['perplexity']:.2f}")
             print(f"  Loss: {metrics['loss']:.4f}")
         print("="*60)
+    
+    # Debug: Print domain distribution from activation hook
+    if activation_hook and len(activation_hook.paper_domains) > 0:
+        from collections import Counter
+        domain_dist = Counter(activation_hook.paper_domains)
+        print("\n" + "="*60)
+        print("DOMAIN CLASSIFICATION DISTRIBUTION (from activation hook)")
+        print("="*60)
+        for domain, count in domain_dist.most_common():
+            print(f"  {domain}: {count} papers ({count/len(activation_hook.paper_domains)*100:.1f}%)")
+        print("="*60)
+        
+        # Debug: Show sample of domains from metadata vs classification
+        if len(activation_hook.paper_ids) > 0:
+            print(f"\nDebug: Sample domain classifications (first 5 papers):")
+            sample_count = 0
+            for i in range(min(5, len(activation_hook.paper_ids))):
+                arxiv_id = activation_hook.paper_ids[i]
+                # Try to get domains from metadata
+                metadata_entry = test_dataset.metadata.get(arxiv_id, {})
+                metadata_domains = metadata_entry.get('domains', [])
+                classified_domain = activation_hook.paper_domains[i]
+                print(f"  {arxiv_id}:")
+                print(f"    Metadata domains: {metadata_domains} (type: {type(metadata_domains)})")
+                print(f"    Classified as: {classified_domain}")
+                sample_count += 1
+                if sample_count >= 5:
+                    break
     
     # Save expert activations if captured
     if activation_hook is not None:

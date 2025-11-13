@@ -606,8 +606,9 @@ def compute_perplexity(
                             'arxiv_ids': device_batch.get('arxiv_ids', []),
                             'domains': device_batch.get('domains', []),
                             'years': device_batch.get('years', []),
-                            'titles': batch.get('titles', []),  # May not be in batch
-                            'abstracts': batch.get('abstracts', [])  # May not be in batch
+                            'categories': device_batch.get('categories', []),  # Include categories!
+                            'titles': device_batch.get('title', batch.get('title', [])),  # May not be in batch
+                            'abstracts': device_batch.get('abstract', batch.get('abstract', []))  # May not be in batch
                         }
                         
                         # Classify domains and track per-domain metrics

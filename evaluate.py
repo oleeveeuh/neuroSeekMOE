@@ -1121,16 +1121,30 @@ def evaluate_model(
         print(f"  {domain}: {count} papers ({count/len(test_files)*100:.1f}%)")
     
     # Create test dataset (subset)
+    # Reuse metadata from full_dataset to avoid reloading and losing categories
     class TestDataset(ArXivStreamingDataset):
-        def __init__(self, text_files, *args, **kwargs):
-            super().__init__(*args, **kwargs)
+        def __init__(self, text_files, metadata_dict, text_dir, metadata_jsonl, tokenizer, max_length=512, min_length=64, shuffle_buffer=100, seed=None):
+            # Don't call super().__init__() which would reload metadata
+            # Instead, manually set up with existing metadata that already has categories
+            self.text_dir = text_dir
+            self.metadata_jsonl = metadata_jsonl
+            self.tokenizer = tokenizer
+            self.max_length = max_length
+            self.min_length = min_length
+            self.shuffle_buffer = shuffle_buffer
+            self.seed = seed
+            
+            # Use the metadata dictionary that already has categories loaded
+            self.metadata = metadata_dict
             self.text_files = text_files
+            self._estimated_length = None
     
     test_dataset = TestDataset(
         test_files,
-        text_dir=dataset_text_dir,
-        metadata_jsonl=dataset_metadata,
-        tokenizer=tokenizer,
+        full_dataset.metadata,  # Reuse metadata with categories already loaded
+        dataset_text_dir,
+        dataset_metadata,
+        tokenizer,
         max_length=512,
         min_length=64
     )

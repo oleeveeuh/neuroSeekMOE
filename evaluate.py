@@ -258,14 +258,24 @@ class ExpertActivationHook:
             # Get original ArXiv categories (for ML detection)
             categories_list = []
             if 'categories' in batch_metadata:
-                categories_list = batch_metadata['categories'][i] if (i < len(batch_metadata['categories']) and batch_metadata['categories'][i] is not None) else []
-                if not isinstance(categories_list, list):
+                if i < len(batch_metadata['categories']):
+                    categories_list = batch_metadata['categories'][i]
                     if categories_list is None:
                         categories_list = []
-                    elif isinstance(categories_list, str):
-                        categories_list = [categories_list] if categories_list.strip() else []
-                    else:
-                        categories_list = [categories_list] if categories_list else []
+                    elif not isinstance(categories_list, list):
+                        if isinstance(categories_list, str):
+                            categories_list = [categories_list] if categories_list.strip() else []
+                        else:
+                            categories_list = [categories_list] if categories_list else []
+                else:
+                    categories_list = []
+            
+            # Debug: Check if categories are missing in batch_metadata (first 5 papers)
+            if len(self.paper_domains) < 5:
+                arxiv_id = arxiv_ids[i] if i < len(arxiv_ids) else f'paper_{i}'
+                has_categories_in_batch = 'categories' in batch_metadata
+                batch_categories_len = len(batch_metadata.get('categories', [])) if has_categories_in_batch else 0
+                print(f"DEBUG activation_hook: {arxiv_id} - has_categories_in_batch={has_categories_in_batch}, batch_categories_len={batch_categories_len}, categories_list={categories_list}")
             
             # Try to get title/abstract from batch metadata if available
             title = ''

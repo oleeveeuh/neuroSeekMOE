@@ -205,8 +205,20 @@ class ModelAdapter:
                 'batch_metadata': {}
             }
         
-        # Move to device
+        # Move to device (this only moves tensors, not lists like categories)
         device_batch = self._move_to_device(batch)
+        
+        # Debug: Check batch contents (first batch only)
+        if not hasattr(self, '_debug_batch_checked'):
+            self._debug_batch_checked = True
+            print(f"DEBUG ModelAdapter.process_batch: batch keys: {list(batch.keys())}")
+            print(f"DEBUG ModelAdapter.process_batch: device_batch keys: {list(device_batch.keys())}")
+            if 'categories' in batch:
+                print(f"DEBUG ModelAdapter.process_batch: batch['categories'] type: {type(batch['categories'])}, len: {len(batch['categories']) if batch['categories'] else 0}")
+                if batch['categories'] and len(batch['categories']) > 0:
+                    print(f"DEBUG ModelAdapter.process_batch: batch['categories'][0]: {batch['categories'][0]}")
+            else:
+                print(f"DEBUG ModelAdapter.process_batch: 'categories' NOT in batch!")
         
         input_ids = device_batch['input_ids']
         target_ids = device_batch['target_ids']
@@ -236,8 +248,18 @@ class ModelAdapter:
         # Compute loss
         loss = self._compute_loss(logits, target_ids, domain_weights_tensor)
         
-        # Get categories from batch
-        categories = device_batch.get('categories', [])
+        # Get categories from batch (categories are lists, not tensors, so get from original batch)
+        categories = batch.get('categories', device_batch.get('categories', []))
+        
+        # Debug: Check if categories are in batch (first batch only)
+        if not hasattr(self, '_debug_categories_checked'):
+            self._debug_categories_checked = True
+            has_categories_in_batch = 'categories' in batch
+            has_categories_in_device = 'categories' in device_batch
+            categories_len = len(categories) if categories else 0
+            print(f"DEBUG ModelAdapter: has_categories_in_batch={has_categories_in_batch}, has_categories_in_device={has_categories_in_device}, categories_len={categories_len}")
+            if categories and len(categories) > 0:
+                print(f"DEBUG ModelAdapter: sample categories[0]={categories[0]}")
         
         # Prepare batch metadata
         batch_metadata = {

@@ -238,7 +238,7 @@ class ExpertActivationHook:
                 self.paper_ids.append(f'paper_{len(self.paper_ids)}')
             
             # Classify domain using the same logic as classify_paper_domain
-            # Get domains (ArXiv categories) from batch metadata
+            # Get domains (NeMo Curator labels) and categories (ArXiv categories) from batch metadata
             domain_list = domains[i] if (i < len(domains) and domains[i] is not None) else []
             if not isinstance(domain_list, list):
                 # Handle case where domain_list might be a string, None, or other type
@@ -249,6 +249,18 @@ class ExpertActivationHook:
                 else:
                     domain_list = [domain_list] if domain_list else []
             
+            # Get original ArXiv categories (for ML detection)
+            categories_list = []
+            if 'categories' in batch_metadata:
+                categories_list = batch_metadata['categories'][i] if (i < len(batch_metadata['categories']) and batch_metadata['categories'][i] is not None) else []
+                if not isinstance(categories_list, list):
+                    if categories_list is None:
+                        categories_list = []
+                    elif isinstance(categories_list, str):
+                        categories_list = [categories_list] if categories_list.strip() else []
+                    else:
+                        categories_list = [categories_list] if categories_list else []
+            
             # Try to get title/abstract from batch metadata if available
             title = ''
             abstract = ''
@@ -258,7 +270,7 @@ class ExpertActivationHook:
                 abstract = batch_metadata['abstracts'][i] or ''
             
             # If domains are empty and we have text_dir, try to read text file for classification
-            if not domain_list and self.text_dir and i < len(arxiv_ids):
+            if not domain_list and not categories_list and self.text_dir and i < len(arxiv_ids):
                 arxiv_id = arxiv_ids[i]
                 text_file_path = os.path.join(self.text_dir, f"{arxiv_id}.txt")
                 if os.path.exists(text_file_path):
@@ -267,8 +279,8 @@ class ExpertActivationHook:
                             text_content = f.read()[:2000]  # Read first 2000 chars for classification
                             # Use text content for keyword-based classification
                             paper_dict = {
-                                'categories': domain_list,
-                                'domains': domain_list,
+                                'categories': categories_list,  # Use ArXiv categories if available
+                                'domains': domain_list,  # Use NeMo Curator domain labels
                                 'title': title,
                                 'abstract': abstract if abstract else text_content[:500]  # Use text as abstract fallback
                             }
@@ -279,8 +291,10 @@ class ExpertActivationHook:
                         pass  # Fall through to normal classification
             
             # Use classify_paper_domain for consistent classification
+            # Combine both categories (ArXiv) and domains (NeMo Curator) for classification
+            all_categories = categories_list + domain_list  # Combine both for classification
             paper_dict = {
-                'categories': domain_list,
+                'categories': all_categories,  # Use combined list
                 'domains': domain_list,  # Also set 'domains' field explicitly
                 'title': title,
                 'abstract': abstract
@@ -965,10 +979,118 @@ def evaluate_model(
         min_length=64
     )
     
-    # Split into test set (simple: use last N files)
+    # Split into test set with stratified sampling to preserve domain distribution
     all_files = full_dataset.text_files
-    n_test = int(len(all_files) * test_split)
-    test_files = all_files[-n_test:] if n_test > 0 else []
+    metadata = full_dataset.metadata
+    
+    # Classify all papers to get domain distribution
+    print("Classifying papers for stratified split...")
+    file_domains = []
+    for arxiv_id, _ in all_files:
+        meta = metadata.get(arxiv_id, {})
+        domains = meta.get('domains', [])
+        categories = meta.get('categories', [])  # Get ArXiv categories
+        title = meta.get('title', '')
+        abstract = meta.get('abstract', '')
+        
+        # Combine categories and domains for classification
+        all_cats = []
+        if categories:
+            if isinstance(categories, list):
+                all_cats.extend(categories)
+            else:
+                all_cats.append(categories)
+        if domains:
+            if isinstance(domains, list):
+                all_cats.extend(domains)
+            else:
+                all_cats.append(domains)
+        
+        paper_dict = {
+            'categories': all_cats,  # Use combined list
+            'domains': domains if isinstance(domains, list) else [domains] if domains else [],
+            'title': title,
+            'abstract': abstract
+        }
+        domain = classify_paper_domain(paper_dict)
+        file_domains.append((arxiv_id, domain))
+    
+    # Group files by domain
+    from collections import defaultdict
+    domain_groups = defaultdict(list)
+    for arxiv_id, domain in file_domains:
+        domain_groups[domain].append(arxiv_id)
+    
+    # Print domain distribution
+    print(f"\nFull dataset domain distribution:")
+    for domain, files in sorted(domain_groups.items()):
+        print(f"  {domain}: {len(files)} papers ({len(files)/len(all_files)*100:.1f}%)")
+    
+    # Stratified sampling: sample proportionally from each domain
+    import random
+    random.seed(42)  # For reproducibility
+    
+    test_files = []
+    train_files = []
+    
+    for domain, files in domain_groups.items():
+        n_domain_test = max(1, int(len(files) * test_split))  # At least 1 per domain
+        random.shuffle(files)
+        domain_test = files[:n_domain_test]
+        domain_train = files[n_domain_test:]
+        
+        # Convert back to (arxiv_id, file_path) tuples
+        for arxiv_id in domain_test:
+            file_path = os.path.join(dataset_text_dir, f"{arxiv_id}.txt")
+            if os.path.exists(file_path):
+                test_files.append((arxiv_id, file_path))
+        
+        for arxiv_id in domain_train:
+            file_path = os.path.join(dataset_text_dir, f"{arxiv_id}.txt")
+            if os.path.exists(file_path):
+                train_files.append((arxiv_id, file_path))
+    
+    # Shuffle test files
+    random.shuffle(test_files)
+    
+    print(f"\nStratified test split:")
+    print(f"  Test set: {len(test_files)} papers")
+    print(f"  Train set: {len(train_files)} papers")
+    
+    # Verify test set domain distribution
+    test_domains = defaultdict(int)
+    for arxiv_id, _ in test_files:
+        meta = metadata.get(arxiv_id, {})
+        domains = meta.get('domains', [])
+        categories = meta.get('categories', [])  # Get ArXiv categories
+        title = meta.get('title', '')
+        abstract = meta.get('abstract', '')
+        
+        # Combine categories and domains for classification
+        all_cats = []
+        if categories:
+            if isinstance(categories, list):
+                all_cats.extend(categories)
+            else:
+                all_cats.append(categories)
+        if domains:
+            if isinstance(domains, list):
+                all_cats.extend(domains)
+            else:
+                all_cats.append(domains)
+        
+        paper_dict = {
+            'categories': all_cats,  # Use combined list
+            'domains': domains if isinstance(domains, list) else [domains] if domains else [],
+            'title': title,
+            'abstract': abstract
+        }
+        domain = classify_paper_domain(paper_dict)
+        test_domains[domain] += 1
+    
+    print(f"\nTest set domain distribution:")
+    for domain, count in sorted(test_domains.items()):
+        print(f"  {domain}: {count} papers ({count/len(test_files)*100:.1f}%)")
     
     # Create test dataset (subset)
     class TestDataset(ArXivStreamingDataset):

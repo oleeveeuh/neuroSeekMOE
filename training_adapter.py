@@ -236,9 +236,13 @@ class ModelAdapter:
         # Compute loss
         loss = self._compute_loss(logits, target_ids, domain_weights_tensor)
         
+        # Get categories from batch
+        categories = device_batch.get('categories', [])
+        
         # Prepare batch metadata
         batch_metadata = {
             'domains': domains,
+            'categories': categories,  # Include original ArXiv categories
             'years': device_batch.get('years', []),
             'arxiv_ids': device_batch.get('arxiv_ids', []),
             'titles': batch.get('title', []),  # Get from original batch (not device_batch)

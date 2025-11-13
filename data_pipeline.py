@@ -3687,14 +3687,16 @@ def process_single_paper_file(
         # Check for neurodegeneration
         has_nd = has_neurodegeneration(processed_text)
         
-        # Get year from metadata
+        # Get year and original categories from metadata
         year = metadata.get('year', None)
+        original_categories = metadata.get('categories', [])  # Preserve ArXiv categories
         
         # Create output record
         output_record = {
             'arxiv_id': arxiv_id,
             'text': processed_text,
-            'domains': domains,
+            'domains': domains,  # NeMo Curator domain labels
+            'categories': original_categories,  # Original ArXiv categories (for ML detection)
             'year': year,
             'has_neurodegeneration': has_nd,
         }

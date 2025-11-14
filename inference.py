@@ -856,10 +856,25 @@ class InferencePipeline:
                                 # Filter out obviously broken tokens and artifacts
                                 words = predicted_text.split()
                                 filtered_words = []
+                                # Common artifact patterns from tokenization issues
+                                artifact_patterns = {
+                                    'ract', 'iven', 'ulating', 'ucleare', 'uronal', 'ang', 'lee', 
+                                    'antina', 'artijn', 'armonexperimentingapore', 'stringxpergraph',
+                                    'chaarten', 'nterface', 'associ-art', 'laria', 'ecorrelated'
+                                }
                                 for w in words:
+                                    w_lower = w.lower().strip()
                                     # Skip very short non-alphanumeric fragments
-                                    if len(w) <= 1 and not w.isalnum():
+                                    if len(w_lower) <= 1 and not w_lower.isalnum():
                                         continue
+                                    # Skip known artifact patterns
+                                    if w_lower in artifact_patterns:
+                                        continue
+                                    # Skip words that look like artifacts (short, uncommon, no vowels)
+                                    if len(w_lower) <= 4 and w_lower.isalpha():
+                                        vowels = sum(1 for c in w_lower if c in 'aeiou')
+                                        if vowels == 0:  # No vowels - likely artifact
+                                            continue
                                     # Skip number sequences that look like malformed IDs (e.g., "0009", "−0007−")
                                     cleaned_num = w.replace('-', '').replace('−', '').replace('+', '').replace('.', '')
                                     if cleaned_num.isdigit() and len(cleaned_num) >= 4:
@@ -1224,10 +1239,25 @@ class InferencePipeline:
                                 # Filter out obviously broken tokens and artifacts
                                 words = predicted_text.split()
                                 filtered_words = []
+                                # Common artifact patterns from tokenization issues
+                                artifact_patterns = {
+                                    'ract', 'iven', 'ulating', 'ucleare', 'uronal', 'ang', 'lee', 
+                                    'antina', 'artijn', 'armonexperimentingapore', 'stringxpergraph',
+                                    'chaarten', 'nterface', 'associ-art', 'laria', 'ecorrelated'
+                                }
                                 for w in words:
+                                    w_lower = w.lower().strip()
                                     # Skip very short non-alphanumeric fragments
-                                    if len(w) <= 1 and not w.isalnum():
+                                    if len(w_lower) <= 1 and not w_lower.isalnum():
                                         continue
+                                    # Skip known artifact patterns
+                                    if w_lower in artifact_patterns:
+                                        continue
+                                    # Skip words that look like artifacts (short, uncommon, no vowels)
+                                    if len(w_lower) <= 4 and w_lower.isalpha():
+                                        vowels = sum(1 for c in w_lower if c in 'aeiou')
+                                        if vowels == 0:  # No vowels - likely artifact
+                                            continue
                                     # Skip number sequences that look like malformed IDs (e.g., "0009", "−0007−")
                                     cleaned_num = w.replace('-', '').replace('−', '').replace('+', '').replace('.', '')
                                     if cleaned_num.isdigit() and len(cleaned_num) >= 4:

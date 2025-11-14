@@ -717,20 +717,31 @@ class InferencePipeline:
                     current_input = input_ids.clone()
                 
                 # Repetition penalty parameters
-                repetition_penalty = 1.2  # Penalize repeated tokens
-                max_repetition = 3  # Stop if same token repeated this many times
+                repetition_penalty = 1.5  # Increased penalty for repeated tokens
+                max_repetition = 2  # Stop if same token repeated this many times
+                repetition_window = 20  # Check last N tokens for repetition
                 
                 for step in range(max_prediction_length):
                     # Check if we've exceeded max_length
                     if current_input.shape[1] >= self.max_length:
                         break
                     
-                    # Check for repetition loop (same token repeated too many times)
+                    # Enhanced repetition detection: check for same token repeated
                     if len(predicted_token_ids) >= max_repetition:
                         recent_tokens = predicted_token_ids[-max_repetition:]
                         if len(set(recent_tokens)) == 1:
                             # Same token repeated max_repetition times - stop generation
                             break
+                    
+                    # Check for n-gram repetition (e.g., "uronal uronal")
+                    if len(predicted_token_ids) >= 4:
+                        # Check for 2-gram repetition
+                        last_2 = tuple(predicted_token_ids[-2:])
+                        if len(predicted_token_ids) >= 4:
+                            prev_2 = tuple(predicted_token_ids[-4:-2])
+                            if last_2 == prev_2:
+                                # 2-gram repeated - stop generation
+                                break
                     
                     with torch.no_grad():
                         output_step = base_model(
@@ -743,28 +754,36 @@ class InferencePipeline:
                         if isinstance(output_step, tuple):
                             output_step = output_step[0]
                         
-                        next_token_logits = output_step[0, -1, :]  # [vocab_size]
+                        next_token_logits = output_step[0, -1, :].clone()  # [vocab_size]
                         
-                        # Apply repetition penalty to recently generated tokens
+                        # Apply stronger repetition penalty to recently generated tokens
                         if len(predicted_token_ids) > 0:
-                            # Get last few tokens
-                            recent_window = min(10, len(predicted_token_ids))
+                            # Get last few tokens with exponential decay penalty
+                            recent_window = min(repetition_window, len(predicted_token_ids))
                             recent_tokens = predicted_token_ids[-recent_window:]
                             
-                            # Penalize tokens that appeared recently
-                            for token_id in set(recent_tokens):
-                                if token_id < len(next_token_logits):
-                                    next_token_logits[token_id] /= repetition_penalty
+                            # Count token frequencies in recent window
+                            token_counts = {}
+                            for i, token_id in enumerate(recent_tokens):
+                                if token_id not in token_counts:
+                                    token_counts[token_id] = 0
+                                # More recent tokens get higher penalty
+                                token_counts[token_id] += (i + 1) / len(recent_tokens)
+                            
+                            # Apply penalty based on frequency and recency
+                            for token_id, count in token_counts.items():
+                                if 0 <= token_id < len(next_token_logits):
+                                    # Stronger penalty for more frequent/recent tokens
+                                    penalty = repetition_penalty ** count
+                                    next_token_logits[token_id] /= penalty
                         
-                        # Use top-k sampling to avoid getting stuck (k=50)
-                        top_k = min(50, len(next_token_logits))
+                        # Use top-k sampling with better parameters
+                        top_k = min(20, len(next_token_logits))  # Reduced from 50 to 20
                         if top_k > 1:
                             top_k_logits, top_k_indices = torch.topk(next_token_logits, top_k)
-                            # Sample from top-k (with slight randomness to avoid loops)
-                            probs = torch.softmax(top_k_logits, dim=-1)
-                            # Add small temperature for diversity
-                            probs = probs / 0.9  # Slight temperature
-                            probs = probs / probs.sum()  # Renormalize
+                            # Apply temperature for diversity (temperature > 1 increases randomness)
+                            temperature = 1.1  # Slight increase in randomness
+                            probs = torch.softmax(top_k_logits / temperature, dim=-1)
                             sampled_idx = torch.multinomial(probs, 1).item()
                             next_token_id = top_k_indices[sampled_idx].item()
                         else:
@@ -796,35 +815,66 @@ class InferencePipeline:
                         else:
                             current_input = torch.cat([current_input, new_token_tensor], dim=1)
                 
-                # Decode prediction
+                # Decode prediction with improved SentencePiece handling
                 if predicted_token_ids:
                     try:
-                        # Filter out invalid token IDs before decoding
-                        valid_token_ids = [tid for tid in predicted_token_ids 
-                                         if 0 <= tid < self.vocab_size]
+                        # Filter out invalid token IDs and special tokens before decoding
+                        valid_token_ids = []
+                        for tid in predicted_token_ids:
+                            if 0 <= tid < self.vocab_size:
+                                # Skip padding (0) and check for EOS
+                                if tid == 0:
+                                    continue
+                                try:
+                                    # Check if it's a special token that shouldn't be decoded
+                                    piece = self.tokenizer.id_to_piece(tid)
+                                    if piece.startswith('<') and piece.endswith('>'):
+                                        # Skip special tokens like <s>, </s>, etc.
+                                        continue
+                                    valid_token_ids.append(tid)
+                                except:
+                                    # Skip invalid token IDs
+                                    continue
                         
                         if valid_token_ids:
                             # Decode tokens
                             predicted_text = self.tokenizer.decode(valid_token_ids)
                             
-                            # Clean up the decoded text (remove extra spaces, fix common issues)
+                            # Improved SentencePiece cleaning
                             if predicted_text:
+                                # Replace SentencePiece word boundary markers properly
+                                # SentencePiece uses ▁ to mark word boundaries
+                                predicted_text = predicted_text.replace('▁', ' ')
+                                
                                 # Remove excessive whitespace
                                 predicted_text = ' '.join(predicted_text.split())
-                                # Fix common SentencePiece artifacts
-                                predicted_text = predicted_text.replace('▁', ' ')  # SentencePiece word boundary marker
-                                predicted_text = ' '.join(predicted_text.split())  # Clean up again
+                                
+                                # Remove common artifacts
+                                predicted_text = predicted_text.replace('  ', ' ')
+                                predicted_text = predicted_text.strip()
+                                
+                                # Filter out obviously broken tokens (very short fragments)
+                                words = predicted_text.split()
+                                # Remove single-character "words" that are likely artifacts
+                                words = [w for w in words if len(w) > 1 or w.isalnum()]
+                                predicted_text = ' '.join(words)
                         else:
                             predicted_text = ""
                     except Exception as e:
-                        # Fallback: try decoding individual tokens
+                        # Fallback: try decoding individual tokens with better error handling
                         try:
                             decoded_parts = []
-                            for tid in predicted_token_ids[:20]:  # Limit to first 20 tokens
+                            for tid in predicted_token_ids[:30]:  # Increased limit
                                 if 0 <= tid < self.vocab_size:
                                     try:
                                         piece = self.tokenizer.id_to_piece(tid)
-                                        decoded_parts.append(piece.replace('▁', ' '))
+                                        # Skip special tokens
+                                        if piece.startswith('<') and piece.endswith('>'):
+                                            continue
+                                        # Clean the piece
+                                        cleaned = piece.replace('▁', ' ').strip()
+                                        if cleaned and len(cleaned) > 0:
+                                            decoded_parts.append(cleaned)
                                     except:
                                         pass
                             predicted_text = ' '.join(decoded_parts) if decoded_parts else f"[{len(predicted_token_ids)} tokens, decode error: {e}]"
@@ -1017,19 +1067,31 @@ class InferencePipeline:
                     current_input = input_ids.clone()
                 
                 # Repetition penalty parameters
-                repetition_penalty = 1.2
-                max_repetition = 3
+                repetition_penalty = 1.5  # Increased penalty for repeated tokens
+                max_repetition = 2  # Stop if same token repeated this many times
+                repetition_window = 20  # Check last N tokens for repetition
                 
                 for step in range(max_prediction_length):
                     # Check if we've exceeded max_length
                     if current_input.shape[1] >= self.max_length:
                         break
                     
-                    # Check for repetition loop
+                    # Enhanced repetition detection: check for same token repeated
                     if len(predicted_token_ids) >= max_repetition:
                         recent_tokens = predicted_token_ids[-max_repetition:]
                         if len(set(recent_tokens)) == 1:
+                            # Same token repeated max_repetition times - stop generation
                             break
+                    
+                    # Check for n-gram repetition (e.g., "uronal uronal")
+                    if len(predicted_token_ids) >= 4:
+                        # Check for 2-gram repetition
+                        last_2 = tuple(predicted_token_ids[-2:])
+                        if len(predicted_token_ids) >= 4:
+                            prev_2 = tuple(predicted_token_ids[-4:-2])
+                            if last_2 == prev_2:
+                                # 2-gram repeated - stop generation
+                                break
                     
                     with torch.no_grad():
                         output_step = baseline_model(
@@ -1042,23 +1104,36 @@ class InferencePipeline:
                         if isinstance(output_step, tuple):
                             output_step = output_step[0]
                         
-                        next_token_logits = output_step[0, -1, :]
+                        next_token_logits = output_step[0, -1, :].clone()  # [vocab_size]
                         
-                        # Apply repetition penalty
+                        # Apply stronger repetition penalty to recently generated tokens
                         if len(predicted_token_ids) > 0:
-                            recent_window = min(10, len(predicted_token_ids))
+                            # Get last few tokens with exponential decay penalty
+                            recent_window = min(repetition_window, len(predicted_token_ids))
                             recent_tokens = predicted_token_ids[-recent_window:]
-                            for token_id in set(recent_tokens):
-                                if token_id < len(next_token_logits):
-                                    next_token_logits[token_id] /= repetition_penalty
+                            
+                            # Count token frequencies in recent window
+                            token_counts = {}
+                            for i, token_id in enumerate(recent_tokens):
+                                if token_id not in token_counts:
+                                    token_counts[token_id] = 0
+                                # More recent tokens get higher penalty
+                                token_counts[token_id] += (i + 1) / len(recent_tokens)
+                            
+                            # Apply penalty based on frequency and recency
+                            for token_id, count in token_counts.items():
+                                if 0 <= token_id < len(next_token_logits):
+                                    # Stronger penalty for more frequent/recent tokens
+                                    penalty = repetition_penalty ** count
+                                    next_token_logits[token_id] /= penalty
                         
-                        # Use top-k sampling
-                        top_k = min(50, len(next_token_logits))
+                        # Use top-k sampling with better parameters
+                        top_k = min(20, len(next_token_logits))  # Reduced from 50 to 20
                         if top_k > 1:
                             top_k_logits, top_k_indices = torch.topk(next_token_logits, top_k)
-                            probs = torch.softmax(top_k_logits, dim=-1)
-                            probs = probs / 0.9  # Temperature
-                            probs = probs / probs.sum()
+                            # Apply temperature for diversity (temperature > 1 increases randomness)
+                            temperature = 1.1  # Slight increase in randomness
+                            probs = torch.softmax(top_k_logits / temperature, dim=-1)
                             sampled_idx = torch.multinomial(probs, 1).item()
                             next_token_id = top_k_indices[sampled_idx].item()
                         else:
@@ -1087,35 +1162,66 @@ class InferencePipeline:
                         else:
                             current_input = torch.cat([current_input, new_token_tensor], dim=1)
                 
-                # Decode prediction
+                # Decode prediction with improved SentencePiece handling
                 if predicted_token_ids:
                     try:
-                        # Filter out invalid token IDs before decoding
-                        valid_token_ids = [tid for tid in predicted_token_ids 
-                                         if 0 <= tid < self.vocab_size]
+                        # Filter out invalid token IDs and special tokens before decoding
+                        valid_token_ids = []
+                        for tid in predicted_token_ids:
+                            if 0 <= tid < self.vocab_size:
+                                # Skip padding (0) and check for EOS
+                                if tid == 0:
+                                    continue
+                                try:
+                                    # Check if it's a special token that shouldn't be decoded
+                                    piece = self.tokenizer.id_to_piece(tid)
+                                    if piece.startswith('<') and piece.endswith('>'):
+                                        # Skip special tokens like <s>, </s>, etc.
+                                        continue
+                                    valid_token_ids.append(tid)
+                                except:
+                                    # Skip invalid token IDs
+                                    continue
                         
                         if valid_token_ids:
                             # Decode tokens
                             predicted_text = self.tokenizer.decode(valid_token_ids)
                             
-                            # Clean up the decoded text (remove extra spaces, fix common issues)
+                            # Improved SentencePiece cleaning
                             if predicted_text:
+                                # Replace SentencePiece word boundary markers properly
+                                # SentencePiece uses ▁ to mark word boundaries
+                                predicted_text = predicted_text.replace('▁', ' ')
+                                
                                 # Remove excessive whitespace
                                 predicted_text = ' '.join(predicted_text.split())
-                                # Fix common SentencePiece artifacts
-                                predicted_text = predicted_text.replace('▁', ' ')  # SentencePiece word boundary marker
-                                predicted_text = ' '.join(predicted_text.split())  # Clean up again
+                                
+                                # Remove common artifacts
+                                predicted_text = predicted_text.replace('  ', ' ')
+                                predicted_text = predicted_text.strip()
+                                
+                                # Filter out obviously broken tokens (very short fragments)
+                                words = predicted_text.split()
+                                # Remove single-character "words" that are likely artifacts
+                                words = [w for w in words if len(w) > 1 or w.isalnum()]
+                                predicted_text = ' '.join(words)
                         else:
                             predicted_text = ""
                     except Exception as e:
-                        # Fallback: try decoding individual tokens
+                        # Fallback: try decoding individual tokens with better error handling
                         try:
                             decoded_parts = []
-                            for tid in predicted_token_ids[:20]:  # Limit to first 20 tokens
+                            for tid in predicted_token_ids[:30]:  # Increased limit
                                 if 0 <= tid < self.vocab_size:
                                     try:
                                         piece = self.tokenizer.id_to_piece(tid)
-                                        decoded_parts.append(piece.replace('▁', ' '))
+                                        # Skip special tokens
+                                        if piece.startswith('<') and piece.endswith('>'):
+                                            continue
+                                        # Clean the piece
+                                        cleaned = piece.replace('▁', ' ').strip()
+                                        if cleaned and len(cleaned) > 0:
+                                            decoded_parts.append(cleaned)
                                     except:
                                         pass
                             predicted_text = ' '.join(decoded_parts) if decoded_parts else f"[{len(predicted_token_ids)} tokens, decode error: {e}]"

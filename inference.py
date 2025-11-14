@@ -799,9 +799,37 @@ class InferencePipeline:
                 # Decode prediction
                 if predicted_token_ids:
                     try:
-                        predicted_text = self.tokenizer.decode(predicted_token_ids)
-                    except:
-                        predicted_text = f"[{len(predicted_token_ids)} tokens]"
+                        # Filter out invalid token IDs before decoding
+                        valid_token_ids = [tid for tid in predicted_token_ids 
+                                         if 0 <= tid < self.vocab_size]
+                        
+                        if valid_token_ids:
+                            # Decode tokens
+                            predicted_text = self.tokenizer.decode(valid_token_ids)
+                            
+                            # Clean up the decoded text (remove extra spaces, fix common issues)
+                            if predicted_text:
+                                # Remove excessive whitespace
+                                predicted_text = ' '.join(predicted_text.split())
+                                # Fix common SentencePiece artifacts
+                                predicted_text = predicted_text.replace('▁', ' ')  # SentencePiece word boundary marker
+                                predicted_text = ' '.join(predicted_text.split())  # Clean up again
+                        else:
+                            predicted_text = ""
+                    except Exception as e:
+                        # Fallback: try decoding individual tokens
+                        try:
+                            decoded_parts = []
+                            for tid in predicted_token_ids[:20]:  # Limit to first 20 tokens
+                                if 0 <= tid < self.vocab_size:
+                                    try:
+                                        piece = self.tokenizer.id_to_piece(tid)
+                                        decoded_parts.append(piece.replace('▁', ' '))
+                                    except:
+                                        pass
+                            predicted_text = ' '.join(decoded_parts) if decoded_parts else f"[{len(predicted_token_ids)} tokens, decode error: {e}]"
+                        except:
+                            predicted_text = f"[{len(predicted_token_ids)} tokens, decode failed]"
                 else:
                     predicted_text = ""
             
@@ -1037,7 +1065,7 @@ class InferencePipeline:
                             next_token_id = torch.argmax(next_token_logits).item()
                         
                         # Validate token ID
-                        if next_token_id < 0 or next_token_id >= vocab_size:
+                        if next_token_id < 0 or next_token_id >= self.vocab_size:
                             break
                         
                         if next_token_id == 0:
@@ -1062,9 +1090,37 @@ class InferencePipeline:
                 # Decode prediction
                 if predicted_token_ids:
                     try:
-                        predicted_text = self.tokenizer.decode(predicted_token_ids)
-                    except:
-                        predicted_text = f"[{len(predicted_token_ids)} tokens]"
+                        # Filter out invalid token IDs before decoding
+                        valid_token_ids = [tid for tid in predicted_token_ids 
+                                         if 0 <= tid < self.vocab_size]
+                        
+                        if valid_token_ids:
+                            # Decode tokens
+                            predicted_text = self.tokenizer.decode(valid_token_ids)
+                            
+                            # Clean up the decoded text (remove extra spaces, fix common issues)
+                            if predicted_text:
+                                # Remove excessive whitespace
+                                predicted_text = ' '.join(predicted_text.split())
+                                # Fix common SentencePiece artifacts
+                                predicted_text = predicted_text.replace('▁', ' ')  # SentencePiece word boundary marker
+                                predicted_text = ' '.join(predicted_text.split())  # Clean up again
+                        else:
+                            predicted_text = ""
+                    except Exception as e:
+                        # Fallback: try decoding individual tokens
+                        try:
+                            decoded_parts = []
+                            for tid in predicted_token_ids[:20]:  # Limit to first 20 tokens
+                                if 0 <= tid < self.vocab_size:
+                                    try:
+                                        piece = self.tokenizer.id_to_piece(tid)
+                                        decoded_parts.append(piece.replace('▁', ' '))
+                                    except:
+                                        pass
+                            predicted_text = ' '.join(decoded_parts) if decoded_parts else f"[{len(predicted_token_ids)} tokens, decode error: {e}]"
+                        except:
+                            predicted_text = f"[{len(predicted_token_ids)} tokens, decode failed]"
                 else:
                     predicted_text = ""
             

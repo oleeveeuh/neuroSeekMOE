@@ -1624,7 +1624,14 @@ def evaluate_model(
     }
     
     # Determine results directory (prefer Drive if available)
-    results_dir = get_drive_results_path(output_dir)
+    # Use user-specified output_dir, but check if it's in Drive and use Drive path if available
+    # Only override if output_dir is the default "./evaluations"
+    if output_dir == "./evaluations" or output_dir == "evaluations":
+        results_dir = get_drive_results_path(output_dir)
+    else:
+        # User specified a custom directory - respect it
+        results_dir = output_dir
+    
     os.makedirs(results_dir, exist_ok=True)
     print(f"\n📁 Saving results to: {results_dir}")
     

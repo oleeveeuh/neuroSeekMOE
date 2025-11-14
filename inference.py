@@ -1014,12 +1014,13 @@ class InferencePipeline:
                 else:
                     predicted_text = ""
             
-            # Classify domain
+            # Classify domain - include full text for better classification
             paper_dict = {
                 'categories': paper.get('categories', []),
                 'domains': paper.get('domains', []),
                 'title': paper.get('title', ''),
-                'abstract': paper.get('abstract', '')
+                'abstract': paper.get('abstract', ''),
+                'text': full_text  # Include full text for keyword matching if title/abstract are missing
             }
             domain = classify_paper_domain(paper_dict)
             
@@ -1433,12 +1434,13 @@ class InferencePipeline:
                 else:
                     predicted_text = ""
             
-            # Classify domain
+            # Classify domain - include full text for better classification
             paper_dict = {
                 'categories': paper.get('categories', []),
                 'domains': paper.get('domains', []),
                 'title': paper.get('title', ''),
-                'abstract': paper.get('abstract', '')
+                'abstract': paper.get('abstract', ''),
+                'text': full_text  # Include full text for keyword matching if title/abstract are missing
             }
             domain = classify_paper_domain(paper_dict)
             

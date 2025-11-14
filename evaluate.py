@@ -79,7 +79,13 @@ def classify_paper_domain(paper: Dict) -> str:
     
     title = paper.get('title', '').lower() if paper.get('title') else ''
     abstract = paper.get('abstract', '').lower() if paper.get('abstract') else ''
-    text = title + ' ' + abstract
+    # Also check full text if title/abstract are missing or very short
+    full_text = paper.get('text', '').lower() if paper.get('text') else ''
+    # Use full text if title+abstract is too short (< 50 chars) or missing
+    if len(title + ' ' + abstract) < 50 and full_text:
+        text = full_text[:2000]  # Use first 2000 chars of full text for keyword matching
+    else:
+        text = title + ' ' + abstract
     
     # Check categories (ArXiv format: 'cs.CV', 'q-bio.NC', etc.)
     # Also check for processed domain labels like 'medical_imaging', 'neuroscience', etc.

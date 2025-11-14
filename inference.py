@@ -198,6 +198,9 @@ class InferencePipeline:
         # Domain classifier (lazy-loaded)
         self._domain_classifier = None
         
+        # Store base_model reference (set in _load_model)
+        self.base_model = None
+        
         print(f"Inference pipeline initialized on {device}")
     
     def _load_model(self, checkpoint_path: str) -> nn.Module:
@@ -218,21 +221,24 @@ class InferencePipeline:
                 num_routed_experts=4,
             )
             
+            # Store base_model reference for expert activation capture
+            self.base_model = base_model
+            
             # Wrap model
             class ModelWrapper(nn.Module):
                 def __init__(self, base_model):
                     super().__init__()
                     self.base_model = base_model
                 
-                def forward(self, input_ids):
+                def forward(self, input_ids, return_gate_logits=False):
                     output = self.base_model(
                         input_ids,
                         image_features=None,
                         return_load_balance_loss=False,
-                        return_gate_logits=False
+                        return_gate_logits=return_gate_logits
                     )
                     if isinstance(output, tuple):
-                        return output[0]
+                        return output[0] if not return_gate_logits else output
                     return output
             
             model = ModelWrapper(base_model)
@@ -423,6 +429,223 @@ class InferencePipeline:
         
         # Fallback to keyword-based classification
         return self._keyword_domain_classification(text)
+    
+    def generate_example_predictions(
+        self,
+        dataset_metadata_path: str,
+        dataset_text_dir: str,
+        output_path: str,
+        num_examples: int = 10,
+        max_input_length: int = 200,
+        max_prediction_length: int = 50
+    ) -> str:
+        """Generate example predictions with expert activations.
+        
+        Args:
+            dataset_metadata_path: Path to processed_dataset.jsonl
+            dataset_text_dir: Directory containing paper text files
+            output_path: Path to save example_predictions.json
+            num_examples: Number of examples to generate
+            max_input_length: Maximum input text length (characters)
+            max_prediction_length: Maximum prediction length (tokens)
+            
+        Returns:
+            Path to saved JSON file
+        """
+        import random
+        from evaluate import classify_paper_domain
+        
+        # Load metadata
+        papers = []
+        if os.path.exists(dataset_metadata_path):
+            with open(dataset_metadata_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        papers.append(json.loads(line))
+        else:
+            raise FileNotFoundError(f"Dataset metadata not found: {dataset_metadata_path}")
+        
+        # Sample papers
+        if len(papers) > num_examples:
+            papers = random.sample(papers, num_examples)
+        
+        example_predictions = []
+        
+        # Get base model for routing capture
+        base_model = self.base_model if self.base_model else (
+            self.model.base_model if hasattr(self.model, 'base_model') else None
+        )
+        
+        if base_model is None:
+            raise ValueError("Could not access base model for expert activation capture")
+        
+        top_k = getattr(base_model, 'top_k', 2)
+        num_routed_experts = getattr(base_model, 'num_routed_experts', 4)
+        
+        print(f"Generating {len(papers)} example predictions...")
+        
+        for paper in papers:
+            paper_id = paper.get('arxiv_id', paper.get('id', 'unknown'))
+            
+            # Load text
+            text_file = os.path.join(dataset_text_dir, f"{paper_id}.txt")
+            if not os.path.exists(text_file):
+                print(f"Warning: Text file not found for {paper_id}, skipping...")
+                continue
+            
+            with open(text_file, 'r', encoding='utf-8') as f:
+                full_text = f.read()
+            
+            # Prepare input (first max_input_length characters)
+            input_text = full_text[:max_input_length]
+            
+            # Tokenize input
+            input_ids = self._tokenize(input_text).to(self.device)
+            
+            # Forward pass with routing info
+            with torch.no_grad():
+                output, routing_info = base_model(
+                    input_ids,
+                    image_features=None,
+                    return_load_balance_loss=False,
+                    return_gate_logits=True
+                )
+                
+                if routing_info is None:
+                    print(f"Warning: No routing info for {paper_id}, skipping...")
+                    continue
+                
+                gate_logits, _, _, _, _, routing_metrics = routing_info
+                logits = output  # [1, seq_len, vocab_size]
+                
+                # Compute perplexity
+                # Use input as target (next token prediction)
+                if input_ids.shape[1] > 1:
+                    targets = input_ids[:, 1:]  # Shift by 1 for next-token prediction
+                    logits_pred = logits[:, :-1, :]  # Remove last logit
+                    
+                    loss_per_token = F.cross_entropy(
+                        logits_pred.view(-1, logits_pred.shape[-1]),
+                        targets.view(-1),
+                        ignore_index=0,
+                        reduction='none'
+                    ).view(targets.shape)
+                    
+                    # Mask padding
+                    mask = (targets != 0).float()
+                    if mask.sum() > 0:
+                        avg_loss = (loss_per_token * mask).sum() / mask.sum()
+                        perplexity = float(torch.exp(avg_loss).item())
+                    else:
+                        perplexity = float('inf')
+                else:
+                    perplexity = float('inf')
+                
+                # Extract expert activations
+                # gate_logits shape: [batch*seq_len, num_routed_experts]
+                if isinstance(gate_logits, torch.Tensor):
+                    gate_logits_np = gate_logits.detach().cpu().numpy()
+                else:
+                    gate_logits_np = np.array(gate_logits)
+                
+                # For Expert Choice routing, get which experts were selected
+                # Average gate logits per paper to get expert preferences
+                if len(gate_logits_np.shape) == 2:
+                    # [batch*seq_len, num_routed_experts] -> average over sequence
+                    seq_len = input_ids.shape[1]
+                    batch_size = 1
+                    gate_logits_reshaped = gate_logits_np.reshape(batch_size, seq_len, -1)
+                    avg_gate_logits = gate_logits_reshaped.mean(axis=1)  # [batch, num_experts]
+                    
+                    # Get top-k experts
+                    top_experts = np.argsort(avg_gate_logits[0])[-top_k:].tolist()
+                else:
+                    # Fallback: use top experts by average logit
+                    avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np
+                    top_experts = np.argsort(avg_gate_logits)[-top_k:].tolist()
+                
+                # Generate prediction (greedy decoding)
+                # Get next token predictions
+                next_token_logits = logits[0, -1, :]  # [vocab_size]
+                next_token_id = torch.argmax(next_token_logits).item()
+                
+                # Decode prediction
+                try:
+                    predicted_text = self.tokenizer.decode([next_token_id])
+                except:
+                    predicted_text = f"[token_{next_token_id}]"
+            
+            # Classify domain
+            paper_dict = {
+                'categories': paper.get('categories', []),
+                'domains': paper.get('domains', []),
+                'title': paper.get('title', ''),
+                'abstract': paper.get('abstract', '')
+            }
+            domain = classify_paper_domain(paper_dict)
+            
+            example_predictions.append({
+                'paper_id': paper_id,
+                'input_text': input_text,
+                'predicted_text': predicted_text,
+                'perplexity': perplexity,
+                'activated_experts': top_experts,
+                'domain': domain
+            })
+            
+            print(f"  Generated prediction for {paper_id} (perplexity: {perplexity:.2f}, experts: {top_experts})")
+        
+        # Determine output path - prefer Google Drive if available
+        final_output_path = self._get_drive_path_if_available(output_path)
+        
+        # Save to JSON
+        os.makedirs(os.path.dirname(final_output_path) if os.path.dirname(final_output_path) else '.', exist_ok=True)
+        with open(final_output_path, 'w', encoding='utf-8') as f:
+            json.dump(example_predictions, f, indent=2, ensure_ascii=False)
+        
+        print(f"\nSaved {len(example_predictions)} example predictions to {final_output_path}")
+        if final_output_path != output_path:
+            print(f"  (Saved to Google Drive instead of {output_path})")
+        return final_output_path
+    
+    def _get_drive_path_if_available(self, local_path: str) -> str:
+        """Get path for saving files, preferring Google Drive if available.
+        
+        Args:
+            local_path: Local fallback path
+            
+        Returns:
+            Path string (Drive path if available, otherwise local)
+        """
+        # Check for Google Drive
+        drive_base = os.environ.get('DRIVE_BASE', '/content/drive/MyDrive/neuroMOE_results')
+        
+        # Check if Drive is mounted
+        if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
+            # Extract filename from local_path
+            filename = os.path.basename(local_path)
+            # Save to Drive evaluations folder (same location as eval_results.json)
+            drive_path = os.path.join(drive_base, 'evaluations', filename)
+            return drive_path
+        
+        # Also check if we're in Colab and Drive might be mounted at /content/drive
+        if os.path.exists('/content/drive/MyDrive'):
+            # Try neuroMOE_results/evaluations first
+            drive_base = '/content/drive/MyDrive/neuroMOE_results'
+            if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
+                filename = os.path.basename(local_path)
+                drive_path = os.path.join(drive_base, 'evaluations', filename)
+                return drive_path
+            
+            # Fallback to direct /content/drive/MyDrive/evaluations
+            evaluations_dir = '/content/drive/MyDrive/evaluations'
+            if os.path.exists('/content/drive/MyDrive') and os.access('/content/drive/MyDrive', os.W_OK):
+                filename = os.path.basename(local_path)
+                drive_path = os.path.join(evaluations_dir, filename)
+                return drive_path
+        
+        # Fall back to local path
+        return local_path
     
     def _keyword_domain_classification(self, text: str) -> Dict[str, float]:
         """Simple keyword-based domain classification."""
@@ -625,6 +848,21 @@ def main():
     benchmark_parser.add_argument('--samples', type=int, default=100,
                                  help='Number of samples (default: 100)')
     
+    # Generate example predictions
+    examples_parser = subparsers.add_parser('generate-examples', help='Generate example predictions with expert activations')
+    examples_parser.add_argument('--dataset-metadata', type=str, required=True,
+                                help='Path to processed_dataset.jsonl')
+    examples_parser.add_argument('--dataset-text-dir', type=str, required=True,
+                                help='Directory containing paper text files')
+    examples_parser.add_argument('--output', type=str, required=True,
+                                help='Output JSON file path (e.g., ./models/deepseek_moe/example_predictions.json)')
+    examples_parser.add_argument('--num-examples', type=int, default=10,
+                                help='Number of examples to generate (default: 10)')
+    examples_parser.add_argument('--max-input-length', type=int, default=200,
+                                help='Maximum input text length in characters (default: 200)')
+    examples_parser.add_argument('--max-prediction-length', type=int, default=50,
+                                help='Maximum prediction length in tokens (default: 50)')
+    
     args = parser.parse_args()
     
     # Initialize pipeline
@@ -693,6 +931,17 @@ def main():
     
     elif args.command == 'benchmark':
         benchmark_inference(pipeline, args.samples)
+    
+    elif args.command == 'generate-examples':
+        output_path = pipeline.generate_example_predictions(
+            dataset_metadata_path=args.dataset_metadata,
+            dataset_text_dir=args.dataset_text_dir,
+            output_path=args.output,
+            num_examples=args.num_examples,
+            max_input_length=args.max_input_length,
+            max_prediction_length=args.max_prediction_length
+        )
+        print(f"\n✅ Example predictions saved to: {output_path}")
     
     else:
         parser.print_help()

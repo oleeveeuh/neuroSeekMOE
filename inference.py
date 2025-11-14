@@ -704,7 +704,7 @@ class InferencePipeline:
                     # Baseline model - no expert activations
                     top_experts = []
                 
-                # Generate prediction (greedy decoding for multiple tokens)
+                # Generate prediction (greedy decoding with repetition penalty)
                 # Generate up to max_prediction_length tokens
                 predicted_token_ids = []
                 # Use only the non-padding tokens for generation (truncate padding)
@@ -716,10 +716,21 @@ class InferencePipeline:
                 else:
                     current_input = input_ids.clone()
                 
+                # Repetition penalty parameters
+                repetition_penalty = 1.2  # Penalize repeated tokens
+                max_repetition = 3  # Stop if same token repeated this many times
+                
                 for step in range(max_prediction_length):
                     # Check if we've exceeded max_length
                     if current_input.shape[1] >= self.max_length:
                         break
+                    
+                    # Check for repetition loop (same token repeated too many times)
+                    if len(predicted_token_ids) >= max_repetition:
+                        recent_tokens = predicted_token_ids[-max_repetition:]
+                        if len(set(recent_tokens)) == 1:
+                            # Same token repeated max_repetition times - stop generation
+                            break
                     
                     with torch.no_grad():
                         output_step = base_model(
@@ -733,7 +744,31 @@ class InferencePipeline:
                             output_step = output_step[0]
                         
                         next_token_logits = output_step[0, -1, :]  # [vocab_size]
-                        next_token_id = torch.argmax(next_token_logits).item()
+                        
+                        # Apply repetition penalty to recently generated tokens
+                        if len(predicted_token_ids) > 0:
+                            # Get last few tokens
+                            recent_window = min(10, len(predicted_token_ids))
+                            recent_tokens = predicted_token_ids[-recent_window:]
+                            
+                            # Penalize tokens that appeared recently
+                            for token_id in set(recent_tokens):
+                                if token_id < len(next_token_logits):
+                                    next_token_logits[token_id] /= repetition_penalty
+                        
+                        # Use top-k sampling to avoid getting stuck (k=50)
+                        top_k = min(50, len(next_token_logits))
+                        if top_k > 1:
+                            top_k_logits, top_k_indices = torch.topk(next_token_logits, top_k)
+                            # Sample from top-k (with slight randomness to avoid loops)
+                            probs = torch.softmax(top_k_logits, dim=-1)
+                            # Add small temperature for diversity
+                            probs = probs / 0.9  # Slight temperature
+                            probs = probs / probs.sum()  # Renormalize
+                            sampled_idx = torch.multinomial(probs, 1).item()
+                            next_token_id = top_k_indices[sampled_idx].item()
+                        else:
+                            next_token_id = torch.argmax(next_token_logits).item()
                         
                         # Validate token ID is within vocabulary
                         if next_token_id < 0 or next_token_id >= self.vocab_size:
@@ -943,11 +978,31 @@ class InferencePipeline:
                 else:
                     perplexity = float('inf')
                 
-                # Generate prediction (greedy decoding)
+                # Generate prediction (greedy decoding with repetition penalty)
                 predicted_token_ids = []
-                current_input = input_ids.clone()
+                # Use only the non-padding tokens for generation
+                non_padding_mask = (input_ids[0] != 0)
+                if non_padding_mask.any():
+                    last_non_padding_idx = non_padding_mask.nonzero()[-1].item() + 1
+                    current_input = input_ids[:, :last_non_padding_idx].clone()
+                else:
+                    current_input = input_ids.clone()
                 
-                for _ in range(max_prediction_length):
+                # Repetition penalty parameters
+                repetition_penalty = 1.2
+                max_repetition = 3
+                
+                for step in range(max_prediction_length):
+                    # Check if we've exceeded max_length
+                    if current_input.shape[1] >= self.max_length:
+                        break
+                    
+                    # Check for repetition loop
+                    if len(predicted_token_ids) >= max_repetition:
+                        recent_tokens = predicted_token_ids[-max_repetition:]
+                        if len(set(recent_tokens)) == 1:
+                            break
+                    
                     with torch.no_grad():
                         output_step = baseline_model(
                             current_input,
@@ -956,8 +1011,34 @@ class InferencePipeline:
                             return_gate_logits=False
                         )
                         
+                        if isinstance(output_step, tuple):
+                            output_step = output_step[0]
+                        
                         next_token_logits = output_step[0, -1, :]
-                        next_token_id = torch.argmax(next_token_logits).item()
+                        
+                        # Apply repetition penalty
+                        if len(predicted_token_ids) > 0:
+                            recent_window = min(10, len(predicted_token_ids))
+                            recent_tokens = predicted_token_ids[-recent_window:]
+                            for token_id in set(recent_tokens):
+                                if token_id < len(next_token_logits):
+                                    next_token_logits[token_id] /= repetition_penalty
+                        
+                        # Use top-k sampling
+                        top_k = min(50, len(next_token_logits))
+                        if top_k > 1:
+                            top_k_logits, top_k_indices = torch.topk(next_token_logits, top_k)
+                            probs = torch.softmax(top_k_logits, dim=-1)
+                            probs = probs / 0.9  # Temperature
+                            probs = probs / probs.sum()
+                            sampled_idx = torch.multinomial(probs, 1).item()
+                            next_token_id = top_k_indices[sampled_idx].item()
+                        else:
+                            next_token_id = torch.argmax(next_token_logits).item()
+                        
+                        # Validate token ID
+                        if next_token_id < 0 or next_token_id >= vocab_size:
+                            break
                         
                         if next_token_id == 0:
                             break
@@ -970,7 +1051,13 @@ class InferencePipeline:
                             pass
                         
                         predicted_token_ids.append(next_token_id)
-                        current_input = torch.cat([current_input, torch.tensor([[next_token_id]], device=self.device)], dim=1)
+                        
+                        # Append to input, truncate if needed
+                        new_token_tensor = torch.tensor([[next_token_id]], device=self.device, dtype=torch.long)
+                        if current_input.shape[1] + 1 > self.max_length:
+                            current_input = torch.cat([current_input[:, 1:], new_token_tensor], dim=1)
+                        else:
+                            current_input = torch.cat([current_input, new_token_tensor], dim=1)
                 
                 # Decode prediction
                 if predicted_token_ids:

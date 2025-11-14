@@ -179,18 +179,22 @@ class InferencePipeline:
         # Load tokenizer (try medical tokenizer first, fallback to SentencePiece)
         if TOKENIZER_WRAPPER_AVAILABLE:
             # Check if it's a HuggingFace model name or SentencePiece file
-            if os.path.exists(tokenizer_path) and tokenizer_path.endswith('.model'):
+            if os.path.exists(tokenizer_path) and (tokenizer_path.endswith('.model') or os.path.isfile(tokenizer_path)):
                 # SentencePiece file
                 self.tokenizer = TokenizerWrapper(tokenizer_path, tokenizer_type='sentencepiece')
-            else:
-                # HuggingFace model name (or use default medical tokenizer)
-                if tokenizer_path and not os.path.exists(tokenizer_path):
-                    # Assume it's a HuggingFace model name
+            elif '/' in tokenizer_path and not os.path.exists(tokenizer_path):
+                # Looks like a HuggingFace model name (contains '/' and doesn't exist as file)
+                # Examples: microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext
+                try:
                     self.tokenizer = TokenizerWrapper(tokenizer_path, tokenizer_type='huggingface')
-                else:
-                    # Use default medical tokenizer
-                    print(f"Using default medical tokenizer: {DEFAULT_MEDICAL_TOKENIZER}")
+                except Exception as e:
+                    print(f"Warning: Could not load HuggingFace tokenizer '{tokenizer_path}': {e}")
+                    print(f"Falling back to default medical tokenizer: {DEFAULT_MEDICAL_TOKENIZER}")
                     self.tokenizer = load_medical_tokenizer()
+            else:
+                # Use default medical tokenizer
+                print(f"Using default medical tokenizer: {DEFAULT_MEDICAL_TOKENIZER}")
+                self.tokenizer = load_medical_tokenizer()
         elif SENTENCEPIECE_AVAILABLE:
             # Fallback to SentencePiece
             self.tokenizer = spm.SentencePieceProcessor()
@@ -1597,7 +1601,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True,
                        help='Path to model checkpoint')
     parser.add_argument('--tokenizer', type=str, required=True,
-                       help='Path to SentencePiece tokenizer')
+                       help='Path to SentencePiece tokenizer (.model file) or HuggingFace model name (e.g., microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext)')
     parser.add_argument('--device', type=str, default='cpu',
                        choices=['cpu', 'cuda'],
                        help='Device to run on (default: cpu)')

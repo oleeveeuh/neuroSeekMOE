@@ -628,8 +628,9 @@ class InferencePipeline:
         else:
             raise FileNotFoundError(f"Dataset metadata not found: {dataset_metadata_path}")
         
-        # Sample papers
+        # Sample papers (use fixed seed for reproducibility and matching with baseline)
         if len(papers) > num_examples:
+            random.seed(42)  # Fixed seed ensures same papers selected as baseline
             papers = random.sample(papers, num_examples)
         
         example_predictions = []
@@ -741,43 +742,26 @@ class InferencePipeline:
                     else:
                         gate_logits_np = np.array(gate_logits)
                     
-                    # For Expert Choice routing, get which experts were actually selected
-                    # Each expert selects top-k tokens, so we need to see which experts selected tokens from this paper
+                    # For Expert Choice routing, determine which experts are most active for this paper
+                    # Use average gate probabilities across all tokens to identify top experts
                     if len(gate_logits_np.shape) == 2:
                         # [batch*seq_len, num_routed_experts]
-                        seq_len = input_ids.shape[1]
-                        batch_size = 1
-                        
                         # Compute probabilities
                         gate_probs = torch.softmax(torch.from_numpy(gate_logits_np), dim=-1).numpy()
                         
-                        # For Expert Choice: transpose to [num_experts, batch*seq_len]
-                        gate_probs_transposed = gate_probs.T  # [num_routed_experts, batch*seq_len]
+                        # Average probabilities across all tokens for this paper
+                        # This gives us the overall activation strength of each expert for this paper
+                        avg_gate_probs = gate_probs.mean(axis=0)  # [num_routed_experts]
                         
-                        # Each expert selects top-k tokens
-                        expert_token_selections = np.argsort(gate_probs_transposed, axis=-1)[:, -top_k:]  # [num_experts, top_k]
-                        
-                        # Count which experts selected tokens from this paper
-                        expert_counts = np.zeros(num_routed_experts, dtype=int)
-                        for expert_idx in range(num_routed_experts):
-                            selected_tokens = expert_token_selections[expert_idx]
-                            # All tokens are from this paper (batch_size=1)
-                            expert_counts[expert_idx] = len(selected_tokens)
-                        
-                        # Get experts that selected at least one token (or top-k by count)
-                        active_experts = np.where(expert_counts > 0)[0].tolist()
-                        if len(active_experts) >= top_k:
-                            # Sort by count and take top-k
-                            expert_counts_dict = {i: expert_counts[i] for i in active_experts}
-                            top_experts = sorted(active_experts, key=lambda x: expert_counts_dict[x], reverse=True)[:top_k]
-                        else:
-                            # Fallback: use top experts by average probability
-                            avg_gate_probs = gate_probs.mean(axis=0)  # [num_routed_experts]
-                            top_experts = np.argsort(avg_gate_probs)[-top_k:].tolist()
+                        # Select top-k experts by average probability
+                        # This correctly identifies which experts are most active for this specific paper
+                        top_experts = np.argsort(avg_gate_probs)[-top_k:].tolist()
+                        top_experts.reverse()  # Sort descending (highest probability first)
                     else:
                         # Fallback: use top experts by average logit
                         avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np
                         top_experts = np.argsort(avg_gate_logits)[-top_k:].tolist()
+                        top_experts.reverse()  # Sort descending
                 else:
                     # Baseline model - no expert activations
                     top_experts = []
@@ -1161,8 +1145,9 @@ class InferencePipeline:
         else:
             raise FileNotFoundError(f"Dataset metadata not found: {dataset_metadata_path}")
         
-        # Sample papers
+        # Sample papers (use fixed seed for reproducibility and matching with MoE)
         if len(papers) > num_examples:
+            random.seed(42)  # Fixed seed ensures same papers selected as MoE
             papers = random.sample(papers, num_examples)
         
         baseline_predictions = []

@@ -632,6 +632,50 @@ def main():
         
         SimpleMoEModel = DummyModel
     
+    # Load MoE routing parameters from config.yaml if available
+    moe_config = {
+        'noise_scale': 0.7,  # Default: increased for better specialization
+        'load_balance_loss_weight': 0.3,  # Default: increased for better specialization
+        'z_loss_weight': 0.003,  # Default: increased for better specialization
+        'temperature_schedule': 'linear',
+        'temperature_start': 2.0,
+        'temperature_end': 0.5,  # Default: increased to maintain exploration
+        'temperature_steps': 5000,  # Default: increased for slower decay
+    }
+    
+    # Try to load from config.yaml
+    try:
+        import yaml
+        config_path = Path('config.yaml')
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+                if 'training' in config:
+                    training_config = config['training']
+                    # Update MoE parameters from config
+                    if 'noise_scale' in training_config:
+                        moe_config['noise_scale'] = training_config['noise_scale']
+                    if 'load_balance_loss_weight' in training_config:
+                        moe_config['load_balance_loss_weight'] = training_config['load_balance_loss_weight']
+                    if 'z_loss_weight' in training_config:
+                        moe_config['z_loss_weight'] = training_config['z_loss_weight']
+                    if 'temperature_schedule' in training_config:
+                        moe_config['temperature_schedule'] = training_config['temperature_schedule']
+                    if 'temperature_start' in training_config:
+                        moe_config['temperature_start'] = training_config['temperature_start']
+                    if 'temperature_end' in training_config:
+                        moe_config['temperature_end'] = training_config['temperature_end']
+                    if 'temperature_steps' in training_config:
+                        moe_config['temperature_steps'] = training_config['temperature_steps']
+                    print(f"✅ Loaded MoE routing parameters from config.yaml")
+                    print(f"   noise_scale: {moe_config['noise_scale']}")
+                    print(f"   load_balance_loss_weight: {moe_config['load_balance_loss_weight']}")
+                    print(f"   z_loss_weight: {moe_config['z_loss_weight']}")
+                    print(f"   temperature: {moe_config['temperature_start']} → {moe_config['temperature_end']} over {moe_config['temperature_steps']} steps")
+    except Exception as e:
+        print(f"⚠️  Could not load config.yaml: {e}")
+        print(f"   Using default MoE parameters (optimized for specialization)")
+    
     # Create model with DeepSeek-MoE configuration
     # Optimized for Colab T4 (12GB VRAM): smaller embedding_dim, fewer experts
     model = SimpleMoEModel(
@@ -640,11 +684,13 @@ def main():
         num_shared_experts=2,
         num_routed_experts=4,  # Small number for Colab
         top_k=2,
-        noise_scale=0.5,
-        load_balance_loss_weight=0.1,
-        temperature_schedule="linear",
-        temperature_start=2.0,
-        temperature_end=0.1,
+        noise_scale=moe_config['noise_scale'],
+        load_balance_loss_weight=moe_config['load_balance_loss_weight'],
+        z_loss_weight=moe_config['z_loss_weight'],
+        temperature_schedule=moe_config['temperature_schedule'],
+        temperature_start=moe_config['temperature_start'],
+        temperature_end=moe_config['temperature_end'],
+        temperature_steps=moe_config['temperature_steps'],
     )
     
     # Wrap model to match expected signature: model(input_ids) -> logits

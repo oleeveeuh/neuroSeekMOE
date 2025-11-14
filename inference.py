@@ -758,20 +758,15 @@ class InferencePipeline:
                         # This ensures we show the most active experts for each paper
                         sorted_indices = np.argsort(avg_gate_probs)[::-1]  # Sort descending
                         
-                        # Show top 2-3 experts, but ensure we show experts with meaningful differences
-                        # If probabilities are very similar, show top 2; if more diverse, show top 3
-                        if num_routed_experts >= 3:
-                            # Check if there's a meaningful gap between 2nd and 3rd expert
-                            if len(sorted_indices) >= 3:
-                                prob_2nd = avg_gate_probs[sorted_indices[1]]
-                                prob_3rd = avg_gate_probs[sorted_indices[2]]
-                                # If 3rd expert is within 0.05 of 2nd, include it for diversity
-                                if prob_2nd - prob_3rd < 0.05:
-                                    num_to_show = 3
-                                else:
-                                    num_to_show = 2
+                        # Show top 2-3 experts, prioritizing diversity
+                        # Include 3rd expert if it's reasonably active (>15% prob) to show routing diversity
+                        if num_routed_experts >= 3 and len(sorted_indices) >= 3:
+                            prob_3rd = avg_gate_probs[sorted_indices[2]]
+                            # Include 3rd expert if it has >15% probability (shows meaningful activation)
+                            if prob_3rd > 0.15:
+                                num_to_show = 3
                             else:
-                                num_to_show = min(2, len(sorted_indices))
+                                num_to_show = 2
                         else:
                             num_to_show = min(2, len(sorted_indices))
                         

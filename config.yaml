@@ -116,6 +116,16 @@ training:
     drug_discovery: 1.0
     general_ml_health: 1.0
   
+  # MoE Routing & Specialization Parameters (for domain specialization)
+  # These parameters control how experts specialize on different domains
+  load_balance_loss_weight: 0.3  # Increased from default 0.1 - encourages diverse expert usage
+  noise_scale: 0.7  # Increased from default 0.5 - more exploration during training
+  z_loss_weight: 0.003  # Increased from default 0.001 - prevents over-confident routing
+  temperature_schedule: "linear"  # Temperature decay schedule
+  temperature_start: 2.0  # Starting temperature (high = more exploration)
+  temperature_end: 0.5  # Ending temperature (increased from 0.1 - maintains some exploration)
+  temperature_steps: 5000  # Steps to decay from start to end (increased from 1000 - slower decay)
+  
   # Checkpointing
   checkpoint_dir: "./checkpoints"  # Local by default; set to "/content/drive/MyDrive/neuroMOE_results/checkpoints" for Colab Drive persistence
   checkpoint_interval: 5000  # Steps between checkpoints

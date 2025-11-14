@@ -1765,20 +1765,37 @@ def evaluate_model(
     # Save embeddings for cluster analysis in notebook
     if embeddings is not None and len(embeddings) > 0:
         embeddings_path = os.path.join(results_dir, "embeddings.npz")
-        # Convert metadata to format expected by notebook
-        embeddings_metadata = {
-            'arxiv_ids': [m.get('arxiv_id', '') for m in metadata],
-            'domains': [m.get('domains', []) for m in metadata],
-            'years': [m.get('year', None) for m in metadata],
-            'has_neurodegeneration': [m.get('has_neurodegeneration', False) for m in metadata]
-        }
         
+        # Convert embeddings to numpy
+        embeddings_np = embeddings.numpy() if hasattr(embeddings, 'numpy') else np.array(embeddings)
+        
+        # Convert metadata to format expected by notebook
+        # Handle variable-length lists by converting to object arrays or strings
+        arxiv_ids = [m.get('arxiv_id', '') for m in metadata]
+        domains_list = [m.get('domains', []) for m in metadata]
+        years = [m.get('year', None) for m in metadata]
+        has_nd = [m.get('has_neurodegeneration', False) for m in metadata]
+        
+        # Convert domains to strings (join lists) for numpy compatibility
+        domains_str = []
+        for domain in domains_list:
+            if isinstance(domain, list):
+                domains_str.append(','.join(str(d) for d in domain) if domain else '')
+            else:
+                domains_str.append(str(domain) if domain else '')
+        
+        # Save with proper numpy array types
         np.savez_compressed(
             embeddings_path,
-            embeddings=embeddings.numpy(),
-            **embeddings_metadata
+            embeddings=embeddings_np,
+            arxiv_ids=np.array(arxiv_ids, dtype=object),  # Object array for variable-length strings
+            domains=np.array(domains_str, dtype=object),  # Object array for variable-length strings
+            years=np.array(years, dtype=object),  # Object array to handle None values
+            has_neurodegeneration=np.array(has_nd, dtype=bool)
         )
         print(f"\n✅ Embeddings saved to: {embeddings_path}")
+        print(f"   Embeddings shape: {embeddings_np.shape}")
+        print(f"   Metadata: {len(arxiv_ids)} papers")
         results['embeddings_path'] = embeddings_path
     
     return results

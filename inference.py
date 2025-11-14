@@ -754,21 +754,32 @@ class InferencePipeline:
                         avg_gate_probs = gate_probs.mean(axis=0)  # [num_routed_experts]
                         
                         # Select top experts by average probability
-                        # Use a threshold to show experts with significant activation (> 0.15 average prob)
-                        # Or show top 2-3 experts, whichever gives more diversity
-                        threshold = 0.15  # Minimum average probability to be considered "active"
-                        significant_experts = np.where(avg_gate_probs >= threshold)[0]
+                        # Show top 2-3 experts based on their actual probabilities
+                        # This ensures we show the most active experts for each paper
+                        sorted_indices = np.argsort(avg_gate_probs)[::-1]  # Sort descending
                         
-                        if len(significant_experts) > 0:
-                            # Sort by probability and take top experts
-                            sorted_indices = np.argsort(avg_gate_probs)[::-1]
-                            # Show top 2-3 experts, or all significant ones if fewer
-                            num_to_show = min(3, max(2, len(significant_experts)))
-                            top_experts = sorted_indices[:num_to_show].tolist()
+                        # Show top 2-3 experts, but ensure we show experts with meaningful differences
+                        # If probabilities are very similar, show top 2; if more diverse, show top 3
+                        if num_routed_experts >= 3:
+                            # Check if there's a meaningful gap between 2nd and 3rd expert
+                            if len(sorted_indices) >= 3:
+                                prob_2nd = avg_gate_probs[sorted_indices[1]]
+                                prob_3rd = avg_gate_probs[sorted_indices[2]]
+                                # If 3rd expert is within 0.05 of 2nd, include it for diversity
+                                if prob_2nd - prob_3rd < 0.05:
+                                    num_to_show = 3
+                                else:
+                                    num_to_show = 2
+                            else:
+                                num_to_show = min(2, len(sorted_indices))
                         else:
-                            # Fallback: show top 2 experts by probability even if below threshold
-                            top_experts = np.argsort(avg_gate_probs)[-2:].tolist()
-                            top_experts.reverse()
+                            num_to_show = min(2, len(sorted_indices))
+                        
+                        top_experts = sorted_indices[:num_to_show].tolist()
+                        
+                        # Debug: Print expert probabilities for first few papers to diagnose routing
+                        if len(example_predictions) < 3:  # Only for first 3 papers to avoid spam
+                            print(f"  DEBUG {paper_id}: Expert avg probs = {[f'E{i}:{p:.3f}' for i, p in enumerate(avg_gate_probs)]}, Selected: {top_experts}")
                     else:
                         # Fallback: use top experts by average logit
                         avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np

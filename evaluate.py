@@ -1121,8 +1121,11 @@ def evaluate_model(
         
         if gate_key:
             gate_weight = state_dict[gate_key]
-            embedding_dim = gate_weight.shape[0]
-            num_routed_experts = gate_weight.shape[1]
+            # PyTorch Linear layers store weights as [out_features, in_features]
+            # gate is nn.Linear(embedding_dim, num_routed_experts)
+            # So gate.weight shape is [num_routed_experts, embedding_dim]
+            num_routed_experts = gate_weight.shape[0]
+            embedding_dim = gate_weight.shape[1]
             print(f"Inferred from checkpoint: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
         else:
             # Fallback: try to infer from routed_experts

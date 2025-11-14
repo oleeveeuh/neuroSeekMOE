@@ -185,11 +185,136 @@ def train_baseline_model(
         min_length=64
     )
     
-    # Split into train/test
+    # Load metadata for stratified split (same as evaluate.py)
+    import json
+    from collections import defaultdict
+    metadata = {}
+    if os.path.exists(dataset_metadata):
+        with open(dataset_metadata, 'r') as f:
+            for line in f:
+                if line.strip():
+                    paper = json.loads(line)
+                    arxiv_id = paper.get('arxiv_id', '')
+                    if arxiv_id:
+                        metadata[arxiv_id] = paper
+    
+    # Import classify_paper_domain from evaluate.py
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        from evaluate import classify_paper_domain
+    except ImportError:
+        # Fallback: define it here if import fails
+        def classify_paper_domain(paper: dict) -> str:
+            categories = paper.get('categories', paper.get('domains', []))
+            if not isinstance(categories, list):
+                categories = [categories] if categories else []
+            title = paper.get('title', '').lower() if paper.get('title') else ''
+            abstract = paper.get('abstract', '').lower() if paper.get('abstract') else ''
+            text = title + ' ' + abstract
+            
+            has_cs = any((isinstance(cat, str) and (cat.startswith('cs.') or 'stat.' in cat.lower())) for cat in categories)
+            has_bio = any((isinstance(cat, str) and ('q-bio' in cat or 'bio' in cat.lower())) for cat in categories)
+            healthcare_domain_labels = ['medical_imaging', 'neuroscience', 'clinical', 'drug_discovery', 'neurodegeneration']
+            has_healthcare_domain = any((isinstance(cat, str) and cat in healthcare_domain_labels) for cat in categories)
+            
+            ml_keywords = ['neural network', 'deep learning', 'machine learning', 'convolutional', 'transformer']
+            healthcare_keywords = ['patient', 'clinical', 'medical', 'diagnosis', 'disease', 'treatment', 'brain', 'imaging']
+            ml_keyword_count = sum(1 for kw in ml_keywords if kw in text)
+            healthcare_keyword_count = sum(1 for kw in healthcare_keywords if kw in text)
+            
+            has_ml = has_cs or ml_keyword_count >= 1
+            has_healthcare = has_bio or has_healthcare_domain or healthcare_keyword_count >= 1
+            
+            if has_ml and has_healthcare:
+                return 'Both'
+            elif has_ml:
+                return 'ML'
+            elif has_healthcare:
+                return 'Healthcare'
+            else:
+                return 'Other'
+    
+    # Classify all papers by domain (same as evaluate.py)
     all_files = full_dataset.text_files
-    n_test = int(len(all_files) * test_split)
-    test_files = all_files[-n_test:] if n_test > 0 else []
-    train_files = all_files[:-n_test] if n_test > 0 else all_files
+    file_domains = []
+    for arxiv_id, file_path in all_files:
+        meta = metadata.get(arxiv_id, {})
+        domains = meta.get('domains', [])
+        categories = meta.get('categories', [])
+        title = meta.get('title', '')
+        abstract = meta.get('abstract', '')
+        
+        all_cats = []
+        if categories:
+            all_cats.extend(categories if isinstance(categories, list) else [categories])
+        if domains:
+            all_cats.extend(domains if isinstance(domains, list) else [domains])
+        
+        paper_dict = {
+            'categories': all_cats,
+            'domains': domains if isinstance(domains, list) else [domains] if domains else [],
+            'title': title,
+            'abstract': abstract
+        }
+        domain = classify_paper_domain(paper_dict)
+        file_domains.append((arxiv_id, file_path, domain))
+    
+    # Group files by domain
+    domain_groups = defaultdict(list)
+    for arxiv_id, file_path, domain in file_domains:
+        domain_groups[domain].append((arxiv_id, file_path))
+    
+    # Print domain distribution
+    print(f"\nFull dataset domain distribution:")
+    for domain, files in sorted(domain_groups.items()):
+        print(f"  {domain}: {len(files)} papers ({len(files)/len(all_files)*100:.1f}%)")
+    
+    # Stratified sampling: sample proportionally from each domain (same as evaluate.py)
+    import random
+    random.seed(42)  # For reproducibility - same seed as evaluate.py
+    
+    test_files = []
+    train_files = []
+    
+    for domain, files in domain_groups.items():
+        n_domain_test = max(1, int(len(files) * test_split))  # At least 1 per domain
+        random.shuffle(files)
+        domain_test = files[:n_domain_test]
+        domain_train = files[n_domain_test:]
+        test_files.extend(domain_test)
+        train_files.extend(domain_train)
+    
+    # Shuffle test files
+    random.shuffle(test_files)
+    
+    print(f"\nStratified test split:")
+    print(f"  Test set: {len(test_files)} papers")
+    print(f"  Train set: {len(train_files)} papers")
+    
+    # Verify test set domain distribution
+    test_domains = defaultdict(int)
+    for arxiv_id, _ in test_files:
+        meta = metadata.get(arxiv_id, {})
+        domains = meta.get('domains', [])
+        categories = meta.get('categories', [])
+        all_cats = []
+        if categories:
+            all_cats.extend(categories if isinstance(categories, list) else [categories])
+        if domains:
+            all_cats.extend(domains if isinstance(domains, list) else [domains])
+        paper_dict = {
+            'categories': all_cats,
+            'domains': domains if isinstance(domains, list) else [domains] if domains else [],
+            'title': meta.get('title', ''),
+            'abstract': meta.get('abstract', '')
+        }
+        domain = classify_paper_domain(paper_dict)
+        test_domains[domain] += 1
+    
+    print(f"Test set domain distribution:")
+    for domain, count in sorted(test_domains.items()):
+        print(f"  {domain}: {count} papers ({count/len(test_files)*100:.1f}%)")
     
     # Create train/test datasets
     class SplitDataset(ArXivStreamingDataset):

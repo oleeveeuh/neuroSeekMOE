@@ -809,7 +809,7 @@ def compute_perplexity(
             
             # Get number of non-padding tokens
             target_ids = batch['target_ids'].to(adapter.device)
-            num_tokens = (target_ids != 0).sum().item()
+            num_tokens = (target_ids != adapter.ignore_index).sum().item()
             
             # Accumulate loss (weighted by tokens)
             total_loss += loss.item() * num_tokens
@@ -1126,113 +1126,183 @@ def evaluate_model(
     
     try:
         from train_real import SimpleMoEModel
+        from train_baseline import BaselineTransformer
         
         # Load checkpoint first to infer model configuration
         checkpoint = torch.load(model_checkpoint, map_location='cpu')
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         
-        # Infer model configuration from checkpoint state_dict
-        # The gate layer has shape [embedding_dim, num_routed_experts]
-        gate_key = None
-        for key in state_dict.keys():
-            # Handle different checkpoint formats: 'gate.weight', 'base_model.gate.weight', etc.
-            if key.endswith('gate.weight'):
-                gate_key = key
-                break
+        # Detect if this is a baseline model (check for BaselineTransformer-specific keys)
+        # BaselineTransformer has 'transformer' but no 'gate' or 'routed_experts'
+        is_baseline = False
+        has_gate = any('gate' in key for key in state_dict.keys())
+        has_routed_experts = any('routed_experts' in key for key in state_dict.keys())
+        has_transformer = any('transformer' in key and 'transformer_layers' not in key for key in state_dict.keys())
         
-        if gate_key:
-            gate_weight = state_dict[gate_key]
-            # PyTorch Linear layers store weights as [out_features, in_features]
-            # gate is nn.Linear(embedding_dim, num_routed_experts)
-            # So gate.weight shape is [num_routed_experts, embedding_dim]
-            num_routed_experts = gate_weight.shape[0]
-            embedding_dim = gate_weight.shape[1]
-            print(f"Inferred from checkpoint: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
+        if has_transformer and not (has_gate or has_routed_experts):
+            is_baseline = True
+            print("Detected BaselineTransformer model")
         else:
-            # Fallback: try to infer from routed_experts
-            num_routed_experts = 4  # Default fallback
-            embedding_dim = 256  # Default fallback
+            print("Detected SimpleMoEModel (MoE) model")
+        
+        if is_baseline:
+            # Handle baseline model
+            # Infer embedding_dim from embedding layer
+            embedding_dim = 256  # Default
             for key in state_dict.keys():
-                if 'routed_experts.0.0.weight' in key or 'base_model.routed_experts.0.0.weight' in key:
-                    # First linear layer in first routed expert: [4*embedding_dim, embedding_dim]
-                    weight = state_dict[key]
-                    embedding_dim = weight.shape[1]
-                    break
-                elif 'shared_experts.0.0.weight' in key or 'base_model.shared_experts.0.0.weight' in key:
-                    # First linear layer in first shared expert: [4*embedding_dim, embedding_dim]
+                if 'embedding.weight' in key:
                     weight = state_dict[key]
                     embedding_dim = weight.shape[1]
                     break
             
-            # Count routed experts by counting expert modules
-            routed_expert_count = 0
+            # Infer num_layers from transformer encoder
+            num_layers = 6  # Default
             for key in state_dict.keys():
-                if 'routed_experts.' in key or 'base_model.routed_experts.' in key:
-                    # Extract expert index: routed_experts.{idx}.{layer}.weight
+                if 'transformer.layers.' in key:
                     parts = key.split('.')
                     for i, part in enumerate(parts):
-                        if part == 'routed_experts' and i + 1 < len(parts):
+                        if part == 'layers' and i + 1 < len(parts):
                             try:
-                                expert_idx = int(parts[i + 1])
-                                routed_expert_count = max(routed_expert_count, expert_idx + 1)
+                                layer_idx = int(parts[i + 1])
+                                num_layers = max(num_layers, layer_idx + 1)
                             except ValueError:
                                 pass
             
-            if routed_expert_count > 0:
-                num_routed_experts = routed_expert_count
+            print(f"Inferred baseline config: embedding_dim={embedding_dim}, num_layers={num_layers}")
+            
+            base_model = BaselineTransformer(
+                vocab_size=vocab_size,
+                embedding_dim=embedding_dim,
+                num_layers=num_layers,
+            )
+            
+            # Wrap model (baseline doesn't need special handling)
+            class ModelWrapper(nn.Module):
+                def __init__(self, base_model):
+                    super().__init__()
+                    self.base_model = base_model
+                
+                def forward(self, input_ids):
+                    output = self.base_model(input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False)
+                    if isinstance(output, tuple):
+                        return output[0]
+                    return output
+            
+            model = ModelWrapper(base_model)
+            
+            # Load checkpoint weights
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            else:
+                model.load_state_dict(checkpoint, strict=False)
+            
+            model.to(device)
+            model.eval()
+            print(f"Loaded baseline model from {model_checkpoint}")
+        else:
+            # Handle MoE model (existing code)
+            # Infer model configuration from checkpoint state_dict
+            # The gate layer has shape [embedding_dim, num_routed_experts]
+            gate_key = None
+            for key in state_dict.keys():
+                # Handle different checkpoint formats: 'gate.weight', 'base_model.gate.weight', etc.
+                if key.endswith('gate.weight'):
+                    gate_key = key
+                    break
+            
+            if gate_key:
+                gate_weight = state_dict[gate_key]
+                # PyTorch Linear layers store weights as [out_features, in_features]
+                # gate is nn.Linear(embedding_dim, num_routed_experts)
+                # So gate.weight shape is [num_routed_experts, embedding_dim]
+                num_routed_experts = gate_weight.shape[0]
+                embedding_dim = gate_weight.shape[1]
                 print(f"Inferred from checkpoint: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
             else:
-                print(f"Warning: Could not infer model config from checkpoint, using defaults: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
-        
-        # Count shared experts
-        num_shared_experts = 2  # Default
-        shared_expert_count = 0
-        for key in state_dict.keys():
-            if 'shared_experts.' in key or 'base_model.shared_experts.' in key:
-                parts = key.split('.')
-                for i, part in enumerate(parts):
-                    if part == 'shared_experts' and i + 1 < len(parts):
-                        try:
-                            expert_idx = int(parts[i + 1])
-                            shared_expert_count = max(shared_expert_count, expert_idx + 1)
-                        except ValueError:
-                            pass
-        
-        if shared_expert_count > 0:
-            num_shared_experts = shared_expert_count
-        
-        print(f"Creating model with: vocab_size={vocab_size}, embedding_dim={embedding_dim}, num_shared_experts={num_shared_experts}, num_routed_experts={num_routed_experts}")
-        
-        base_model = SimpleMoEModel(
-            vocab_size=vocab_size,
-            embedding_dim=embedding_dim,
-            num_shared_experts=num_shared_experts,
-            num_routed_experts=num_routed_experts,
-        )
-        
-        # Wrap model
-        class ModelWrapper(nn.Module):
-            def __init__(self, base_model):
-                super().__init__()
-                self.base_model = base_model
+                # Fallback: try to infer from routed_experts
+                num_routed_experts = 4  # Default fallback
+                embedding_dim = 256  # Default fallback
+                for key in state_dict.keys():
+                    if 'routed_experts.0.0.weight' in key or 'base_model.routed_experts.0.0.weight' in key:
+                        # First linear layer in first routed expert: [4*embedding_dim, embedding_dim]
+                        weight = state_dict[key]
+                        embedding_dim = weight.shape[1]
+                        break
+                    elif 'shared_experts.0.0.weight' in key or 'base_model.shared_experts.0.0.weight' in key:
+                        # First linear layer in first shared expert: [4*embedding_dim, embedding_dim]
+                        weight = state_dict[key]
+                        embedding_dim = weight.shape[1]
+                        break
+                
+                # Count routed experts by counting expert modules
+                routed_expert_count = 0
+                for key in state_dict.keys():
+                    if 'routed_experts.' in key or 'base_model.routed_experts.' in key:
+                        # Extract expert index: routed_experts.{idx}.{layer}.weight
+                        parts = key.split('.')
+                        for i, part in enumerate(parts):
+                            if part == 'routed_experts' and i + 1 < len(parts):
+                                try:
+                                    expert_idx = int(parts[i + 1])
+                                    routed_expert_count = max(routed_expert_count, expert_idx + 1)
+                                except ValueError:
+                                    pass
+                
+                if routed_expert_count > 0:
+                    num_routed_experts = routed_expert_count
+                    print(f"Inferred from checkpoint: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
+                else:
+                    print(f"Warning: Could not infer model config from checkpoint, using defaults: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
             
-            def forward(self, input_ids):
-                output = self.base_model(input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False)
-                if isinstance(output, tuple):
-                    return output[0]
-                return output
-        
-        model = ModelWrapper(base_model)
-        
-        # Load checkpoint weights
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        else:
-            model.load_state_dict(checkpoint, strict=False)
-        
-        model.to(device)
-        model.eval()
-        print(f"Loaded model from {model_checkpoint}")
+            # Count shared experts
+            num_shared_experts = 2  # Default
+            shared_expert_count = 0
+            for key in state_dict.keys():
+                if 'shared_experts.' in key or 'base_model.shared_experts.' in key:
+                    parts = key.split('.')
+                    for i, part in enumerate(parts):
+                        if part == 'shared_experts' and i + 1 < len(parts):
+                            try:
+                                expert_idx = int(parts[i + 1])
+                                shared_expert_count = max(shared_expert_count, expert_idx + 1)
+                            except ValueError:
+                                pass
+            
+            if shared_expert_count > 0:
+                num_shared_experts = shared_expert_count
+            
+            print(f"Creating model with: vocab_size={vocab_size}, embedding_dim={embedding_dim}, num_shared_experts={num_shared_experts}, num_routed_experts={num_routed_experts}")
+            
+            base_model = SimpleMoEModel(
+                vocab_size=vocab_size,
+                embedding_dim=embedding_dim,
+                num_shared_experts=num_shared_experts,
+                num_routed_experts=num_routed_experts,
+            )
+            
+            # Wrap model
+            class ModelWrapper(nn.Module):
+                def __init__(self, base_model):
+                    super().__init__()
+                    self.base_model = base_model
+                
+                def forward(self, input_ids):
+                    output = self.base_model(input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False)
+                    if isinstance(output, tuple):
+                        return output[0]
+                    return output
+            
+            model = ModelWrapper(base_model)
+            
+            # Load checkpoint weights
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            else:
+                model.load_state_dict(checkpoint, strict=False)
+            
+            model.to(device)
+            model.eval()
+            print(f"Loaded model from {model_checkpoint}")
     except Exception as e:
         print(f"Could not load model: {e}")
         raise

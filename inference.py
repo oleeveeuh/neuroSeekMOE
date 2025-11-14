@@ -548,32 +548,88 @@ class InferencePipeline:
                 else:
                     gate_logits_np = np.array(gate_logits)
                 
-                # For Expert Choice routing, get which experts were selected
-                # Average gate logits per paper to get expert preferences
+                # For Expert Choice routing, get which experts were actually selected
+                # Each expert selects top-k tokens, so we need to see which experts selected tokens from this paper
                 if len(gate_logits_np.shape) == 2:
-                    # [batch*seq_len, num_routed_experts] -> average over sequence
+                    # [batch*seq_len, num_routed_experts]
                     seq_len = input_ids.shape[1]
                     batch_size = 1
-                    gate_logits_reshaped = gate_logits_np.reshape(batch_size, seq_len, -1)
-                    avg_gate_logits = gate_logits_reshaped.mean(axis=1)  # [batch, num_experts]
                     
-                    # Get top-k experts
-                    top_experts = np.argsort(avg_gate_logits[0])[-top_k:].tolist()
+                    # Compute probabilities
+                    gate_probs = torch.softmax(torch.from_numpy(gate_logits_np), dim=-1).numpy()
+                    
+                    # For Expert Choice: transpose to [num_experts, batch*seq_len]
+                    gate_probs_transposed = gate_probs.T  # [num_routed_experts, batch*seq_len]
+                    
+                    # Each expert selects top-k tokens
+                    expert_token_selections = np.argsort(gate_probs_transposed, axis=-1)[:, -top_k:]  # [num_experts, top_k]
+                    
+                    # Count which experts selected tokens from this paper
+                    expert_counts = np.zeros(num_routed_experts, dtype=int)
+                    for expert_idx in range(num_routed_experts):
+                        selected_tokens = expert_token_selections[expert_idx]
+                        # All tokens are from this paper (batch_size=1)
+                        expert_counts[expert_idx] = len(selected_tokens)
+                    
+                    # Get experts that selected at least one token (or top-k by count)
+                    active_experts = np.where(expert_counts > 0)[0].tolist()
+                    if len(active_experts) >= top_k:
+                        # Sort by count and take top-k
+                        expert_counts_dict = {i: expert_counts[i] for i in active_experts}
+                        top_experts = sorted(active_experts, key=lambda x: expert_counts_dict[x], reverse=True)[:top_k]
+                    else:
+                        # Fallback: use top experts by average probability
+                        avg_gate_probs = gate_probs.mean(axis=0)  # [num_routed_experts]
+                        top_experts = np.argsort(avg_gate_probs)[-top_k:].tolist()
                 else:
                     # Fallback: use top experts by average logit
                     avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np
                     top_experts = np.argsort(avg_gate_logits)[-top_k:].tolist()
                 
-                # Generate prediction (greedy decoding)
-                # Get next token predictions
-                next_token_logits = logits[0, -1, :]  # [vocab_size]
-                next_token_id = torch.argmax(next_token_logits).item()
+                # Generate prediction (greedy decoding for multiple tokens)
+                # Generate up to max_prediction_length tokens
+                predicted_token_ids = []
+                current_input = input_ids.clone()
+                
+                for _ in range(max_prediction_length):
+                    with torch.no_grad():
+                        output_step = base_model(
+                            current_input,
+                            image_features=None,
+                            return_load_balance_loss=False,
+                            return_gate_logits=False
+                        )
+                        # Handle both tuple and non-tuple returns
+                        if isinstance(output_step, tuple):
+                            output_step = output_step[0]
+                        
+                        next_token_logits = output_step[0, -1, :]  # [vocab_size]
+                        next_token_id = torch.argmax(next_token_logits).item()
+                        
+                        # Stop if we hit EOS or padding token (0 is typically padding)
+                        if next_token_id == 0:
+                            break
+                        
+                        # Check for EOS token if tokenizer has it
+                        try:
+                            eos_id = self.tokenizer.piece_to_id('</s>')
+                            if next_token_id == eos_id:
+                                break
+                        except:
+                            pass
+                        
+                        predicted_token_ids.append(next_token_id)
+                        # Append to input for next iteration
+                        current_input = torch.cat([current_input, torch.tensor([[next_token_id]], device=self.device)], dim=1)
                 
                 # Decode prediction
-                try:
-                    predicted_text = self.tokenizer.decode([next_token_id])
-                except:
-                    predicted_text = f"[token_{next_token_id}]"
+                if predicted_token_ids:
+                    try:
+                        predicted_text = self.tokenizer.decode(predicted_token_ids)
+                    except:
+                        predicted_text = f"[{len(predicted_token_ids)} tokens]"
+                else:
+                    predicted_text = ""
             
             # Classify domain
             paper_dict = {
@@ -590,7 +646,8 @@ class InferencePipeline:
                 'predicted_text': predicted_text,
                 'perplexity': perplexity,
                 'activated_experts': top_experts,
-                'domain': domain
+                'domain': domain,
+                'model_type': 'moe'
             })
             
             print(f"  Generated prediction for {paper_id} (perplexity: {perplexity:.2f}, experts: {top_experts})")
@@ -604,6 +661,213 @@ class InferencePipeline:
             json.dump(example_predictions, f, indent=2, ensure_ascii=False)
         
         print(f"\nSaved {len(example_predictions)} example predictions to {final_output_path}")
+        if final_output_path != output_path:
+            print(f"  (Saved to Google Drive instead of {output_path})")
+        return final_output_path
+    
+    def generate_baseline_predictions(
+        self,
+        baseline_checkpoint_path: str,
+        dataset_metadata_path: str,
+        dataset_text_dir: str,
+        output_path: str,
+        num_examples: int = 10,
+        max_input_length: int = 200,
+        max_prediction_length: int = 50
+    ) -> str:
+        """Generate baseline model predictions for comparison.
+        
+        Args:
+            baseline_checkpoint_path: Path to baseline model checkpoint
+            dataset_metadata_path: Path to processed_dataset.jsonl
+            dataset_text_dir: Directory containing paper text files
+            output_path: Path to save baseline_predictions.json
+            num_examples: Number of examples to generate
+            max_input_length: Maximum input text length (characters)
+            max_prediction_length: Maximum prediction length (tokens)
+            
+        Returns:
+            Path to saved JSON file
+        """
+        import random
+        from evaluate import classify_paper_domain
+        
+        # Load baseline model
+        try:
+            from train_baseline import BaselineTransformer
+            
+            checkpoint = torch.load(baseline_checkpoint_path, map_location='cpu')
+            state_dict = checkpoint.get('model_state_dict', checkpoint)
+            
+            # Infer model config from checkpoint
+            embedding_dim = 256  # Default
+            for key in state_dict.keys():
+                if 'embedding.weight' in key:
+                    weight = state_dict[key]
+                    embedding_dim = weight.shape[1]
+                    break
+            
+            num_layers = 6  # Default
+            for key in state_dict.keys():
+                if 'transformer.layers.' in key:
+                    parts = key.split('.')
+                    for i, part in enumerate(parts):
+                        if part == 'layers' and i + 1 < len(parts):
+                            try:
+                                layer_idx = int(parts[i + 1])
+                                num_layers = max(num_layers, layer_idx + 1)
+                            except ValueError:
+                                pass
+            
+            vocab_size = self.tokenizer.get_piece_size()
+            
+            baseline_model = BaselineTransformer(
+                vocab_size=vocab_size,
+                embedding_dim=embedding_dim,
+                num_layers=num_layers,
+            )
+            
+            baseline_model.load_state_dict(state_dict, strict=False)
+            baseline_model.to(self.device)
+            baseline_model.eval()
+            
+            print(f"Loaded baseline model from {baseline_checkpoint_path}")
+        except Exception as e:
+            raise ValueError(f"Could not load baseline model: {e}")
+        
+        # Load metadata
+        papers = []
+        if os.path.exists(dataset_metadata_path):
+            with open(dataset_metadata_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        papers.append(json.loads(line))
+        else:
+            raise FileNotFoundError(f"Dataset metadata not found: {dataset_metadata_path}")
+        
+        # Sample papers
+        if len(papers) > num_examples:
+            papers = random.sample(papers, num_examples)
+        
+        baseline_predictions = []
+        
+        print(f"Generating {len(papers)} baseline predictions...")
+        
+        for paper in papers:
+            paper_id = paper.get('arxiv_id', paper.get('id', 'unknown'))
+            
+            # Load text
+            text_file = os.path.join(dataset_text_dir, f"{paper_id}.txt")
+            if not os.path.exists(text_file):
+                print(f"Warning: Text file not found for {paper_id}, skipping...")
+                continue
+            
+            with open(text_file, 'r', encoding='utf-8') as f:
+                full_text = f.read()
+            
+            # Prepare input (first max_input_length characters)
+            input_text = full_text[:max_input_length]
+            
+            # Tokenize input
+            input_ids = self._tokenize(input_text).to(self.device)
+            
+            # Forward pass
+            with torch.no_grad():
+                logits = baseline_model(
+                    input_ids,
+                    image_features=None,
+                    return_load_balance_loss=False,
+                    return_gate_logits=False
+                )
+                
+                # Compute perplexity
+                if input_ids.shape[1] > 1:
+                    targets = input_ids[:, 1:]
+                    logits_pred = logits[:, :-1, :]
+                    
+                    loss_per_token = F.cross_entropy(
+                        logits_pred.view(-1, logits_pred.shape[-1]),
+                        targets.view(-1),
+                        ignore_index=0,
+                        reduction='none'
+                    ).view(targets.shape)
+                    
+                    mask = (targets != 0).float()
+                    if mask.sum() > 0:
+                        avg_loss = (loss_per_token * mask).sum() / mask.sum()
+                        perplexity = float(torch.exp(avg_loss).item())
+                    else:
+                        perplexity = float('inf')
+                else:
+                    perplexity = float('inf')
+                
+                # Generate prediction (greedy decoding)
+                predicted_token_ids = []
+                current_input = input_ids.clone()
+                
+                for _ in range(max_prediction_length):
+                    with torch.no_grad():
+                        output_step = baseline_model(
+                            current_input,
+                            image_features=None,
+                            return_load_balance_loss=False,
+                            return_gate_logits=False
+                        )
+                        
+                        next_token_logits = output_step[0, -1, :]
+                        next_token_id = torch.argmax(next_token_logits).item()
+                        
+                        if next_token_id == 0:
+                            break
+                        
+                        try:
+                            eos_id = self.tokenizer.piece_to_id('</s>')
+                            if next_token_id == eos_id:
+                                break
+                        except:
+                            pass
+                        
+                        predicted_token_ids.append(next_token_id)
+                        current_input = torch.cat([current_input, torch.tensor([[next_token_id]], device=self.device)], dim=1)
+                
+                # Decode prediction
+                if predicted_token_ids:
+                    try:
+                        predicted_text = self.tokenizer.decode(predicted_token_ids)
+                    except:
+                        predicted_text = f"[{len(predicted_token_ids)} tokens]"
+                else:
+                    predicted_text = ""
+            
+            # Classify domain
+            paper_dict = {
+                'categories': paper.get('categories', []),
+                'domains': paper.get('domains', []),
+                'title': paper.get('title', ''),
+                'abstract': paper.get('abstract', '')
+            }
+            domain = classify_paper_domain(paper_dict)
+            
+            baseline_predictions.append({
+                'paper_id': paper_id,
+                'input_text': input_text,
+                'predicted_text': predicted_text,
+                'perplexity': perplexity,
+                'domain': domain,
+                'model_type': 'baseline'
+            })
+            
+            print(f"  Generated baseline prediction for {paper_id} (perplexity: {perplexity:.2f})")
+        
+        # Determine output path
+        final_output_path = self._get_drive_path_if_available(output_path)
+        
+        # Save to JSON
+        os.makedirs(os.path.dirname(final_output_path) if os.path.dirname(final_output_path) else '.', exist_ok=True)
+        with open(final_output_path, 'w', encoding='utf-8') as f:
+            json.dump(baseline_predictions, f, indent=2, ensure_ascii=False)
+        
+        print(f"\nSaved {len(baseline_predictions)} baseline predictions to {final_output_path}")
         if final_output_path != output_path:
             print(f"  (Saved to Google Drive instead of {output_path})")
         return final_output_path
@@ -863,16 +1127,44 @@ def main():
     examples_parser.add_argument('--max-prediction-length', type=int, default=50,
                                 help='Maximum prediction length in tokens (default: 50)')
     
+    # Generate baseline predictions
+    baseline_parser = subparsers.add_parser('generate-baseline', help='Generate baseline model predictions for comparison')
+    baseline_parser.add_argument('--baseline-checkpoint', type=str, required=True,
+                                help='Path to baseline model checkpoint')
+    baseline_parser.add_argument('--dataset-metadata', type=str, required=True,
+                                help='Path to processed_dataset.jsonl')
+    baseline_parser.add_argument('--dataset-text-dir', type=str, required=True,
+                                help='Directory containing paper text files')
+    baseline_parser.add_argument('--output', type=str, required=True,
+                                help='Output JSON file path (e.g., ./evaluations/baseline_predictions.json)')
+    baseline_parser.add_argument('--num-examples', type=int, default=10,
+                                help='Number of examples to generate (default: 10)')
+    baseline_parser.add_argument('--max-input-length', type=int, default=200,
+                                help='Maximum input text length in characters (default: 200)')
+    baseline_parser.add_argument('--max-prediction-length', type=int, default=50,
+                                help='Maximum prediction length in tokens (default: 50)')
+    
     args = parser.parse_args()
     
-    # Initialize pipeline
-    pipeline = InferencePipeline(
-        checkpoint_path=args.checkpoint,
-        tokenizer_path=args.tokenizer,
-        device=args.device,
-        quantize=args.quantize,
-        use_cache=not args.no_cache
-    )
+    # Initialize pipeline (only needed for non-baseline commands)
+    if args.command != 'generate-baseline':
+        pipeline = InferencePipeline(
+            checkpoint_path=args.checkpoint,
+            tokenizer_path=args.tokenizer,
+            device=args.device,
+            quantize=args.quantize,
+            use_cache=not args.no_cache
+        )
+    elif args.command == 'generate-baseline':
+        # For baseline generation, we still need a pipeline for tokenizer access
+        # Use a dummy checkpoint path (won't be loaded for baseline)
+        pipeline = InferencePipeline(
+            checkpoint_path=args.baseline_checkpoint,  # Will be overridden in generate_baseline_predictions
+            tokenizer_path=args.tokenizer,
+            device=args.device,
+            quantize=False,  # Baseline doesn't need quantization
+            use_cache=False
+        )
     
     # Execute command
     if args.command == 'embed':
@@ -942,6 +1234,18 @@ def main():
             max_prediction_length=args.max_prediction_length
         )
         print(f"\n✅ Example predictions saved to: {output_path}")
+    
+    elif args.command == 'generate-baseline':
+        output_path = pipeline.generate_baseline_predictions(
+            baseline_checkpoint_path=args.baseline_checkpoint,
+            dataset_metadata_path=args.dataset_metadata,
+            dataset_text_dir=args.dataset_text_dir,
+            output_path=args.output,
+            num_examples=args.num_examples,
+            max_input_length=args.max_input_length,
+            max_prediction_length=args.max_prediction_length
+        )
+        print(f"\n✅ Baseline predictions saved to: {output_path}")
     
     else:
         parser.print_help()

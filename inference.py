@@ -204,7 +204,7 @@ class InferencePipeline:
         print(f"Inference pipeline initialized on {device}")
     
     def _load_model(self, checkpoint_path: str) -> nn.Module:
-        """Load model from checkpoint.
+        """Load model from checkpoint, automatically detecting MoE vs Baseline.
         
         Args:
             checkpoint_path: Path to checkpoint file
@@ -214,44 +214,131 @@ class InferencePipeline:
         """
         try:
             from train_real import SimpleMoEModel
-            base_model = SimpleMoEModel(
-                vocab_size=self.vocab_size,
-                embedding_dim=256,
-                num_shared_experts=2,
-                num_routed_experts=4,
-            )
+            from train_baseline import BaselineTransformer
             
-            # Store base_model reference for expert activation capture
-            self.base_model = base_model
-            
-            # Wrap model
-            class ModelWrapper(nn.Module):
-                def __init__(self, base_model):
-                    super().__init__()
-                    self.base_model = base_model
-                
-                def forward(self, input_ids, return_gate_logits=False):
-                    output = self.base_model(
-                        input_ids,
-                        image_features=None,
-                        return_load_balance_loss=False,
-                        return_gate_logits=return_gate_logits
-                    )
-                    if isinstance(output, tuple):
-                        return output[0] if not return_gate_logits else output
-                    return output
-            
-            model = ModelWrapper(base_model)
-            
-            # Load checkpoint
+            # Load checkpoint first to detect model type
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            if 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-            else:
-                model.load_state_dict(checkpoint, strict=False)
+            state_dict = checkpoint.get('model_state_dict', checkpoint)
             
-            print(f"Loaded model from {checkpoint_path}")
-            return model
+            # Detect if this is a baseline model
+            has_gate = any('gate' in key for key in state_dict.keys())
+            has_routed_experts = any('routed_experts' in key for key in state_dict.keys())
+            has_transformer = any('transformer' in key and 'transformer_layers' not in key for key in state_dict.keys())
+            
+            is_baseline = has_transformer and not (has_gate or has_routed_experts)
+            
+            if is_baseline:
+                # Load baseline model
+                print("Detected BaselineTransformer model")
+                
+                # Infer model config from checkpoint
+                embedding_dim = 256  # Default
+                for key in state_dict.keys():
+                    if 'embedding.weight' in key:
+                        weight = state_dict[key]
+                        embedding_dim = weight.shape[1]
+                        break
+                
+                num_layers = 6  # Default
+                for key in state_dict.keys():
+                    if 'transformer.layers.' in key:
+                        parts = key.split('.')
+                        for i, part in enumerate(parts):
+                            if part == 'layers' and i + 1 < len(parts):
+                                try:
+                                    layer_idx = int(parts[i + 1])
+                                    num_layers = max(num_layers, layer_idx + 1)
+                                except ValueError:
+                                    pass
+                
+                base_model = BaselineTransformer(
+                    vocab_size=self.vocab_size,
+                    embedding_dim=embedding_dim,
+                    num_layers=num_layers,
+                )
+                
+                # Store base_model reference
+                self.base_model = base_model
+                
+                # Wrap model
+                class ModelWrapper(nn.Module):
+                    def __init__(self, base_model):
+                        super().__init__()
+                        self.base_model = base_model
+                    
+                    def forward(self, input_ids, return_gate_logits=False):
+                        output = self.base_model(
+                            input_ids,
+                            image_features=None,
+                            return_load_balance_loss=False,
+                            return_gate_logits=False
+                        )
+                        return output
+                
+                model = ModelWrapper(base_model)
+                
+                # Load checkpoint
+                if 'model_state_dict' in checkpoint:
+                    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                else:
+                    model.load_state_dict(checkpoint, strict=False)
+                
+                print(f"Loaded baseline model from {checkpoint_path}")
+                return model
+            else:
+                # Load MoE model
+                print("Detected SimpleMoEModel (MoE) model")
+                
+                # Infer model config from checkpoint
+                embedding_dim = 256  # Default
+                num_routed_experts = 4  # Default
+                
+                for key in state_dict.keys():
+                    if 'gate.weight' in key or 'base_model.gate.weight' in key:
+                        weight = state_dict[key]
+                        # gate is nn.Linear(embedding_dim, num_routed_experts)
+                        # So gate.weight shape is [num_routed_experts, embedding_dim]
+                        num_routed_experts = weight.shape[0]
+                        embedding_dim = weight.shape[1]
+                        break
+                
+                base_model = SimpleMoEModel(
+                    vocab_size=self.vocab_size,
+                    embedding_dim=embedding_dim,
+                    num_shared_experts=2,
+                    num_routed_experts=num_routed_experts,
+                )
+                
+                # Store base_model reference for expert activation capture
+                self.base_model = base_model
+                
+                # Wrap model
+                class ModelWrapper(nn.Module):
+                    def __init__(self, base_model):
+                        super().__init__()
+                        self.base_model = base_model
+                    
+                    def forward(self, input_ids, return_gate_logits=False):
+                        output = self.base_model(
+                            input_ids,
+                            image_features=None,
+                            return_load_balance_loss=False,
+                            return_gate_logits=return_gate_logits
+                        )
+                        if isinstance(output, tuple):
+                            return output[0] if not return_gate_logits else output
+                        return output
+                
+                model = ModelWrapper(base_model)
+                
+                # Load checkpoint
+                if 'model_state_dict' in checkpoint:
+                    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                else:
+                    model.load_state_dict(checkpoint, strict=False)
+                
+                print(f"Loaded MoE model from {checkpoint_path}")
+                return model
             
         except Exception as e:
             print(f"Could not load model: {e}")
@@ -471,16 +558,23 @@ class InferencePipeline:
         
         example_predictions = []
         
-        # Get base model for routing capture
+        # Get base model for routing capture (only for MoE models)
         base_model = self.base_model if self.base_model else (
             self.model.base_model if hasattr(self.model, 'base_model') else None
         )
         
-        if base_model is None:
-            raise ValueError("Could not access base model for expert activation capture")
+        # Check if this is a MoE model (has gate/routed_experts) or baseline
+        is_moe_model = base_model is not None and (
+            hasattr(base_model, 'gate') or hasattr(base_model, 'routed_experts')
+        )
         
-        top_k = getattr(base_model, 'top_k', 2)
-        num_routed_experts = getattr(base_model, 'num_routed_experts', 4)
+        if is_moe_model:
+            top_k = getattr(base_model, 'top_k', 2)
+            num_routed_experts = getattr(base_model, 'num_routed_experts', 4)
+        else:
+            print("Note: Baseline model detected - expert activations will not be captured")
+            top_k = None
+            num_routed_experts = None
         
         print(f"Generating {len(papers)} example predictions...")
         
@@ -502,21 +596,36 @@ class InferencePipeline:
             # Tokenize input
             input_ids = self._tokenize(input_text).to(self.device)
             
-            # Forward pass with routing info
+            # Forward pass (with routing info only for MoE models)
             with torch.no_grad():
-                output, routing_info = base_model(
-                    input_ids,
-                    image_features=None,
-                    return_load_balance_loss=False,
-                    return_gate_logits=True
-                )
-                
-                if routing_info is None:
-                    print(f"Warning: No routing info for {paper_id}, skipping...")
-                    continue
-                
-                gate_logits, _, _, _, _, routing_metrics = routing_info
-                logits = output  # [1, seq_len, vocab_size]
+                if is_moe_model:
+                    output, routing_info = base_model(
+                        input_ids,
+                        image_features=None,
+                        return_load_balance_loss=False,
+                        return_gate_logits=True
+                    )
+                    
+                    if routing_info is None:
+                        print(f"Warning: No routing info for {paper_id}, skipping...")
+                        continue
+                    
+                    gate_logits, _, _, _, _, routing_metrics = routing_info
+                    logits = output  # [1, seq_len, vocab_size]
+                else:
+                    # Baseline model - no routing info
+                    output = base_model(
+                        input_ids,
+                        image_features=None,
+                        return_load_balance_loss=False,
+                        return_gate_logits=False
+                    )
+                    if isinstance(output, tuple):
+                        logits = output[0]
+                    else:
+                        logits = output
+                    gate_logits = None
+                    routing_info = None
                 
                 # Compute perplexity
                 # Use input as target (next token prediction)
@@ -541,50 +650,54 @@ class InferencePipeline:
                 else:
                     perplexity = float('inf')
                 
-                # Extract expert activations
-                # gate_logits shape: [batch*seq_len, num_routed_experts]
-                if isinstance(gate_logits, torch.Tensor):
-                    gate_logits_np = gate_logits.detach().cpu().numpy()
-                else:
-                    gate_logits_np = np.array(gate_logits)
-                
-                # For Expert Choice routing, get which experts were actually selected
-                # Each expert selects top-k tokens, so we need to see which experts selected tokens from this paper
-                if len(gate_logits_np.shape) == 2:
-                    # [batch*seq_len, num_routed_experts]
-                    seq_len = input_ids.shape[1]
-                    batch_size = 1
-                    
-                    # Compute probabilities
-                    gate_probs = torch.softmax(torch.from_numpy(gate_logits_np), dim=-1).numpy()
-                    
-                    # For Expert Choice: transpose to [num_experts, batch*seq_len]
-                    gate_probs_transposed = gate_probs.T  # [num_routed_experts, batch*seq_len]
-                    
-                    # Each expert selects top-k tokens
-                    expert_token_selections = np.argsort(gate_probs_transposed, axis=-1)[:, -top_k:]  # [num_experts, top_k]
-                    
-                    # Count which experts selected tokens from this paper
-                    expert_counts = np.zeros(num_routed_experts, dtype=int)
-                    for expert_idx in range(num_routed_experts):
-                        selected_tokens = expert_token_selections[expert_idx]
-                        # All tokens are from this paper (batch_size=1)
-                        expert_counts[expert_idx] = len(selected_tokens)
-                    
-                    # Get experts that selected at least one token (or top-k by count)
-                    active_experts = np.where(expert_counts > 0)[0].tolist()
-                    if len(active_experts) >= top_k:
-                        # Sort by count and take top-k
-                        expert_counts_dict = {i: expert_counts[i] for i in active_experts}
-                        top_experts = sorted(active_experts, key=lambda x: expert_counts_dict[x], reverse=True)[:top_k]
+                # Extract expert activations (only for MoE models)
+                if is_moe_model and gate_logits is not None:
+                    # gate_logits shape: [batch*seq_len, num_routed_experts]
+                    if isinstance(gate_logits, torch.Tensor):
+                        gate_logits_np = gate_logits.detach().cpu().numpy()
                     else:
-                        # Fallback: use top experts by average probability
-                        avg_gate_probs = gate_probs.mean(axis=0)  # [num_routed_experts]
-                        top_experts = np.argsort(avg_gate_probs)[-top_k:].tolist()
+                        gate_logits_np = np.array(gate_logits)
+                    
+                    # For Expert Choice routing, get which experts were actually selected
+                    # Each expert selects top-k tokens, so we need to see which experts selected tokens from this paper
+                    if len(gate_logits_np.shape) == 2:
+                        # [batch*seq_len, num_routed_experts]
+                        seq_len = input_ids.shape[1]
+                        batch_size = 1
+                        
+                        # Compute probabilities
+                        gate_probs = torch.softmax(torch.from_numpy(gate_logits_np), dim=-1).numpy()
+                        
+                        # For Expert Choice: transpose to [num_experts, batch*seq_len]
+                        gate_probs_transposed = gate_probs.T  # [num_routed_experts, batch*seq_len]
+                        
+                        # Each expert selects top-k tokens
+                        expert_token_selections = np.argsort(gate_probs_transposed, axis=-1)[:, -top_k:]  # [num_experts, top_k]
+                        
+                        # Count which experts selected tokens from this paper
+                        expert_counts = np.zeros(num_routed_experts, dtype=int)
+                        for expert_idx in range(num_routed_experts):
+                            selected_tokens = expert_token_selections[expert_idx]
+                            # All tokens are from this paper (batch_size=1)
+                            expert_counts[expert_idx] = len(selected_tokens)
+                        
+                        # Get experts that selected at least one token (or top-k by count)
+                        active_experts = np.where(expert_counts > 0)[0].tolist()
+                        if len(active_experts) >= top_k:
+                            # Sort by count and take top-k
+                            expert_counts_dict = {i: expert_counts[i] for i in active_experts}
+                            top_experts = sorted(active_experts, key=lambda x: expert_counts_dict[x], reverse=True)[:top_k]
+                        else:
+                            # Fallback: use top experts by average probability
+                            avg_gate_probs = gate_probs.mean(axis=0)  # [num_routed_experts]
+                            top_experts = np.argsort(avg_gate_probs)[-top_k:].tolist()
+                    else:
+                        # Fallback: use top experts by average logit
+                        avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np
+                        top_experts = np.argsort(avg_gate_logits)[-top_k:].tolist()
                 else:
-                    # Fallback: use top experts by average logit
-                    avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np
-                    top_experts = np.argsort(avg_gate_logits)[-top_k:].tolist()
+                    # Baseline model - no expert activations
+                    top_experts = []
                 
                 # Generate prediction (greedy decoding for multiple tokens)
                 # Generate up to max_prediction_length tokens
@@ -645,12 +758,15 @@ class InferencePipeline:
                 'input_text': input_text,
                 'predicted_text': predicted_text,
                 'perplexity': perplexity,
-                'activated_experts': top_experts,
+                'activated_experts': top_experts if is_moe_model else [],
                 'domain': domain,
-                'model_type': 'moe'
+                'model_type': 'moe' if is_moe_model else 'baseline'
             })
             
-            print(f"  Generated prediction for {paper_id} (perplexity: {perplexity:.2f}, experts: {top_experts})")
+            if is_moe_model:
+                print(f"  Generated prediction for {paper_id} (perplexity: {perplexity:.2f}, experts: {top_experts})")
+            else:
+                print(f"  Generated prediction for {paper_id} (perplexity: {perplexity:.2f})")
         
         # Determine output path - prefer Google Drive if available
         final_output_path = self._get_drive_path_if_available(output_path)

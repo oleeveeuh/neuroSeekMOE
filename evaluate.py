@@ -1762,6 +1762,25 @@ def evaluate_model(
             print(f"\n✅ Expert activations saved to: {activations_path}")
             results['expert_activations_path'] = activations_path
     
+    # Save embeddings for cluster analysis in notebook
+    if embeddings is not None and len(embeddings) > 0:
+        embeddings_path = os.path.join(results_dir, "embeddings.npz")
+        # Convert metadata to format expected by notebook
+        embeddings_metadata = {
+            'arxiv_ids': [m.get('arxiv_id', '') for m in metadata],
+            'domains': [m.get('domains', []) for m in metadata],
+            'years': [m.get('year', None) for m in metadata],
+            'has_neurodegeneration': [m.get('has_neurodegeneration', False) for m in metadata]
+        }
+        
+        np.savez_compressed(
+            embeddings_path,
+            embeddings=embeddings.numpy(),
+            **embeddings_metadata
+        )
+        print(f"\n✅ Embeddings saved to: {embeddings_path}")
+        results['embeddings_path'] = embeddings_path
+    
     return results
 
 

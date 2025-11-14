@@ -56,6 +56,14 @@ try:
 except ImportError:
     SENTENCEPIECE_AVAILABLE = False
 
+# Import tokenizer wrapper for medical tokenizer support
+try:
+    from tokenizer_wrapper import TokenizerWrapper, load_medical_tokenizer, DEFAULT_MEDICAL_TOKENIZER
+    TOKENIZER_WRAPPER_AVAILABLE = True
+except ImportError:
+    TOKENIZER_WRAPPER_AVAILABLE = False
+    print("Warning: tokenizer_wrapper not available. Using SentencePiece only.")
+
 try:
     import onnx
     import onnxruntime
@@ -157,7 +165,7 @@ class InferencePipeline:
         
         Args:
             checkpoint_path: Path to model checkpoint
-            tokenizer_path: Path to SentencePiece tokenizer
+            tokenizer_path: Path to SentencePiece tokenizer (.model file) or HuggingFace model name
             device: Device to run on ('cpu' or 'cuda')
             max_length: Maximum sequence length
             use_cache: Whether to use embedding cache
@@ -168,12 +176,28 @@ class InferencePipeline:
         self.use_cache = use_cache
         self.quantize = quantize
         
-        # Load tokenizer
-        if not SENTENCEPIECE_AVAILABLE:
-            raise ImportError("sentencepiece package required")
+        # Load tokenizer (try medical tokenizer first, fallback to SentencePiece)
+        if TOKENIZER_WRAPPER_AVAILABLE:
+            # Check if it's a HuggingFace model name or SentencePiece file
+            if os.path.exists(tokenizer_path) and tokenizer_path.endswith('.model'):
+                # SentencePiece file
+                self.tokenizer = TokenizerWrapper(tokenizer_path, tokenizer_type='sentencepiece')
+            else:
+                # HuggingFace model name (or use default medical tokenizer)
+                if tokenizer_path and not os.path.exists(tokenizer_path):
+                    # Assume it's a HuggingFace model name
+                    self.tokenizer = TokenizerWrapper(tokenizer_path, tokenizer_type='huggingface')
+                else:
+                    # Use default medical tokenizer
+                    print(f"Using default medical tokenizer: {DEFAULT_MEDICAL_TOKENIZER}")
+                    self.tokenizer = load_medical_tokenizer()
+        elif SENTENCEPIECE_AVAILABLE:
+            # Fallback to SentencePiece
+            self.tokenizer = spm.SentencePieceProcessor()
+            self.tokenizer.load(tokenizer_path)
+        else:
+            raise ImportError("Neither tokenizer_wrapper nor sentencepiece available. Install transformers or sentencepiece.")
         
-        self.tokenizer = spm.SentencePieceProcessor()
-        self.tokenizer.load(tokenizer_path)
         self.vocab_size = self.tokenizer.get_piece_size()
         print(f"Loaded tokenizer (vocab_size={self.vocab_size})")
         
@@ -359,9 +383,10 @@ class InferencePipeline:
         if len(token_ids) > self.max_length:
             token_ids = token_ids[:self.max_length]
         
-        # Pad to max_length
+        # Pad to max_length (use pad_token_id if available)
+        pad_id = getattr(self.tokenizer, 'pad_token_id', 0)
         if len(token_ids) < self.max_length:
-            token_ids = token_ids + [0] * (self.max_length - len(token_ids))
+            token_ids = token_ids + [pad_id] * (self.max_length - len(token_ids))
         
         return torch.tensor([token_ids], dtype=torch.long)
     
@@ -793,16 +818,28 @@ class InferencePipeline:
                         if next_token_id < 0 or next_token_id >= self.vocab_size:
                             break
                         
-                        # Stop if we hit EOS or padding token (0 is typically padding)
-                        if next_token_id == 0:
+                        # Stop if we hit padding token
+                        pad_id = getattr(self.tokenizer, 'pad_token_id', 0)
+                        if next_token_id == pad_id:
+                            break
+                        
+                        # Also stop on UNK token if it's 0
+                        unk_id = getattr(self.tokenizer, 'unk_token_id', 0)
+                        if next_token_id == unk_id and unk_id != 0:
                             break
                         
                         # Check for EOS token if tokenizer has it
                         try:
-                            eos_id = self.tokenizer.piece_to_id('</s>')
+                            if hasattr(self.tokenizer, 'eos_token_id'):
+                                eos_id = self.tokenizer.eos_token_id
+                            else:
+                                eos_id = self.tokenizer.piece_to_id('</s>')
                             if next_token_id == eos_id:
                                 break
                         except:
+                            # Try alternative EOS token IDs
+                            if next_token_id == 2:  # Common EOS ID
+                                break
                             pass
                         
                         predicted_token_ids.append(next_token_id)
@@ -840,11 +877,12 @@ class InferencePipeline:
                             # Decode tokens
                             predicted_text = self.tokenizer.decode(valid_token_ids)
                             
-                                # Improved SentencePiece cleaning
+                                # Improved text cleaning (works for both SentencePiece and HuggingFace)
                             if predicted_text:
-                                # Replace SentencePiece word boundary markers properly
+                                # Replace SentencePiece word boundary markers (if present)
                                 # SentencePiece uses ▁ to mark word boundaries
-                                predicted_text = predicted_text.replace('▁', ' ')
+                                if '▁' in predicted_text:
+                                    predicted_text = predicted_text.replace('▁', ' ')
                                 
                                 # Remove excessive whitespace
                                 predicted_text = ' '.join(predicted_text.split())
@@ -921,8 +959,14 @@ class InferencePipeline:
                                         # Skip special tokens
                                         if piece.startswith('<') and piece.endswith('>'):
                                             continue
-                                        # Clean the piece
+                                        # Skip HuggingFace special tokens like [PAD], [UNK], etc.
+                                        if piece.startswith('[') and piece.endswith(']'):
+                                            continue
+                                        # Clean the piece (handle both SentencePiece and HuggingFace)
                                         cleaned = piece.replace('▁', ' ').strip()
+                                        # Remove ## prefix used by some HuggingFace tokenizers
+                                        if cleaned.startswith('##'):
+                                            cleaned = cleaned[2:]
                                         if cleaned and len(cleaned) > 0:
                                             decoded_parts.append(cleaned)
                                     except:
@@ -1237,11 +1281,12 @@ class InferencePipeline:
                             # Decode tokens
                             predicted_text = self.tokenizer.decode(valid_token_ids)
                             
-                                # Improved SentencePiece cleaning
+                                # Improved text cleaning (works for both SentencePiece and HuggingFace)
                             if predicted_text:
-                                # Replace SentencePiece word boundary markers properly
+                                # Replace SentencePiece word boundary markers (if present)
                                 # SentencePiece uses ▁ to mark word boundaries
-                                predicted_text = predicted_text.replace('▁', ' ')
+                                if '▁' in predicted_text:
+                                    predicted_text = predicted_text.replace('▁', ' ')
                                 
                                 # Remove excessive whitespace
                                 predicted_text = ' '.join(predicted_text.split())
@@ -1318,8 +1363,14 @@ class InferencePipeline:
                                         # Skip special tokens
                                         if piece.startswith('<') and piece.endswith('>'):
                                             continue
-                                        # Clean the piece
+                                        # Skip HuggingFace special tokens like [PAD], [UNK], etc.
+                                        if piece.startswith('[') and piece.endswith(']'):
+                                            continue
+                                        # Clean the piece (handle both SentencePiece and HuggingFace)
                                         cleaned = piece.replace('▁', ' ').strip()
+                                        # Remove ## prefix used by some HuggingFace tokenizers
+                                        if cleaned.startswith('##'):
+                                            cleaned = cleaned[2:]
                                         if cleaned and len(cleaned) > 0:
                                             decoded_parts.append(cleaned)
                                     except:

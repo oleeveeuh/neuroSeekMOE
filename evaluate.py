@@ -467,19 +467,38 @@ class ExpertActivationHook:
         expert_probs_all = np.concatenate(self.expert_probs, axis=0)  # (N_samples, N_experts)
         
         # Create binary activation matrix from probabilities
-        # Experts with probability > threshold are considered "activated"
-        # Or use top-k per sample
+        # For Expert Choice routing, activations are already computed in capture_batch()
+        # We just need to create the binary matrix from probabilities
         num_experts = expert_probs_all.shape[1]
         expert_activations = np.zeros_like(expert_probs_all, dtype=bool)
         
-        # For each sample, mark top-k experts as activated
-        # Use top_k from model if available, otherwise use 2
-        top_k = getattr(self.base_model, 'top_k', 2) if hasattr(self.base_model, 'top_k') else 2
-        top_k = min(top_k, num_experts)
+        # Mark experts as activated if they have non-zero probability
+        # This reflects which experts actually processed tokens from each paper
+        # (In Expert Choice, multiple experts can process tokens from the same paper)
+        expert_activations = expert_probs_all > 0
         
-        for i in range(expert_probs_all.shape[0]):
-            top_indices = np.argsort(expert_probs_all[i])[-top_k:]
-            expert_activations[i, top_indices] = True
+        # Debug: Check if probabilities are identical across experts
+        if expert_probs_all.shape[0] > 0:
+            sample_probs = expert_probs_all[0]
+            if len(sample_probs) > 1:
+                probs_std = np.std(sample_probs)
+                if probs_std < 1e-6:
+                    print(f"WARNING: Expert probabilities are nearly identical (std={probs_std:.2e}). "
+                          f"This suggests the model hasn't learned to differentiate experts.")
+                else:
+                    print(f"Expert probability diversity: std={probs_std:.4f} (good if > 0.01)")
+        
+        # Debug: Check activation diversity
+        activation_counts = expert_activations.sum(axis=0)  # Count activations per expert
+        if len(activation_counts) > 1:
+            activation_std = np.std(activation_counts)
+            activation_mean = np.mean(activation_counts)
+            print(f"Expert activation statistics: mean={activation_mean:.1f}, std={activation_std:.1f}, "
+                  f"min={activation_counts.min()}, max={activation_counts.max()}")
+            if activation_std < 1.0:
+                print(f"WARNING: Experts have very similar activation counts. This suggests they're routing identically.")
+            else:
+                print(f"✓ Experts show different activation patterns (std={activation_std:.1f})")
         
         return {
             'expert_activations': expert_activations,
@@ -1542,6 +1561,46 @@ def evaluate_model(
     if activation_hook is not None:
         activations = activation_hook.get_activations()
         if activations:
+            # Debug: Print expert activation statistics
+            expert_activations = activations.get('expert_activations')
+            expert_probs = activations.get('expert_probs')
+            if expert_activations is not None and expert_probs is not None:
+                num_samples, num_experts = expert_activations.shape
+                print(f"\n{'='*60}")
+                print("EXPERT ACTIVATION ANALYSIS")
+                print(f"{'='*60}")
+                print(f"Total samples: {num_samples}, Total experts: {num_experts}")
+                
+                # Check activation diversity
+                activation_counts = expert_activations.sum(axis=0)  # Count activations per expert
+                activation_std = np.std(activation_counts)
+                activation_mean = np.mean(activation_counts)
+                print(f"\nActivation counts per expert:")
+                print(f"  Mean: {activation_mean:.1f}, Std: {activation_std:.1f}")
+                print(f"  Min: {activation_counts.min()}, Max: {activation_counts.max()}")
+                for expert_id in range(num_experts):
+                    print(f"  Expert {expert_id}: {activation_counts[expert_id]} activations")
+                
+                # Check probability diversity
+                if expert_probs.shape[0] > 0:
+                    sample_probs = expert_probs[0]
+                    probs_std = np.std(sample_probs)
+                    probs_mean = np.mean(sample_probs)
+                    print(f"\nProbability diversity (first sample):")
+                    print(f"  Mean: {probs_mean:.4f}, Std: {probs_std:.4f}")
+                    if probs_std < 1e-6:
+                        print(f"  ⚠️  WARNING: Expert probabilities are nearly identical!")
+                        print(f"     This suggests the model hasn't learned to differentiate experts.")
+                    else:
+                        print(f"  ✓ Experts show probability diversity")
+                
+                # Check if all experts activate on same papers
+                if activation_std < 1.0:
+                    print(f"\n⚠️  WARNING: Experts have very similar activation counts (std={activation_std:.1f})")
+                    print(f"   This suggests they're routing identically.")
+                else:
+                    print(f"\n✓ Experts show different activation patterns (std={activation_std:.1f})")
+                print(f"{'='*60}\n")
             # Determine output path - save to Drive results folder if available
             drive_base = os.environ.get('DRIVE_BASE', '/content/drive/MyDrive/neuroMOE_results')
             

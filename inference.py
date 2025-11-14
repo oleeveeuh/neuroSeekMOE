@@ -596,6 +596,11 @@ class InferencePipeline:
             # Tokenize input
             input_ids = self._tokenize(input_text).to(self.device)
             
+            # Validate token IDs are within vocabulary
+            if (input_ids < 0).any() or (input_ids >= self.vocab_size).any():
+                print(f"Warning: Invalid token IDs in input for {paper_id}, skipping...")
+                continue
+            
             # Forward pass (with routing info only for MoE models)
             with torch.no_grad():
                 if is_moe_model:
@@ -702,9 +707,20 @@ class InferencePipeline:
                 # Generate prediction (greedy decoding for multiple tokens)
                 # Generate up to max_prediction_length tokens
                 predicted_token_ids = []
-                current_input = input_ids.clone()
+                # Use only the non-padding tokens for generation (truncate padding)
+                # Find the last non-zero token
+                non_padding_mask = (input_ids[0] != 0)
+                if non_padding_mask.any():
+                    last_non_padding_idx = non_padding_mask.nonzero()[-1].item() + 1
+                    current_input = input_ids[:, :last_non_padding_idx].clone()
+                else:
+                    current_input = input_ids.clone()
                 
-                for _ in range(max_prediction_length):
+                for step in range(max_prediction_length):
+                    # Check if we've exceeded max_length
+                    if current_input.shape[1] >= self.max_length:
+                        break
+                    
                     with torch.no_grad():
                         output_step = base_model(
                             current_input,
@@ -719,6 +735,10 @@ class InferencePipeline:
                         next_token_logits = output_step[0, -1, :]  # [vocab_size]
                         next_token_id = torch.argmax(next_token_logits).item()
                         
+                        # Validate token ID is within vocabulary
+                        if next_token_id < 0 or next_token_id >= self.vocab_size:
+                            break
+                        
                         # Stop if we hit EOS or padding token (0 is typically padding)
                         if next_token_id == 0:
                             break
@@ -732,8 +752,14 @@ class InferencePipeline:
                             pass
                         
                         predicted_token_ids.append(next_token_id)
-                        # Append to input for next iteration
-                        current_input = torch.cat([current_input, torch.tensor([[next_token_id]], device=self.device)], dim=1)
+                        
+                        # Append to input for next iteration, but truncate if needed
+                        new_token_tensor = torch.tensor([[next_token_id]], device=self.device, dtype=torch.long)
+                        if current_input.shape[1] + 1 > self.max_length:
+                            # Truncate from the beginning to make room
+                            current_input = torch.cat([current_input[:, 1:], new_token_tensor], dim=1)
+                        else:
+                            current_input = torch.cat([current_input, new_token_tensor], dim=1)
                 
                 # Decode prediction
                 if predicted_token_ids:

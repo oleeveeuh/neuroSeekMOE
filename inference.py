@@ -599,7 +599,7 @@ class InferencePipeline:
         dataset_text_dir: str,
         output_path: str,
         num_examples: int = 10,
-        max_input_length: int = 200,
+        max_input_length: int = 500,  # Increased from 200 for better context
         max_prediction_length: int = 50
     ) -> str:
         """Generate example predictions with expert activations.
@@ -753,14 +753,26 @@ class InferencePipeline:
                         # This gives us the overall activation strength of each expert for this paper
                         avg_gate_probs = gate_probs.mean(axis=0)  # [num_routed_experts]
                         
-                        # Select top-k experts by average probability
-                        # This correctly identifies which experts are most active for this specific paper
-                        top_experts = np.argsort(avg_gate_probs)[-top_k:].tolist()
-                        top_experts.reverse()  # Sort descending (highest probability first)
+                        # Select top experts by average probability
+                        # Use a threshold to show experts with significant activation (> 0.15 average prob)
+                        # Or show top 2-3 experts, whichever gives more diversity
+                        threshold = 0.15  # Minimum average probability to be considered "active"
+                        significant_experts = np.where(avg_gate_probs >= threshold)[0]
+                        
+                        if len(significant_experts) > 0:
+                            # Sort by probability and take top experts
+                            sorted_indices = np.argsort(avg_gate_probs)[::-1]
+                            # Show top 2-3 experts, or all significant ones if fewer
+                            num_to_show = min(3, max(2, len(significant_experts)))
+                            top_experts = sorted_indices[:num_to_show].tolist()
+                        else:
+                            # Fallback: show top 2 experts by probability even if below threshold
+                            top_experts = np.argsort(avg_gate_probs)[-2:].tolist()
+                            top_experts.reverse()
                     else:
                         # Fallback: use top experts by average logit
                         avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np
-                        top_experts = np.argsort(avg_gate_logits)[-top_k:].tolist()
+                        top_experts = np.argsort(avg_gate_logits)[-2:].tolist()
                         top_experts.reverse()  # Sort descending
                 else:
                     # Baseline model - no expert activations
@@ -1059,7 +1071,7 @@ class InferencePipeline:
         dataset_text_dir: str,
         output_path: str,
         num_examples: int = 10,
-        max_input_length: int = 200,
+        max_input_length: int = 500,  # Increased from 200 for better context
         max_prediction_length: int = 50
     ) -> str:
         """Generate baseline model predictions for comparison.
@@ -1718,8 +1730,8 @@ def main():
                                 help='Output JSON file path (e.g., ./models/deepseek_moe/example_predictions.json)')
     examples_parser.add_argument('--num-examples', type=int, default=10,
                                 help='Number of examples to generate (default: 10)')
-    examples_parser.add_argument('--max-input-length', type=int, default=200,
-                                help='Maximum input text length in characters (default: 200)')
+    examples_parser.add_argument('--max-input-length', type=int, default=500,
+                                help='Maximum input text length in characters (default: 500, increased from 200 for better context)')
     examples_parser.add_argument('--max-prediction-length', type=int, default=50,
                                 help='Maximum prediction length in tokens (default: 50)')
     
@@ -1735,8 +1747,8 @@ def main():
                                 help='Output JSON file path (e.g., ./evaluations/baseline_predictions.json)')
     baseline_parser.add_argument('--num-examples', type=int, default=10,
                                 help='Number of examples to generate (default: 10)')
-    baseline_parser.add_argument('--max-input-length', type=int, default=200,
-                                help='Maximum input text length in characters (default: 200)')
+    baseline_parser.add_argument('--max-input-length', type=int, default=500,
+                                help='Maximum input text length in characters (default: 500, increased from 200 for better context)')
     baseline_parser.add_argument('--max-prediction-length', type=int, default=50,
                                 help='Maximum prediction length in tokens (default: 50)')
     

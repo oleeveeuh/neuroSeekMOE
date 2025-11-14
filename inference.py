@@ -840,7 +840,7 @@ class InferencePipeline:
                             # Decode tokens
                             predicted_text = self.tokenizer.decode(valid_token_ids)
                             
-                            # Improved SentencePiece cleaning
+                                # Improved SentencePiece cleaning
                             if predicted_text:
                                 # Replace SentencePiece word boundary markers properly
                                 # SentencePiece uses ▁ to mark word boundaries
@@ -853,11 +853,32 @@ class InferencePipeline:
                                 predicted_text = predicted_text.replace('  ', ' ')
                                 predicted_text = predicted_text.strip()
                                 
-                                # Filter out obviously broken tokens (very short fragments)
+                                # Filter out obviously broken tokens and artifacts
                                 words = predicted_text.split()
-                                # Remove single-character "words" that are likely artifacts
-                                words = [w for w in words if len(w) > 1 or w.isalnum()]
-                                predicted_text = ' '.join(words)
+                                filtered_words = []
+                                for w in words:
+                                    # Skip very short non-alphanumeric fragments
+                                    if len(w) <= 1 and not w.isalnum():
+                                        continue
+                                    # Skip number sequences that look like malformed IDs (e.g., "0009", "−0007−")
+                                    cleaned_num = w.replace('-', '').replace('−', '').replace('+', '').replace('.', '')
+                                    if cleaned_num.isdigit() and len(cleaned_num) >= 4:
+                                        continue
+                                    # Skip patterns like "0009 −0007−" (number with special chars)
+                                    if any(c.isdigit() for c in w) and any(c in '−+<>[]{}' for c in w) and len(w) >= 6:
+                                        continue
+                                    # Skip words that are mostly punctuation or special chars
+                                    alnum_count = len([c for c in w if c.isalnum()])
+                                    if alnum_count < len(w) * 0.3 and len(w) > 2:
+                                        continue
+                                    # Skip incomplete words ending with common artifact patterns
+                                    if w.endswith(('>', '<', ']', '[', '}', '{')) and len(w) < 5:
+                                        continue
+                                    # Skip malformed patterns like "stringxpergraph" (likely tokenization error)
+                                    if len(w) > 10 and not any(c.isspace() for c in w) and alnum_count < len(w) * 0.7:
+                                        continue
+                                    filtered_words.append(w)
+                                predicted_text = ' '.join(filtered_words)
                         else:
                             predicted_text = ""
                     except Exception as e:
@@ -1187,7 +1208,7 @@ class InferencePipeline:
                             # Decode tokens
                             predicted_text = self.tokenizer.decode(valid_token_ids)
                             
-                            # Improved SentencePiece cleaning
+                                # Improved SentencePiece cleaning
                             if predicted_text:
                                 # Replace SentencePiece word boundary markers properly
                                 # SentencePiece uses ▁ to mark word boundaries
@@ -1200,11 +1221,32 @@ class InferencePipeline:
                                 predicted_text = predicted_text.replace('  ', ' ')
                                 predicted_text = predicted_text.strip()
                                 
-                                # Filter out obviously broken tokens (very short fragments)
+                                # Filter out obviously broken tokens and artifacts
                                 words = predicted_text.split()
-                                # Remove single-character "words" that are likely artifacts
-                                words = [w for w in words if len(w) > 1 or w.isalnum()]
-                                predicted_text = ' '.join(words)
+                                filtered_words = []
+                                for w in words:
+                                    # Skip very short non-alphanumeric fragments
+                                    if len(w) <= 1 and not w.isalnum():
+                                        continue
+                                    # Skip number sequences that look like malformed IDs (e.g., "0009", "−0007−")
+                                    cleaned_num = w.replace('-', '').replace('−', '').replace('+', '').replace('.', '')
+                                    if cleaned_num.isdigit() and len(cleaned_num) >= 4:
+                                        continue
+                                    # Skip patterns like "0009 −0007−" (number with special chars)
+                                    if any(c.isdigit() for c in w) and any(c in '−+<>[]{}' for c in w) and len(w) >= 6:
+                                        continue
+                                    # Skip words that are mostly punctuation or special chars
+                                    alnum_count = len([c for c in w if c.isalnum()])
+                                    if alnum_count < len(w) * 0.3 and len(w) > 2:
+                                        continue
+                                    # Skip incomplete words ending with common artifact patterns
+                                    if w.endswith(('>', '<', ']', '[', '}', '{')) and len(w) < 5:
+                                        continue
+                                    # Skip malformed patterns like "stringxpergraph" (likely tokenization error)
+                                    if len(w) > 10 and not any(c.isspace() for c in w) and alnum_count < len(w) * 0.7:
+                                        continue
+                                    filtered_words.append(w)
+                                predicted_text = ' '.join(filtered_words)
                         else:
                             predicted_text = ""
                     except Exception as e:

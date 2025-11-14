@@ -205,8 +205,23 @@ class InferencePipeline:
         self.vocab_size = self.tokenizer.get_piece_size()
         print(f"Loaded tokenizer (vocab_size={self.vocab_size})")
         
-        # Load model
+        # Store tokenizer vocab_size for tokenization
+        self.tokenizer_vocab_size = self.vocab_size
+        
+        # Load model (this will detect and use checkpoint vocab_size)
         self.model = self._load_model(checkpoint_path)
+        
+        # After model loading, check if there's a mismatch
+        # The model's vocab_size is stored in the model itself
+        if hasattr(self.model, 'base_model') and hasattr(self.model.base_model, 'embedding'):
+            model_vocab_size = self.model.base_model.embedding.weight.shape[0]
+            if model_vocab_size != self.tokenizer_vocab_size:
+                print(f"\n⚠️  IMPORTANT: Vocabulary size mismatch detected!")
+                print(f"   Model vocab_size: {model_vocab_size}")
+                print(f"   Tokenizer vocab_size: {self.tokenizer_vocab_size}")
+                print(f"   Token IDs from tokenizer may be out of range for the model")
+                print(f"   Recommendation: Use the original tokenizer that matches the checkpoint")
+                print(f"   Or retrain the model with the new tokenizer for optimal performance\n")
         self.model.to(self.device)
         self.model.eval()
         
@@ -248,6 +263,38 @@ class InferencePipeline:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
             state_dict = checkpoint.get('model_state_dict', checkpoint)
             
+            # Detect vocab_size from checkpoint (CRITICAL: must match checkpoint, not tokenizer)
+            checkpoint_vocab_size = None
+            for key in state_dict.keys():
+                if 'embedding.weight' in key or 'base_model.embedding.weight' in key:
+                    weight = state_dict[key]
+                    checkpoint_vocab_size = weight.shape[0]  # vocab_size is first dimension
+                    print(f"Detected vocab_size from checkpoint: {checkpoint_vocab_size}")
+                    break
+            
+            if checkpoint_vocab_size is None:
+                # Fallback: try decoder weight
+                for key in state_dict.keys():
+                    if 'decoder' in key and 'weight' in key and len(state_dict[key].shape) == 2:
+                        weight = state_dict[key]
+                        checkpoint_vocab_size = weight.shape[0]
+                        print(f"Detected vocab_size from decoder: {checkpoint_vocab_size}")
+                        break
+            
+            if checkpoint_vocab_size is None:
+                print(f"Warning: Could not detect vocab_size from checkpoint, using tokenizer vocab_size: {self.vocab_size}")
+                checkpoint_vocab_size = self.vocab_size
+            elif checkpoint_vocab_size != self.vocab_size:
+                print(f"⚠️  WARNING: Vocabulary size mismatch!")
+                print(f"   Checkpoint vocab_size: {checkpoint_vocab_size}")
+                print(f"   Tokenizer vocab_size: {self.vocab_size}")
+                print(f"   Using checkpoint vocab_size ({checkpoint_vocab_size}) for model creation")
+                print(f"   Note: Token IDs from tokenizer may not match model vocabulary")
+                print(f"   Recommendation: Use the original tokenizer or retrain the model with the new tokenizer")
+            
+            # Use checkpoint vocab_size for model creation
+            model_vocab_size = checkpoint_vocab_size
+            
             # Detect if this is a baseline model
             has_gate = any('gate' in key for key in state_dict.keys())
             has_routed_experts = any('routed_experts' in key for key in state_dict.keys())
@@ -280,7 +327,7 @@ class InferencePipeline:
                                     pass
                 
                 base_model = BaselineTransformer(
-                    vocab_size=self.vocab_size,
+                    vocab_size=model_vocab_size,  # Use checkpoint vocab_size
                     embedding_dim=embedding_dim,
                     num_layers=num_layers,
                 )
@@ -331,7 +378,7 @@ class InferencePipeline:
                         break
                 
                 base_model = SimpleMoEModel(
-                    vocab_size=self.vocab_size,
+                    vocab_size=model_vocab_size,  # Use checkpoint vocab_size
                     embedding_dim=embedding_dim,
                     num_shared_experts=2,
                     num_routed_experts=num_routed_experts,
@@ -626,8 +673,10 @@ class InferencePipeline:
             input_ids = self._tokenize(input_text).to(self.device)
             
             # Validate token IDs are within vocabulary
-            if (input_ids < 0).any() or (input_ids >= self.vocab_size).any():
-                print(f"Warning: Invalid token IDs in input for {paper_id}, skipping...")
+            # Check against model's vocab_size, not tokenizer's
+            model_vocab_size = self.model.base_model.embedding.weight.shape[0] if hasattr(self.model, 'base_model') else self.vocab_size
+            if (input_ids < 0).any() or (input_ids >= model_vocab_size).any():
+                print(f"Warning: Invalid token IDs in input for {paper_id} (max={input_ids.max().item()}, model_vocab={model_vocab_size}), skipping...")
                 continue
             
             # Forward pass (with routing info only for MoE models)
@@ -1072,10 +1121,24 @@ class InferencePipeline:
                             except ValueError:
                                 pass
             
-            vocab_size = self.tokenizer.get_piece_size()
+            # Detect vocab_size from baseline checkpoint
+            baseline_vocab_size = None
+            for key in state_dict.keys():
+                if 'embedding.weight' in key:
+                    weight = state_dict[key]
+                    baseline_vocab_size = weight.shape[0]
+                    break
+            
+            if baseline_vocab_size is None:
+                baseline_vocab_size = self.tokenizer.get_piece_size()
+                print(f"Warning: Could not detect vocab_size from baseline checkpoint, using tokenizer: {baseline_vocab_size}")
+            else:
+                print(f"Detected baseline vocab_size: {baseline_vocab_size}")
+                if baseline_vocab_size != self.tokenizer.get_piece_size():
+                    print(f"⚠️  WARNING: Baseline vocab_size ({baseline_vocab_size}) != tokenizer vocab_size ({self.tokenizer.get_piece_size()})")
             
             baseline_model = BaselineTransformer(
-                vocab_size=vocab_size,
+                vocab_size=baseline_vocab_size,  # Use checkpoint vocab_size
                 embedding_dim=embedding_dim,
                 num_layers=num_layers,
             )

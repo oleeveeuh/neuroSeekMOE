@@ -860,20 +860,34 @@ class InferencePipeline:
                                 artifact_patterns = {
                                     'ract', 'iven', 'ulating', 'ucleare', 'uronal', 'ang', 'lee', 
                                     'antina', 'artijn', 'armonexperimentingapore', 'stringxpergraph',
-                                    'chaarten', 'nterface', 'associ-art', 'laria', 'ecorrelated'
+                                    'chaarten', 'nterface', 'associ-art', 'laria', 'ecorrelated',
+                                    'antusbridge', 'ncatenables', 'balanc-ofdiversed', 'saiscoholtzersen',
+                                    'angalifornia', 'gow', 'razi2026go3', 'aseyama1'
                                 }
+                                # Artifact substrings that indicate malformed words
+                                artifact_substrings = ['ract', 'ang', 'antus', 'ncaten', 'balanc-of', 'saiscohol', 'angalif', 'razi2026']
+                                
                                 for w in words:
                                     w_lower = w.lower().strip()
                                     # Skip very short non-alphanumeric fragments
                                     if len(w_lower) <= 1 and not w_lower.isalnum():
                                         continue
-                                    # Skip known artifact patterns
+                                    # Skip known artifact patterns (exact match)
                                     if w_lower in artifact_patterns:
+                                        continue
+                                    # Skip words containing artifact substrings
+                                    if any(substr in w_lower for substr in artifact_substrings):
                                         continue
                                     # Skip words that look like artifacts (short, uncommon, no vowels)
                                     if len(w_lower) <= 4 and w_lower.isalpha():
                                         vowels = sum(1 for c in w_lower if c in 'aeiou')
                                         if vowels == 0:  # No vowels - likely artifact
+                                            continue
+                                    # Skip words that are clearly malformed (contain hyphens in weird places)
+                                    if '-' in w_lower and len(w_lower) > 8:
+                                        # Check if it looks like a malformed compound word
+                                        parts = w_lower.split('-')
+                                        if len(parts) > 1 and any(len(p) < 3 for p in parts):
                                             continue
                                     # Skip number sequences that look like malformed IDs (e.g., "0009", "−0007−")
                                     cleaned_num = w.replace('-', '').replace('−', '').replace('+', '').replace('.', '')
@@ -1243,20 +1257,34 @@ class InferencePipeline:
                                 artifact_patterns = {
                                     'ract', 'iven', 'ulating', 'ucleare', 'uronal', 'ang', 'lee', 
                                     'antina', 'artijn', 'armonexperimentingapore', 'stringxpergraph',
-                                    'chaarten', 'nterface', 'associ-art', 'laria', 'ecorrelated'
+                                    'chaarten', 'nterface', 'associ-art', 'laria', 'ecorrelated',
+                                    'antusbridge', 'ncatenables', 'balanc-ofdiversed', 'saiscoholtzersen',
+                                    'angalifornia', 'gow', 'razi2026go3', 'aseyama1'
                                 }
+                                # Artifact substrings that indicate malformed words
+                                artifact_substrings = ['ract', 'ang', 'antus', 'ncaten', 'balanc-of', 'saiscohol', 'angalif', 'razi2026']
+                                
                                 for w in words:
                                     w_lower = w.lower().strip()
                                     # Skip very short non-alphanumeric fragments
                                     if len(w_lower) <= 1 and not w_lower.isalnum():
                                         continue
-                                    # Skip known artifact patterns
+                                    # Skip known artifact patterns (exact match)
                                     if w_lower in artifact_patterns:
+                                        continue
+                                    # Skip words containing artifact substrings
+                                    if any(substr in w_lower for substr in artifact_substrings):
                                         continue
                                     # Skip words that look like artifacts (short, uncommon, no vowels)
                                     if len(w_lower) <= 4 and w_lower.isalpha():
                                         vowels = sum(1 for c in w_lower if c in 'aeiou')
                                         if vowels == 0:  # No vowels - likely artifact
+                                            continue
+                                    # Skip words that are clearly malformed (contain hyphens in weird places)
+                                    if '-' in w_lower and len(w_lower) > 8:
+                                        # Check if it looks like a malformed compound word
+                                        parts = w_lower.split('-')
+                                        if len(parts) > 1 and any(len(p) < 3 for p in parts):
                                             continue
                                     # Skip number sequences that look like malformed IDs (e.g., "0009", "−0007−")
                                     cleaned_num = w.replace('-', '').replace('−', '').replace('+', '').replace('.', '')

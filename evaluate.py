@@ -580,7 +580,7 @@ def extract_embeddings(
                 break
             
             # Forward pass
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
                 result = adapter.process_batch(batch)
                 logits = result['logits']  # [batch, seq_len, vocab_size]
                 batch_metadata = result['batch_metadata']
@@ -653,12 +653,15 @@ def compute_perplexity(
     base_model = model.base_model if hasattr(model, 'base_model') else model
     top_k = getattr(base_model, 'top_k', 2) if hasattr(base_model, 'top_k') else 2
     
+    # Check if this is a baseline model (no routing/gate)
+    is_baseline_model = not (hasattr(base_model, 'gate') or hasattr(base_model, 'routed_experts'))
+    
     with torch.no_grad():
         for batch in dataloader:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
                 # Forward pass
-                if activation_hook is not None:
-                    # Single forward pass: get both loss and routing info
+                if activation_hook is not None and not is_baseline_model:
+                    # Single forward pass: get both loss and routing info (MoE models only)
                     input_ids = batch['input_ids'].to(adapter.device)
                     target_ids = batch['target_ids'].to(adapter.device)
                     
@@ -754,6 +757,59 @@ def compute_perplexity(
                             batch_metadata=batch_metadata,
                             top_k=top_k
                         )
+                elif activation_hook is not None and is_baseline_model:
+                    # Baseline model: no routing info, just compute loss normally
+                    result = adapter.process_batch(batch)
+                    loss = result['loss']
+                    batch_metadata = result['batch_metadata']
+                    
+                    # Still track domains even without hook
+                    device_batch = adapter._move_to_device(batch)
+                    domains_list = device_batch.get('domains', [])
+                    categories_list = device_batch.get('categories', [])
+                    titles = device_batch.get('title', batch.get('title', []))
+                    abstracts = device_batch.get('abstract', batch.get('abstract', []))
+                    arxiv_ids = device_batch.get('arxiv_ids', [])
+                    
+                    # Compute per-sample loss for domain tracking
+                    logits = result['logits']
+                    target_ids_batch = batch['target_ids'].to(adapter.device)
+                    attention_mask = (target_ids_batch != adapter.ignore_index).float()
+                    
+                    loss_per_token = F.cross_entropy(
+                        logits.view(-1, logits.shape[-1]),
+                        target_ids_batch.view(-1),
+                        ignore_index=adapter.ignore_index,
+                        reduction='none'
+                    ).view(target_ids_batch.shape[0], -1)
+                    
+                    loss_per_sample = (loss_per_token * attention_mask).sum(dim=1)
+                    tokens_per_sample = attention_mask.sum(dim=1)
+                    
+                    batch_size = target_ids_batch.shape[0]
+                    for i in range(batch_size):
+                        # Get categories (ArXiv categories for ML detection)
+                        categories = categories_list[i] if i < len(categories_list) else []
+                        if not isinstance(categories, list):
+                            categories = [categories] if categories else []
+                        
+                        # Get domains (NeMo Curator labels for healthcare detection)
+                        domains = domains_list[i] if i < len(domains_list) else []
+                        if not isinstance(domains, list):
+                            domains = [domains] if domains else []
+                        
+                        paper_dict = {
+                            'categories': categories,  # ArXiv categories
+                            'domains': domains,  # NeMo Curator domain labels
+                            'title': titles[i] if i < len(titles) else '',
+                            'abstract': abstracts[i] if i < len(abstracts) else ''
+                        }
+                        domain = classify_paper_domain(paper_dict)
+                        
+                        if i < len(loss_per_sample):
+                            domain_losses[domain] += loss_per_sample[i].item()
+                            domain_tokens[domain] += tokens_per_sample[i].item()
+                            domain_paper_counts[domain] += 1
                 else:
                     result = adapter.process_batch(batch)
                     loss = result['loss']

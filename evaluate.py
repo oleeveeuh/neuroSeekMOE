@@ -208,45 +208,125 @@ class ExpertActivationHook:
             gate_logits_np = np.array(gate_logits)
         
         # Handle different gate_logits shapes
+        # For Expert Choice routing, we need to track which tokens each expert selected
+        # Don't average - keep per-token routing decisions
+        batch_size = len(batch_metadata.get('arxiv_ids', []))
+        
         if len(gate_logits_np.shape) == 2:  # [batch*seq_len, num_experts]
-            # Reshape: need to know batch_size and seq_len
-            # For now, average over sequence dimension
-            batch_size = len(batch_metadata.get('arxiv_ids', []))
             if batch_size > 0:
                 seq_len = gate_logits_np.shape[0] // batch_size
                 gate_logits_reshaped = gate_logits_np.reshape(batch_size, seq_len, -1)
-                # Average over sequence: [batch_size, num_experts]
-                gate_logits_avg = gate_logits_reshaped.mean(axis=1)
+                num_experts = gate_logits_reshaped.shape[-1]
+                
+                # For Expert Choice: each expert selects top_k tokens
+                # Compute per-token probabilities, then determine which experts selected which tokens
+                # Reshape to [batch*seq_len, num_experts] for processing
+                gate_logits_flat = gate_logits_reshaped.reshape(-1, num_experts)
+                
+                # Get probabilities per token
+                if isinstance(gate_logits_flat, torch.Tensor):
+                    probs_flat = F.softmax(gate_logits_flat, dim=-1).numpy()
+                else:
+                    probs_flat = F.softmax(torch.tensor(gate_logits_flat), dim=-1).numpy()
+                
+                # For Expert Choice routing: transpose to [num_experts, batch*seq_len]
+                # Each expert selects top_k tokens
+                probs_transposed = probs_flat.T  # [num_experts, batch*seq_len]
+                
+                # Each expert selects top_k tokens
+                top_k = min(top_k, num_experts)
+                expert_token_selections = np.argsort(probs_transposed, axis=-1)[:, -top_k:]  # [num_experts, top_k]
+                
+                # Create activation matrix: [batch_size, num_experts]
+                # Track which experts processed tokens from each paper
+                activations = np.zeros((batch_size, num_experts), dtype=bool)
+                probs = np.zeros((batch_size, num_experts), dtype=float)
+                token_counts = np.zeros((batch_size, num_experts), dtype=int)  # Track token counts per expert per paper
+                
+                for expert_idx in range(num_experts):
+                    # Get tokens selected by this expert
+                    selected_tokens = expert_token_selections[expert_idx]  # [top_k]
+                    
+                    # Map tokens back to papers
+                    for token_idx in selected_tokens:
+                        paper_idx = token_idx // seq_len
+                        if paper_idx < batch_size:
+                            activations[paper_idx, expert_idx] = True
+                            # Accumulate probability and count tokens
+                            probs[paper_idx, expert_idx] += probs_flat[token_idx, expert_idx]
+                            token_counts[paper_idx, expert_idx] += 1
+                
+                # Normalize probabilities (average over tokens that activated each expert)
+                for paper_idx in range(batch_size):
+                    for expert_idx in range(num_experts):
+                        if token_counts[paper_idx, expert_idx] > 0:
+                            probs[paper_idx, expert_idx] /= token_counts[paper_idx, expert_idx]
             else:
+                # Fallback: average over sequence
                 gate_logits_avg = gate_logits_np.mean(axis=0, keepdims=True)
+                num_experts = gate_logits_avg.shape[-1]
+                if isinstance(gate_logits_avg, torch.Tensor):
+                    probs = F.softmax(gate_logits_avg, dim=-1).numpy()
+                else:
+                    probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
+                top_k = min(top_k, num_experts)
+                top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]
+                activations = np.zeros((1, num_experts), dtype=bool)
+                activations[0, top_k_indices[0]] = True
         elif len(gate_logits_np.shape) == 3:  # [batch, seq_len, num_experts]
-            # Average over sequence: [batch, num_experts]
-            gate_logits_avg = gate_logits_np.mean(axis=1)
+            # Similar processing for 3D case
+            batch_size, seq_len, num_experts = gate_logits_np.shape
+            gate_logits_flat = gate_logits_np.reshape(-1, num_experts)
+            
+            if isinstance(gate_logits_flat, torch.Tensor):
+                probs_flat = F.softmax(gate_logits_flat, dim=-1).numpy()
+            else:
+                probs_flat = F.softmax(torch.tensor(gate_logits_flat), dim=-1).numpy()
+            
+            probs_transposed = probs_flat.T  # [num_experts, batch*seq_len]
+            top_k = min(top_k, num_experts)
+            expert_token_selections = np.argsort(probs_transposed, axis=-1)[:, -top_k:]
+            
+            activations = np.zeros((batch_size, num_experts), dtype=bool)
+            probs = np.zeros((batch_size, num_experts), dtype=float)
+            token_counts = np.zeros((batch_size, num_experts), dtype=int)
+            
+            for expert_idx in range(num_experts):
+                selected_tokens = expert_token_selections[expert_idx]
+                for token_idx in selected_tokens:
+                    paper_idx = token_idx // seq_len
+                    if paper_idx < batch_size:
+                        activations[paper_idx, expert_idx] = True
+                        probs[paper_idx, expert_idx] += probs_flat[token_idx, expert_idx]
+                        token_counts[paper_idx, expert_idx] += 1
+            
+            for paper_idx in range(batch_size):
+                for expert_idx in range(num_experts):
+                    if token_counts[paper_idx, expert_idx] > 0:
+                        probs[paper_idx, expert_idx] /= token_counts[paper_idx, expert_idx]
         else:
-            # Already [batch, num_experts] or similar
+            # Already [batch, num_experts] or similar - use old logic
             gate_logits_avg = gate_logits_np
-        
-        # Get probabilities
-        if isinstance(gate_logits_avg, torch.Tensor):
-            probs = F.softmax(gate_logits_avg, dim=-1).numpy()
-        else:
-            probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
-        
-        # Get top-k expert selections
-        num_experts = probs.shape[-1]
-        top_k = min(top_k, num_experts)
-        
-        # For each sample, get top-k experts
-        top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]  # [batch, top_k]
-        
-        # Create binary activation matrix (which experts activated)
-        batch_size = probs.shape[0]
-        activations = np.zeros((batch_size, num_experts), dtype=bool)
-        for i in range(batch_size):
-            activations[i, top_k_indices[i]] = True
+            num_experts = gate_logits_avg.shape[-1]
+            if isinstance(gate_logits_avg, torch.Tensor):
+                probs = F.softmax(gate_logits_avg, dim=-1).numpy()
+            else:
+                probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
+            top_k = min(top_k, num_experts)
+            top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]
+            batch_size = probs.shape[0]
+            activations = np.zeros((batch_size, num_experts), dtype=bool)
+            for i in range(batch_size):
+                activations[i, top_k_indices[i]] = True
         
         # Store
-        self.expert_selections.append(top_k_indices)
+        # expert_selections: which experts were selected (for compatibility)
+        # For Expert Choice, we track which experts activated per paper
+        expert_selections = []
+        for paper_idx in range(batch_size):
+            activated_experts = np.where(activations[paper_idx])[0]
+            expert_selections.append(activated_experts)
+        self.expert_selections.append(expert_selections)
         self.expert_probs.append(probs)
         
         # Store paper metadata
@@ -1025,11 +1105,85 @@ def evaluate_model(
     
     try:
         from train_real import SimpleMoEModel
+        
+        # Load checkpoint first to infer model configuration
+        checkpoint = torch.load(model_checkpoint, map_location='cpu')
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        
+        # Infer model configuration from checkpoint state_dict
+        # The gate layer has shape [embedding_dim, num_routed_experts]
+        gate_key = None
+        for key in state_dict.keys():
+            # Handle different checkpoint formats: 'gate.weight', 'base_model.gate.weight', etc.
+            if key.endswith('gate.weight'):
+                gate_key = key
+                break
+        
+        if gate_key:
+            gate_weight = state_dict[gate_key]
+            embedding_dim = gate_weight.shape[0]
+            num_routed_experts = gate_weight.shape[1]
+            print(f"Inferred from checkpoint: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
+        else:
+            # Fallback: try to infer from routed_experts
+            num_routed_experts = 4  # Default fallback
+            embedding_dim = 256  # Default fallback
+            for key in state_dict.keys():
+                if 'routed_experts.0.0.weight' in key or 'base_model.routed_experts.0.0.weight' in key:
+                    # First linear layer in first routed expert: [4*embedding_dim, embedding_dim]
+                    weight = state_dict[key]
+                    embedding_dim = weight.shape[1]
+                    break
+                elif 'shared_experts.0.0.weight' in key or 'base_model.shared_experts.0.0.weight' in key:
+                    # First linear layer in first shared expert: [4*embedding_dim, embedding_dim]
+                    weight = state_dict[key]
+                    embedding_dim = weight.shape[1]
+                    break
+            
+            # Count routed experts by counting expert modules
+            routed_expert_count = 0
+            for key in state_dict.keys():
+                if 'routed_experts.' in key or 'base_model.routed_experts.' in key:
+                    # Extract expert index: routed_experts.{idx}.{layer}.weight
+                    parts = key.split('.')
+                    for i, part in enumerate(parts):
+                        if part == 'routed_experts' and i + 1 < len(parts):
+                            try:
+                                expert_idx = int(parts[i + 1])
+                                routed_expert_count = max(routed_expert_count, expert_idx + 1)
+                            except ValueError:
+                                pass
+            
+            if routed_expert_count > 0:
+                num_routed_experts = routed_expert_count
+                print(f"Inferred from checkpoint: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
+            else:
+                print(f"Warning: Could not infer model config from checkpoint, using defaults: embedding_dim={embedding_dim}, num_routed_experts={num_routed_experts}")
+        
+        # Count shared experts
+        num_shared_experts = 2  # Default
+        shared_expert_count = 0
+        for key in state_dict.keys():
+            if 'shared_experts.' in key or 'base_model.shared_experts.' in key:
+                parts = key.split('.')
+                for i, part in enumerate(parts):
+                    if part == 'shared_experts' and i + 1 < len(parts):
+                        try:
+                            expert_idx = int(parts[i + 1])
+                            shared_expert_count = max(shared_expert_count, expert_idx + 1)
+                        except ValueError:
+                            pass
+        
+        if shared_expert_count > 0:
+            num_shared_experts = shared_expert_count
+        
+        print(f"Creating model with: vocab_size={vocab_size}, embedding_dim={embedding_dim}, num_shared_experts={num_shared_experts}, num_routed_experts={num_routed_experts}")
+        
         base_model = SimpleMoEModel(
             vocab_size=vocab_size,
-            embedding_dim=256,
-            num_shared_experts=2,
-            num_routed_experts=4,
+            embedding_dim=embedding_dim,
+            num_shared_experts=num_shared_experts,
+            num_routed_experts=num_routed_experts,
         )
         
         # Wrap model
@@ -1046,8 +1200,7 @@ def evaluate_model(
         
         model = ModelWrapper(base_model)
         
-        # Load checkpoint
-        checkpoint = torch.load(model_checkpoint, map_location='cpu')
+        # Load checkpoint weights
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         else:

@@ -160,6 +160,7 @@ class ExpertActivationHook:
         """
         self.expert_selections = []  # List of (batch_size, top_k) arrays
         self.expert_probs = []  # List of (batch_size, num_experts) arrays
+        self.expert_activations_list = []  # List of (batch_size, num_experts) activation matrices
         self.paper_ids = []  # List of paper IDs
         self.paper_domains = []  # List of domain labels
         self.model = model
@@ -328,6 +329,7 @@ class ExpertActivationHook:
             expert_selections.append(activated_experts)
         self.expert_selections.append(expert_selections)
         self.expert_probs.append(probs)
+        self.expert_activations_list.append(activations)  # Store the actual activation matrix
         
         # Store paper metadata
         arxiv_ids = batch_metadata.get('arxiv_ids', [])
@@ -466,16 +468,15 @@ class ExpertActivationHook:
         # Concatenate all batches
         expert_probs_all = np.concatenate(self.expert_probs, axis=0)  # (N_samples, N_experts)
         
-        # Create binary activation matrix from probabilities
-        # For Expert Choice routing, activations are already computed in capture_batch()
-        # We just need to create the binary matrix from probabilities
-        num_experts = expert_probs_all.shape[1]
-        expert_activations = np.zeros_like(expert_probs_all, dtype=bool)
-        
-        # Mark experts as activated if they have non-zero probability
-        # This reflects which experts actually processed tokens from each paper
-        # (In Expert Choice, multiple experts can process tokens from the same paper)
-        expert_activations = expert_probs_all > 0
+        # Use the actual activation matrices computed in capture_batch()
+        # These correctly reflect which experts processed tokens from which papers
+        if self.expert_activations_list:
+            expert_activations = np.concatenate(self.expert_activations_list, axis=0)  # (N_samples, N_experts)
+        else:
+            # Fallback: create from probabilities (shouldn't happen if capture_batch worked)
+            num_experts = expert_probs_all.shape[1]
+            expert_activations = np.zeros_like(expert_probs_all, dtype=bool)
+            expert_activations = expert_probs_all > 0
         
         # Debug: Check if probabilities are identical across experts
         if expert_probs_all.shape[0] > 0:
@@ -511,6 +512,7 @@ class ExpertActivationHook:
         """Clear stored activations."""
         self.expert_selections = []
         self.expert_probs = []
+        self.expert_activations_list = []
         self.paper_ids = []
         self.paper_domains = []
 

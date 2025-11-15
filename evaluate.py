@@ -292,7 +292,7 @@ class ExpertActivationHook:
                             if not np.isnan(prob_value) and prob_value > 0:
                                 probs[paper_idx, expert_idx] += prob_value
                                 token_counts[paper_idx, expert_idx] += 1
-        else:
+                        else:
                             # Debug: why is paper_idx out of bounds?
                             if len(self.expert_probs) == 0:
                                 print(f"  WARNING: token_idx={token_idx} maps to paper_idx={paper_idx} >= batch_size={batch_size}")

@@ -92,7 +92,7 @@ def classify_paper_domain(paper: Dict) -> str:
     if len(title + ' ' + abstract) < 50 and full_text:
         text = full_text[:2000]  # Use first 2000 chars of full text for keyword matching
     else:
-        text = title + ' ' + abstract
+    text = title + ' ' + abstract
     
     # Check categories (ArXiv format: 'cs.CV', 'q-bio.NC', etc.)
     # Also check for processed domain labels like 'medical_imaging', 'neuroscience', etc.
@@ -224,7 +224,7 @@ class ExpertActivationHook:
         # Handle different gate_logits shapes
         # For Expert Choice routing, we need to track which tokens each expert selected
         # Don't average - keep per-token routing decisions
-        batch_size = len(batch_metadata.get('arxiv_ids', []))
+            batch_size = len(batch_metadata.get('arxiv_ids', []))
         
         if len(gate_logits_np.shape) == 2:  # [batch*seq_len, num_experts]
             if batch_size > 0:
@@ -246,7 +246,7 @@ class ExpertActivationHook:
                 # Each expert sees scores for all tokens
                 if isinstance(gate_logits_flat, torch.Tensor):
                     expert_logits = gate_logits_flat.t()  # [num_experts, batch*seq_len]
-                else:
+            else:
                     expert_logits = torch.tensor(gate_logits_flat, dtype=torch.float32).t()  # [num_experts, batch*seq_len]
                 
                 # For each expert, compute softmax over all tokens to get selection probabilities
@@ -292,7 +292,7 @@ class ExpertActivationHook:
                             if not np.isnan(prob_value) and prob_value > 0:
                                 probs[paper_idx, expert_idx] += prob_value
                                 token_counts[paper_idx, expert_idx] += 1
-                        else:
+        else:
                             # Debug: why is paper_idx out of bounds?
                             if len(self.expert_probs) == 0:
                                 print(f"  WARNING: token_idx={token_idx} maps to paper_idx={paper_idx} >= batch_size={batch_size}")
@@ -351,10 +351,10 @@ class ExpertActivationHook:
                 # Fallback: average over sequence
                 gate_logits_avg = gate_logits_np.mean(axis=0, keepdims=True)
                 num_experts = gate_logits_avg.shape[-1]
-                if isinstance(gate_logits_avg, torch.Tensor):
-                    probs = F.softmax(gate_logits_avg, dim=-1).numpy()
-                else:
-                    probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
+        if isinstance(gate_logits_avg, torch.Tensor):
+            probs = F.softmax(gate_logits_avg, dim=-1).numpy()
+        else:
+            probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
                 top_k = min(top_k, num_experts)
                 top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]
                 activations = np.zeros((1, num_experts), dtype=bool)
@@ -376,7 +376,7 @@ class ExpertActivationHook:
                 expert_logits = torch.tensor(expert_logits, dtype=torch.float32)
             expert_probs_all = F.softmax(expert_logits, dim=-1).detach().cpu().numpy()  # [num_experts, batch*seq_len]
             
-            top_k = min(top_k, num_experts)
+        top_k = min(top_k, num_experts)
             expert_token_selections = np.argsort(expert_probs_all, axis=-1)[:, -top_k:]  # [num_experts, top_k]
             
             activations = np.zeros((batch_size, num_experts), dtype=bool)
@@ -414,10 +414,10 @@ class ExpertActivationHook:
                 probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
             top_k = min(top_k, num_experts)
             top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]
-            batch_size = probs.shape[0]
-            activations = np.zeros((batch_size, num_experts), dtype=bool)
-            for i in range(batch_size):
-                activations[i, top_k_indices[i]] = True
+        batch_size = probs.shape[0]
+        activations = np.zeros((batch_size, num_experts), dtype=bool)
+        for i in range(batch_size):
+            activations[i, top_k_indices[i]] = True
         
         # Store
         # expert_selections: which experts were selected (for compatibility)
@@ -573,8 +573,8 @@ class ExpertActivationHook:
             expert_activations = np.concatenate(self.expert_activations_list, axis=0)  # (N_samples, N_experts)
         else:
             # Fallback: create from probabilities (shouldn't happen if capture_batch worked)
-            num_experts = expert_probs_all.shape[1]
-            expert_activations = np.zeros_like(expert_probs_all, dtype=bool)
+        num_experts = expert_probs_all.shape[1]
+        expert_activations = np.zeros_like(expert_probs_all, dtype=bool)
             expert_activations = expert_probs_all > 0
         
         # Debug: Check if probabilities are identical across experts
@@ -582,7 +582,7 @@ class ExpertActivationHook:
         if expert_probs_all.shape[0] > 0:
             # Find first sample with non-zero probabilities
             sample_idx = None
-            for i in range(expert_probs_all.shape[0]):
+        for i in range(expert_probs_all.shape[0]):
                 sample_probs = expert_probs_all[i]
                 if np.any(sample_probs > 0):
                     sample_idx = i
@@ -1310,8 +1310,8 @@ def evaluate_model(
             tokenizer = load_medical_tokenizer()
     elif SENTENCEPIECE_AVAILABLE:
         # Fallback to SentencePiece only
-        tokenizer = spm.SentencePieceProcessor()
-        tokenizer.load(tokenizer_path)
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.load(tokenizer_path)
         print(f"Loaded SentencePiece tokenizer from: {tokenizer_path}")
     else:
         raise ImportError("Neither tokenizer_wrapper nor sentencepiece available. Install transformers or sentencepiece.")
@@ -1515,8 +1515,8 @@ def evaluate_model(
                 # If config.yaml not found or error, use defaults
                 pass
             
-            base_model = SimpleMoEModel(
-                vocab_size=vocab_size,
+        base_model = SimpleMoEModel(
+            vocab_size=vocab_size,
                 embedding_dim=embedding_dim,
                 num_shared_experts=num_shared_experts,
                 num_routed_experts=num_routed_experts,
@@ -1528,30 +1528,30 @@ def evaluate_model(
                 temperature_start=moe_params['temperature_start'],
                 temperature_end=moe_params['temperature_end'],
                 temperature_steps=moe_params['temperature_steps'],
-            )
+        )
+        
+        # Wrap model
+        class ModelWrapper(nn.Module):
+            def __init__(self, base_model):
+                super().__init__()
+                self.base_model = base_model
             
-            # Wrap model
-            class ModelWrapper(nn.Module):
-                def __init__(self, base_model):
-                    super().__init__()
-                    self.base_model = base_model
-                
-                def forward(self, input_ids):
-                    output = self.base_model(input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False)
-                    if isinstance(output, tuple):
-                        return output[0]
-                    return output
-            
-            model = ModelWrapper(base_model)
-            
+            def forward(self, input_ids):
+                output = self.base_model(input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False)
+                if isinstance(output, tuple):
+                    return output[0]
+                return output
+        
+        model = ModelWrapper(base_model)
+        
             # Load checkpoint weights
-            if 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-            else:
-                model.load_state_dict(checkpoint, strict=False)
-            
-            model.to(device)
-            model.eval()
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        else:
+            model.load_state_dict(checkpoint, strict=False)
+        
+        model.to(device)
+        model.eval()
             
             # Debug: Check gate weights to see if they're uniform
             if hasattr(base_model, 'gate') and hasattr(base_model.gate, 'weight'):
@@ -1606,7 +1606,7 @@ def evaluate_model(
                     print(f"\n  ⚠️  WARNING: Gate weights are very small (max abs: {np.max(np.abs(gate_weights)):.4f})")
                     print(f"     This could indicate the model hasn't learned strong routing preferences.")
             
-            print(f"Loaded model from {model_checkpoint}")
+        print(f"Loaded model from {model_checkpoint}")
     except Exception as e:
         print(f"Could not load model: {e}")
         raise
@@ -1875,7 +1875,7 @@ def evaluate_model(
     # Use user-specified output_dir, but check if it's in Drive and use Drive path if available
     # Only override if output_dir is the default "./evaluations"
     if output_dir == "./evaluations" or output_dir == "evaluations":
-        results_dir = get_drive_results_path(output_dir)
+    results_dir = get_drive_results_path(output_dir)
     else:
         # User specified a custom directory - respect it
         results_dir = output_dir
@@ -1983,9 +1983,9 @@ def evaluate_model(
                         if probs_std < 1e-6:
                             print(f"  ⚠️  WARNING: Expert probabilities are nearly identical!")
                             print(f"     This suggests the model hasn't learned to differentiate experts.")
-                        else:
+                else:
                             print(f"  ✓ Expert probabilities show diversity")
-                    else:
+            else:
                         # All samples have zero probabilities
                         print(f"\nProbability diversity:")
                         print(f"  ⚠️  WARNING: All samples have zero probabilities!")
@@ -2002,23 +2002,8 @@ def evaluate_model(
                 else:
                     print(f"\n✓ Experts show different activation patterns (std={activation_std:.1f})")
                 print(f"{'='*60}\n")
-            # Determine output path - save to Drive results folder if available
-            drive_base = os.environ.get('DRIVE_BASE', '/content/drive/MyDrive/neuroMOE_results')
-            
-            # Check if Drive is available
-            if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
-                # Save to Drive results folder
-                activations_dir = os.path.join(drive_base, 'evaluations')
-            elif os.path.exists('/content/drive/MyDrive'):
-                # Alternative Drive path
-                drive_base = '/content/drive/MyDrive/neuroMOE_results'
-                if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
-                    activations_dir = os.path.join(drive_base, 'evaluations')
-                else:
-                    # Fall back to local results directory
-                    activations_dir = results_dir
-            else:
-                # Fall back to local results directory
+            # Save expert activations to the same directory as other evaluation results
+            # Use results_dir (which respects the user-specified output_dir, including subdirectories)
                 activations_dir = results_dir
             
             os.makedirs(activations_dir, exist_ok=True)

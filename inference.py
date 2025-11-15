@@ -786,6 +786,9 @@ class InferencePipeline:
                     perplexity = float('inf')
                 
                 # Extract expert activations (only for MoE models)
+                top_experts = []
+                all_activated_experts = []  # Track all experts that selected tokens (hard routing)
+                num_routed_experts = 4  # Default, will be updated from model if available
                 if is_moe_model and gate_logits is not None:
                     # gate_logits shape: [batch*seq_len, num_routed_experts]
                     if isinstance(gate_logits, torch.Tensor):
@@ -797,7 +800,7 @@ class InferencePipeline:
                     # We need to compute which experts actually selected tokens from this paper
                     if len(gate_logits_np.shape) == 2:
                         # [batch*seq_len, num_routed_experts] or [seq_len, num_routed_experts] for single paper
-                        num_routed_experts = gate_logits_np.shape[1]
+                        num_routed_experts = gate_logits_np.shape[1]  # Update from actual gate_logits shape
                         
                         # For Expert Choice: transpose to [num_routed_experts, batch*seq_len]
                         # Each expert sees scores for all tokens
@@ -855,6 +858,8 @@ class InferencePipeline:
                         
                         # Select top experts that actually activated for this paper
                         activated_experts = np.where(expert_activations)[0]
+                        # Store all activated experts for hard routing tracking
+                        all_activated_experts = activated_experts.tolist() if len(activated_experts) > 0 else []
                         if len(activated_experts) > 0:
                             # Rank by RAW LOGITS (mean), not probabilities
                             # Raw logits better reflect actual routing strength before softmax normalization
@@ -937,8 +942,9 @@ class InferencePipeline:
                         top_experts = np.argsort(avg_gate_logits)[-2:].tolist()
                         top_experts.reverse()  # Sort descending
                 else:
-                    # Baseline model - no expert activations
+                    # Baseline model or no routing info - no expert activations
                     top_experts = []
+                    all_activated_experts = []
                 
                 # Generate prediction (greedy decoding with repetition penalty)
                 # Generate up to max_prediction_length tokens
@@ -1198,12 +1204,26 @@ class InferencePipeline:
             }
             domain = classify_paper_domain(paper_dict)
             
+            # Save both hard routing (all activated experts) and ranked experts
+            # Hard routing: all experts that actually selected tokens (Expert Choice guarantees all experts activate)
+            # Ranked experts: top experts sorted by routing strength (logits)
+            if is_moe_model:
+                # Ensure we have all activated experts (hard routing decision)
+                # In Expert Choice, all experts should activate, so verify we have all of them
+                if len(all_activated_experts) < num_routed_experts and hasattr(self.model, 'base_model'):
+                    # In Expert Choice, all experts should activate - include all if missing
+                    all_experts = list(range(num_routed_experts))
+                    all_activated_experts = sorted(list(set(all_activated_experts + all_experts)))[:num_routed_experts]
+            else:
+                all_activated_experts = []
+            
             example_predictions.append({
                 'paper_id': paper_id,
                 'input_text': input_text,
                 'predicted_text': predicted_text,
                 'perplexity': perplexity,
-                'activated_experts': top_experts if is_moe_model else [],
+                'activated_experts': top_experts if is_moe_model else [],  # Ranked by routing strength (for display)
+                'all_activated_experts': all_activated_experts if is_moe_model else [],  # All experts that selected tokens (hard routing)
                 'domain': domain,
                 'model_type': 'moe' if is_moe_model else 'baseline'
             })

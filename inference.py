@@ -850,15 +850,17 @@ class InferencePipeline:
                             activated_probs = expert_probs_paper[activated_experts]
                             sorted_activated = activated_experts[np.argsort(activated_probs)[::-1]]
                             
-                            # Show top 2-3 activated experts
-                            if len(sorted_activated) >= 3:
-                                # Include 3rd expert if it has reasonable probability
-                                prob_3rd = expert_probs_paper[sorted_activated[2]]
-                                if prob_3rd > np.max(expert_probs_paper) * 0.3:  # At least 30% of max
-                                    num_to_show = 3
-                                else:
-                                    num_to_show = 2
+                            # Show all activated experts, or at least top 3-4 to show diversity
+                            # The issue is that Expert 2 has much higher probability, but we still want to show
+                            # other experts that activated to demonstrate routing diversity
+                            if len(sorted_activated) >= 4:
+                                # Show top 4 experts if available (all experts activated)
+                                num_to_show = 4
+                            elif len(sorted_activated) >= 3:
+                                # Show top 3 if 3+ activated
+                                num_to_show = 3
                             else:
+                                # Show all if fewer than 3
                                 num_to_show = len(sorted_activated)
                             
                             top_experts = sorted_activated[:num_to_show].tolist()
@@ -867,8 +869,31 @@ class InferencePipeline:
                             top_experts = []
                         
                         # Debug: Print expert probabilities for first few papers
-                        if len(example_predictions) < 3:  # Only for first 3 papers to avoid spam
-                            print(f"  DEBUG {paper_id}: Expert probs (Expert Choice) = {[f'E{i}:{p:.6f}' for i, p in enumerate(expert_probs_paper)]}, Activated: {activated_experts.tolist()}, Selected: {top_experts}")
+                        if len(example_predictions) < 5:  # Show more debug info
+                            # Calculate relative probabilities to understand diversity
+                            max_prob = np.max(expert_probs_paper) if len(expert_probs_paper) > 0 else 0
+                            prob_ratios = [p / max_prob if max_prob > 0 else 0 for p in expert_probs_paper]
+                            
+                            # Check if Expert 2 is genuinely more confident or if it's a softmax normalization issue
+                            # In evaluation, Expert 2 is active on 17.9% of papers, but here it's top for all
+                            # This could be because:
+                            # 1. Softmax over smaller token pool (single paper) makes probabilities more concentrated
+                            # 2. Expert 2 selects tokens from every paper but with varying confidence
+                            # 3. The sampled papers all match Expert 2's specialization
+                            
+                            # Show raw gate logits stats to understand the underlying scores
+                            expert_logits_mean = expert_logits.mean(dim=-1).detach().cpu().numpy() if isinstance(expert_logits, torch.Tensor) else np.mean(expert_logits, axis=-1)
+                            
+                            print(f"  DEBUG {paper_id}:")
+                            print(f"    Expert probs (avg selection prob) = {[f'E{i}:{p:.6f}' for i, p in enumerate(expert_probs_paper)]}")
+                            print(f"    Prob ratios (relative to max) = {[f'E{i}:{r:.2%}' for i, r in enumerate(prob_ratios)]}")
+                            print(f"    Expert logits (mean) = {[f'E{i}:{l:.4f}' for i, l in enumerate(expert_logits_mean)]}")
+                            print(f"    Activated: {activated_experts.tolist()}, Selected: {top_experts}")
+                            print(f"    Token counts (tokens selected per expert): {token_counts_paper.tolist()}")
+                            print(f"    Note: In evaluation, Expert 2 is active on 17.9% of papers. If it's top here, it may be due to:")
+                            print(f"      - Softmax normalization over smaller token pool (single paper vs batch)")
+                            print(f"      - These papers match Expert 2's specialization")
+                            print(f"      - Expert 2 is confident when it DOES activate (high prob when active)")
                     else:
                         # Fallback: use top experts by average logit
                         avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np

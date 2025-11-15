@@ -230,19 +230,20 @@ class ExpertActivationHook:
                 # Reshape to [batch*seq_len, num_experts] for processing
                 gate_logits_flat = gate_logits_reshaped.reshape(-1, num_experts)
                 
-                # Get probabilities per token
-                if isinstance(gate_logits_flat, torch.Tensor):
-                    probs_flat = F.softmax(gate_logits_flat, dim=-1).numpy()
-                else:
-                    probs_flat = F.softmax(torch.tensor(gate_logits_flat), dim=-1).numpy()
-                
                 # For Expert Choice routing: transpose to [num_experts, batch*seq_len]
-                # Each expert selects top_k tokens
-                probs_transposed = probs_flat.T  # [num_experts, batch*seq_len]
+                # Each expert sees scores for all tokens
+                if isinstance(gate_logits_flat, torch.Tensor):
+                    expert_logits = gate_logits_flat.t()  # [num_experts, batch*seq_len]
+                else:
+                    expert_logits = torch.tensor(gate_logits_flat).t()  # [num_experts, batch*seq_len]
                 
-                # Each expert selects top_k tokens
+                # For each expert, compute softmax over all tokens to get selection probabilities
+                # This gives each expert a probability distribution over all tokens
+                expert_probs_all = F.softmax(expert_logits, dim=-1).numpy()  # [num_experts, batch*seq_len]
+                
+                # Each expert selects top_k tokens with highest probabilities
                 top_k = min(top_k, num_experts)
-                expert_token_selections = np.argsort(probs_transposed, axis=-1)[:, -top_k:]  # [num_experts, top_k]
+                expert_token_selections = np.argsort(expert_probs_all, axis=-1)[:, -top_k:]  # [num_experts, top_k]
                 
                 # Create activation matrix: [batch_size, num_experts]
                 # Track which experts processed tokens from each paper
@@ -259,8 +260,9 @@ class ExpertActivationHook:
                         paper_idx = token_idx // seq_len
                         if paper_idx < batch_size:
                             activations[paper_idx, expert_idx] = True
-                            # Accumulate probability and count tokens
-                            probs[paper_idx, expert_idx] += probs_flat[token_idx, expert_idx]
+                            # Use the probability that this expert selected this token
+                            # expert_probs_all[expert_idx, token_idx] is the probability expert_idx selected token_idx
+                            probs[paper_idx, expert_idx] += expert_probs_all[expert_idx, token_idx]
                             token_counts[paper_idx, expert_idx] += 1
                 
                 # Normalize probabilities (average over tokens that activated each expert)
@@ -268,6 +270,9 @@ class ExpertActivationHook:
                     for expert_idx in range(num_experts):
                         if token_counts[paper_idx, expert_idx] > 0:
                             probs[paper_idx, expert_idx] /= token_counts[paper_idx, expert_idx]
+                        else:
+                            # If expert didn't select any tokens from this paper, probability is 0
+                            probs[paper_idx, expert_idx] = 0.0
             else:
                 # Fallback: average over sequence
                 gate_logits_avg = gate_logits_np.mean(axis=0, keepdims=True)
@@ -285,14 +290,17 @@ class ExpertActivationHook:
             batch_size, seq_len, num_experts = gate_logits_np.shape
             gate_logits_flat = gate_logits_np.reshape(-1, num_experts)
             
+            # For Expert Choice routing: transpose to [num_experts, batch*seq_len]
             if isinstance(gate_logits_flat, torch.Tensor):
-                probs_flat = F.softmax(gate_logits_flat, dim=-1).numpy()
+                expert_logits = gate_logits_flat.t()  # [num_experts, batch*seq_len]
             else:
-                probs_flat = F.softmax(torch.tensor(gate_logits_flat), dim=-1).numpy()
+                expert_logits = torch.tensor(gate_logits_flat).t()  # [num_experts, batch*seq_len]
             
-            probs_transposed = probs_flat.T  # [num_experts, batch*seq_len]
+            # For each expert, compute softmax over all tokens
+            expert_probs_all = F.softmax(expert_logits, dim=-1).numpy()  # [num_experts, batch*seq_len]
+            
             top_k = min(top_k, num_experts)
-            expert_token_selections = np.argsort(probs_transposed, axis=-1)[:, -top_k:]
+            expert_token_selections = np.argsort(expert_probs_all, axis=-1)[:, -top_k:]  # [num_experts, top_k]
             
             activations = np.zeros((batch_size, num_experts), dtype=bool)
             probs = np.zeros((batch_size, num_experts), dtype=float)
@@ -304,13 +312,16 @@ class ExpertActivationHook:
                     paper_idx = token_idx // seq_len
                     if paper_idx < batch_size:
                         activations[paper_idx, expert_idx] = True
-                        probs[paper_idx, expert_idx] += probs_flat[token_idx, expert_idx]
+                        # Use the probability that this expert selected this token
+                        probs[paper_idx, expert_idx] += expert_probs_all[expert_idx, token_idx]
                         token_counts[paper_idx, expert_idx] += 1
             
             for paper_idx in range(batch_size):
                 for expert_idx in range(num_experts):
                     if token_counts[paper_idx, expert_idx] > 0:
                         probs[paper_idx, expert_idx] /= token_counts[paper_idx, expert_idx]
+                    else:
+                        probs[paper_idx, expert_idx] = 0.0
         else:
             # Already [batch, num_experts] or similar - use old logic
             gate_logits_avg = gate_logits_np

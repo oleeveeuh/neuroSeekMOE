@@ -811,6 +811,12 @@ class InferencePipeline:
                             expert_logits = torch.tensor(expert_logits, dtype=torch.float32)
                         expert_probs_all = torch.softmax(expert_logits, dim=-1).detach().cpu().numpy()  # [num_routed_experts, batch*seq_len]
                         
+                        # Compute mean logits for each expert (for ranking)
+                        if isinstance(expert_logits, torch.Tensor):
+                            expert_logits_mean = expert_logits.mean(dim=-1).detach().cpu().numpy()
+                        else:
+                            expert_logits_mean = np.mean(expert_logits, axis=-1)
+                        
                         # Get top_k for this model
                         top_k = getattr(self.model.base_model, 'top_k', 4) if hasattr(self.model, 'base_model') else 4
                         top_k = min(top_k, num_routed_experts)
@@ -890,8 +896,7 @@ class InferencePipeline:
                             # 2. Expert 2 selects tokens from every paper but with varying confidence
                             # 3. The sampled papers all match Expert 2's specialization
                             
-                            # Show raw gate logits stats to understand the underlying scores
-                            expert_logits_mean = expert_logits.mean(dim=-1).detach().cpu().numpy() if isinstance(expert_logits, torch.Tensor) else np.mean(expert_logits, axis=-1)
+                            # expert_logits_mean already computed above for ranking
                             
                             print(f"  DEBUG {paper_id}:")
                             print(f"    Expert probs (avg selection prob) = {[f'E{i}:{p:.6f}' for i, p in enumerate(expert_probs_paper)]}")

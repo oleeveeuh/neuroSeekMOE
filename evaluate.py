@@ -376,7 +376,7 @@ class ExpertActivationHook:
                 expert_logits = torch.tensor(expert_logits, dtype=torch.float32)
             expert_probs_all = F.softmax(expert_logits, dim=-1).detach().cpu().numpy()  # [num_experts, batch*seq_len]
             
-        top_k = min(top_k, num_experts)
+            top_k = min(top_k, num_experts)
             expert_token_selections = np.argsort(expert_probs_all, axis=-1)[:, -top_k:]  # [num_experts, top_k]
             
             activations = np.zeros((batch_size, num_experts), dtype=bool)
@@ -573,16 +573,16 @@ class ExpertActivationHook:
             expert_activations = np.concatenate(self.expert_activations_list, axis=0)  # (N_samples, N_experts)
         else:
             # Fallback: create from probabilities (shouldn't happen if capture_batch worked)
-        num_experts = expert_probs_all.shape[1]
-        expert_activations = np.zeros_like(expert_probs_all, dtype=bool)
             expert_activations = expert_probs_all > 0
+        
+        num_experts = expert_probs_all.shape[1]
         
         # Debug: Check if probabilities are identical across experts
         # Find a sample that actually has non-zero probabilities
         if expert_probs_all.shape[0] > 0:
             # Find first sample with non-zero probabilities
             sample_idx = None
-        for i in range(expert_probs_all.shape[0]):
+            for i in range(expert_probs_all.shape[0]):
                 sample_probs = expert_probs_all[i]
                 if np.any(sample_probs > 0):
                     sample_idx = i
@@ -1310,8 +1310,8 @@ def evaluate_model(
             tokenizer = load_medical_tokenizer()
     elif SENTENCEPIECE_AVAILABLE:
         # Fallback to SentencePiece only
-    tokenizer = spm.SentencePieceProcessor()
-    tokenizer.load(tokenizer_path)
+        tokenizer = spm.SentencePieceProcessor()
+        tokenizer.load(tokenizer_path)
         print(f"Loaded SentencePiece tokenizer from: {tokenizer_path}")
     else:
         raise ImportError("Neither tokenizer_wrapper nor sentencepiece available. Install transformers or sentencepiece.")
@@ -1544,7 +1544,7 @@ def evaluate_model(
         
         model = ModelWrapper(base_model)
         
-            # Load checkpoint weights
+        # Load checkpoint weights
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         else:
@@ -1552,59 +1552,59 @@ def evaluate_model(
         
         model.to(device)
         model.eval()
+        
+        # Debug: Check gate weights to see if they're uniform
+        if hasattr(base_model, 'gate') and hasattr(base_model.gate, 'weight'):
+            gate_weights = base_model.gate.weight.detach().cpu().numpy()
+            gate_std = np.std(gate_weights)
+            gate_mean = np.mean(gate_weights)
+            print(f"\nGate weight statistics:")
+            print(f"  Mean: {gate_mean:.4f}, Std: {gate_std:.4f}")
+            print(f"  Shape: {gate_weights.shape}")
             
-            # Debug: Check gate weights to see if they're uniform
-            if hasattr(base_model, 'gate') and hasattr(base_model.gate, 'weight'):
-                gate_weights = base_model.gate.weight.detach().cpu().numpy()
-                gate_std = np.std(gate_weights)
-                gate_mean = np.mean(gate_weights)
-                print(f"\nGate weight statistics:")
-                print(f"  Mean: {gate_mean:.4f}, Std: {gate_std:.4f}")
-                print(f"  Shape: {gate_weights.shape}")
+            # Per-expert analysis
+            expert_means = np.mean(gate_weights, axis=1)  # Mean weight per expert
+            expert_stds = np.std(gate_weights, axis=1)   # Std weight per expert
+            expert_norms = np.linalg.norm(gate_weights, axis=1)  # L2 norm per expert
+            
+            print(f"\n  Per-expert analysis:")
+            for expert_idx in range(len(expert_means)):
+                print(f"    Expert {expert_idx}: mean={expert_means[expert_idx]:.6f}, std={expert_stds[expert_idx]:.4f}, norm={expert_norms[expert_idx]:.4f}")
+            
+            # Check if any expert has significantly smaller weights
+            mean_of_means = np.mean(expert_means)
+            std_of_means = np.std(expert_means)
+            min_expert = np.argmin(expert_means)
+            max_expert = np.argmax(expert_means)
+            
+            print(f"\n  Expert comparison:")
+            print(f"    Mean of expert means: {mean_of_means:.6f}, Std: {std_of_means:.6f}")
+            print(f"    Min expert (Expert {min_expert}): {expert_means[min_expert]:.6f}")
+            print(f"    Max expert (Expert {max_expert}): {expert_means[max_expert]:.6f}")
+            print(f"    Ratio (max/min): {expert_means[max_expert] / abs(expert_means[min_expert]) if expert_means[min_expert] != 0 else 'inf':.2f}")
+            
+            # Check if Expert 2 (or any expert) is significantly underutilized
+            if len(expert_means) >= 3:
+                expert_2_mean = expert_means[2]
+                other_means = np.concatenate([expert_means[:2], expert_means[3:]])
+                other_mean = np.mean(other_means)
+                if abs(expert_2_mean) < abs(other_mean) * 0.5:  # Expert 2 is < 50% of others
+                    print(f"\n  ⚠️  WARNING: Expert 2 has significantly smaller weights!")
+                    print(f"     Expert 2 mean: {expert_2_mean:.6f}")
+                    print(f"     Other experts mean: {other_mean:.6f}")
+                    print(f"     This explains why Expert 2 is underutilized in routing.")
+            
+            if gate_std < 0.01:
+                print(f"\n  ⚠️  WARNING: Gate weights are nearly uniform (std={gate_std:.4f})")
+                print(f"     This explains why expert probabilities are identical.")
+                print(f"     The model may need more training or more aggressive specialization parameters.")
+            else:
+                print(f"\n  ✓ Gate weights show diversity (std={gate_std:.4f})")
                 
-                # Per-expert analysis
-                expert_means = np.mean(gate_weights, axis=1)  # Mean weight per expert
-                expert_stds = np.std(gate_weights, axis=1)   # Std weight per expert
-                expert_norms = np.linalg.norm(gate_weights, axis=1)  # L2 norm per expert
-                
-                print(f"\n  Per-expert analysis:")
-                for expert_idx in range(len(expert_means)):
-                    print(f"    Expert {expert_idx}: mean={expert_means[expert_idx]:.6f}, std={expert_stds[expert_idx]:.4f}, norm={expert_norms[expert_idx]:.4f}")
-                
-                # Check if any expert has significantly smaller weights
-                mean_of_means = np.mean(expert_means)
-                std_of_means = np.std(expert_means)
-                min_expert = np.argmin(expert_means)
-                max_expert = np.argmax(expert_means)
-                
-                print(f"\n  Expert comparison:")
-                print(f"    Mean of expert means: {mean_of_means:.6f}, Std: {std_of_means:.6f}")
-                print(f"    Min expert (Expert {min_expert}): {expert_means[min_expert]:.6f}")
-                print(f"    Max expert (Expert {max_expert}): {expert_means[max_expert]:.6f}")
-                print(f"    Ratio (max/min): {expert_means[max_expert] / abs(expert_means[min_expert]) if expert_means[min_expert] != 0 else 'inf':.2f}")
-                
-                # Check if Expert 2 (or any expert) is significantly underutilized
-                if len(expert_means) >= 3:
-                    expert_2_mean = expert_means[2]
-                    other_means = np.concatenate([expert_means[:2], expert_means[3:]])
-                    other_mean = np.mean(other_means)
-                    if abs(expert_2_mean) < abs(other_mean) * 0.5:  # Expert 2 is < 50% of others
-                        print(f"\n  ⚠️  WARNING: Expert 2 has significantly smaller weights!")
-                        print(f"     Expert 2 mean: {expert_2_mean:.6f}")
-                        print(f"     Other experts mean: {other_mean:.6f}")
-                        print(f"     This explains why Expert 2 is underutilized in routing.")
-                
-                if gate_std < 0.01:
-                    print(f"\n  ⚠️  WARNING: Gate weights are nearly uniform (std={gate_std:.4f})")
-                    print(f"     This explains why expert probabilities are identical.")
-                    print(f"     The model may need more training or more aggressive specialization parameters.")
-                else:
-                    print(f"\n  ✓ Gate weights show diversity (std={gate_std:.4f})")
-                    
-                # Check if weights are too small (could indicate poor initialization or training)
-                if np.max(np.abs(gate_weights)) < 0.1:
-                    print(f"\n  ⚠️  WARNING: Gate weights are very small (max abs: {np.max(np.abs(gate_weights)):.4f})")
-                    print(f"     This could indicate the model hasn't learned strong routing preferences.")
+            # Check if weights are too small (could indicate poor initialization or training)
+            if np.max(np.abs(gate_weights)) < 0.1:
+                print(f"\n  ⚠️  WARNING: Gate weights are very small (max abs: {np.max(np.abs(gate_weights)):.4f})")
+                print(f"     This could indicate the model hasn't learned strong routing preferences.")
             
         print(f"Loaded model from {model_checkpoint}")
     except Exception as e:
@@ -1875,7 +1875,7 @@ def evaluate_model(
     # Use user-specified output_dir, but check if it's in Drive and use Drive path if available
     # Only override if output_dir is the default "./evaluations"
     if output_dir == "./evaluations" or output_dir == "evaluations":
-    results_dir = get_drive_results_path(output_dir)
+        results_dir = get_drive_results_path(output_dir)
     else:
         # User specified a custom directory - respect it
         results_dir = output_dir
@@ -1983,17 +1983,17 @@ def evaluate_model(
                         if probs_std < 1e-6:
                             print(f"  ⚠️  WARNING: Expert probabilities are nearly identical!")
                             print(f"     This suggests the model hasn't learned to differentiate experts.")
-                else:
+                        else:
                             print(f"  ✓ Expert probabilities show diversity")
-            else:
-                        # All samples have zero probabilities
-                        print(f"\nProbability diversity:")
-                        print(f"  ⚠️  WARNING: All samples have zero probabilities!")
-                        print(f"     This indicates a bug in probability computation/storage.")
-                        # Show statistics across all samples
-                        non_zero_count = np.sum(expert_probs > 0)
-                        total_count = expert_probs.size
-                        print(f"     Non-zero probabilities: {non_zero_count}/{total_count} ({100*non_zero_count/total_count:.1f}%)")
+                else:
+                    # All samples have zero probabilities
+                    print(f"\nProbability diversity:")
+                    print(f"  ⚠️  WARNING: All samples have zero probabilities!")
+                    print(f"     This indicates a bug in probability computation/storage.")
+                    # Show statistics across all samples
+                    non_zero_count = np.sum(expert_probs > 0)
+                    total_count = expert_probs.size
+                    print(f"     Non-zero probabilities: {non_zero_count}/{total_count} ({100*non_zero_count/total_count:.1f}%)")
                 
                 # Check if all experts activate on same papers
                 if activation_std < 1.0:
@@ -2002,9 +2002,10 @@ def evaluate_model(
                 else:
                     print(f"\n✓ Experts show different activation patterns (std={activation_std:.1f})")
                 print(f"{'='*60}\n")
+            
             # Save expert activations to the same directory as other evaluation results
             # Use results_dir (which respects the user-specified output_dir, including subdirectories)
-                activations_dir = results_dir
+            activations_dir = results_dir
             
             os.makedirs(activations_dir, exist_ok=True)
             activations_path = os.path.join(activations_dir, 'expert_activations.npz')

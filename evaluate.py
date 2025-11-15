@@ -307,6 +307,16 @@ class ExpertActivationHook:
                     print(f"  probs sample (first paper): {probs[0] if batch_size > 0 else 'N/A'}")
                     print(f"  token_counts sample: {token_counts[0] if batch_size > 0 else 'N/A'}")
                     print(f"  token_counts sum: {token_counts.sum()}")
+                    
+                    # Find papers that actually have tokens
+                    papers_with_tokens = np.where(token_counts.sum(axis=1) > 0)[0]
+                    if len(papers_with_tokens) > 0:
+                        paper_idx = papers_with_tokens[0]
+                        print(f"  Papers with tokens: {papers_with_tokens[:5]}...")
+                        print(f"  probs for paper {paper_idx}: {probs[paper_idx]}")
+                        print(f"  token_counts for paper {paper_idx}: {token_counts[paper_idx]}")
+                    else:
+                        print(f"  WARNING: No papers have tokens mapped!")
                     print(f"  expert_probs_all shape: {expert_probs_all.shape}")
                     print(f"  expert_probs_all sample (expert 0, first 5 tokens): {expert_probs_all[0, :5] if expert_probs_all.shape[1] >= 5 else expert_probs_all[0]}")
                     
@@ -561,22 +571,37 @@ class ExpertActivationHook:
             expert_activations = expert_probs_all > 0
         
         # Debug: Check if probabilities are identical across experts
+        # Find a sample that actually has non-zero probabilities
         if expert_probs_all.shape[0] > 0:
-            sample_probs = expert_probs_all[0]
-            if len(sample_probs) > 1:
-                probs_std = np.std(sample_probs)
-                probs_mean = np.mean(sample_probs)
-                probs_min = np.min(sample_probs)
-                probs_max = np.max(sample_probs)
-                if probs_std < 1e-6:
-                    print(f"WARNING: Expert probabilities are nearly identical (std={probs_std:.2e}). ")
-                    print(f"  Sample probabilities: {sample_probs}")
-                    print(f"  Mean: {probs_mean:.4f}, Min: {probs_min:.4f}, Max: {probs_max:.4f}")
-                    print(f"  This suggests the model's gate weights are uniform or haven't learned differentiation.")
-                else:
-                    print(f"Expert probability diversity: std={probs_std:.4f} (good if > 0.01)")
-                    print(f"  Sample probabilities: {sample_probs}")
-                    print(f"  Mean: {probs_mean:.4f}, Min: {probs_min:.4f}, Max: {probs_max:.4f}")
+            # Find first sample with non-zero probabilities
+            sample_idx = None
+            for i in range(expert_probs_all.shape[0]):
+                sample_probs = expert_probs_all[i]
+                if np.any(sample_probs > 0):
+                    sample_idx = i
+                    break
+            
+            if sample_idx is not None:
+                sample_probs = expert_probs_all[sample_idx]
+                if len(sample_probs) > 1:
+                    probs_std = np.std(sample_probs)
+                    probs_mean = np.mean(sample_probs)
+                    probs_min = np.min(sample_probs)
+                    probs_max = np.max(sample_probs)
+                    if probs_std < 1e-6:
+                        print(f"WARNING: Expert probabilities are nearly identical (std={probs_std:.2e}). ")
+                        print(f"  Sample {sample_idx} probabilities: {sample_probs}")
+                        print(f"  Mean: {probs_mean:.4f}, Min: {probs_min:.4f}, Max: {probs_max:.4f}")
+                        print(f"  This suggests the model's gate weights are uniform or haven't learned differentiation.")
+                    else:
+                        print(f"Expert probability diversity (sample {sample_idx}): std={probs_std:.4f} (good if > 0.01)")
+                        print(f"  Sample probabilities: {sample_probs}")
+                        print(f"  Mean: {probs_mean:.4f}, Min: {probs_min:.4f}, Max: {probs_max:.4f}")
+            else:
+                # All samples have zero probabilities - this is the real bug
+                print(f"WARNING: All samples have zero probabilities!")
+                print(f"  This indicates a bug in probability computation/storage.")
+                print(f"  Checking first few samples: {expert_probs_all[:min(5, expert_probs_all.shape[0])]}")
         
         # Debug: Check activation diversity
         activation_counts = expert_activations.sum(axis=0)  # Count activations per expert
@@ -1910,18 +1935,36 @@ def evaluate_model(
                 for expert_id in range(num_experts):
                     print(f"  Expert {expert_id}: {activation_counts[expert_id]} activations")
                 
-                # Check probability diversity
+                # Check probability diversity - find a sample with non-zero probabilities
                 if expert_probs.shape[0] > 0:
-                    sample_probs = expert_probs[0]
-                    probs_std = np.std(sample_probs)
-                    probs_mean = np.mean(sample_probs)
-                    print(f"\nProbability diversity (first sample):")
-                    print(f"  Mean: {probs_mean:.4f}, Std: {probs_std:.4f}")
-                    if probs_std < 1e-6:
-                        print(f"  ⚠️  WARNING: Expert probabilities are nearly identical!")
-                        print(f"     This suggests the model hasn't learned to differentiate experts.")
+                    # Find first sample with non-zero probabilities
+                    sample_idx = None
+                    for i in range(expert_probs.shape[0]):
+                        if np.any(expert_probs[i] > 0):
+                            sample_idx = i
+                            break
+                    
+                    if sample_idx is not None:
+                        sample_probs = expert_probs[sample_idx]
+                        probs_std = np.std(sample_probs)
+                        probs_mean = np.mean(sample_probs)
+                        print(f"\nProbability diversity (sample {sample_idx}, first with non-zero probs):")
+                        print(f"  Mean: {probs_mean:.4f}, Std: {probs_std:.4f}")
+                        print(f"  Probabilities: {sample_probs}")
+                        if probs_std < 1e-6:
+                            print(f"  ⚠️  WARNING: Expert probabilities are nearly identical!")
+                            print(f"     This suggests the model hasn't learned to differentiate experts.")
+                        else:
+                            print(f"  ✓ Expert probabilities show diversity")
                     else:
-                        print(f"  ✓ Experts show probability diversity")
+                        # All samples have zero probabilities
+                        print(f"\nProbability diversity:")
+                        print(f"  ⚠️  WARNING: All samples have zero probabilities!")
+                        print(f"     This indicates a bug in probability computation/storage.")
+                        # Show statistics across all samples
+                        non_zero_count = np.sum(expert_probs > 0)
+                        total_count = expert_probs.size
+                        print(f"     Non-zero probabilities: {non_zero_count}/{total_count} ({100*non_zero_count/total_count:.1f}%)")
                 
                 # Check if all experts activate on same papers
                 if activation_std < 1.0:

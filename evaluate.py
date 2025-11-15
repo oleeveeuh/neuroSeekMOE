@@ -348,7 +348,7 @@ class ExpertActivationHook:
                         print(f"  Expert 2 selected {expert_2_selected} tokens")
                         print(f"  Other experts selected: {other_selected}")
             else:
-                # Fallback: average over sequence
+                # Fallback: average over sequence (when batch_size == 0)
                 gate_logits_avg = gate_logits_np.mean(axis=0, keepdims=True)
                 num_experts = gate_logits_avg.shape[-1]
                 if isinstance(gate_logits_avg, torch.Tensor):
@@ -357,7 +357,8 @@ class ExpertActivationHook:
                     probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
                 top_k = min(top_k, num_experts)
                 top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]
-                activations = np.zeros((1, num_experts), dtype=bool)
+                batch_size = 1  # Set to 1 for the fallback case
+                activations = np.zeros((batch_size, num_experts), dtype=bool)
                 activations[0, top_k_indices[0]] = True
         elif len(gate_logits_np.shape) == 3:  # [batch, seq_len, num_experts]
             # Similar processing for 3D case
@@ -414,10 +415,10 @@ class ExpertActivationHook:
                 probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
             top_k = min(top_k, num_experts)
             top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]
-        batch_size = probs.shape[0]
-        activations = np.zeros((batch_size, num_experts), dtype=bool)
-        for i in range(batch_size):
-            activations[i, top_k_indices[i]] = True
+            batch_size = probs.shape[0]
+            activations = np.zeros((batch_size, num_experts), dtype=bool)
+            for i in range(batch_size):
+                activations[i, top_k_indices[i]] = True
         
         # Store
         # expert_selections: which experts were selected (for compatibility)

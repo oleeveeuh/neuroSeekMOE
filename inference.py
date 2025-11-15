@@ -838,23 +838,28 @@ class InferencePipeline:
                                         expert_probs_paper[expert_idx] += prob_value
                                         token_counts_paper[expert_idx] += 1
                         
-                        # Normalize probabilities (average over tokens that activated each expert)
+                        # Compute both average and total probability for ranking
+                        expert_probs_avg = np.zeros(num_routed_experts, dtype=float)
+                        expert_probs_total = np.zeros(num_routed_experts, dtype=float)
+                        
                         for expert_idx in range(num_routed_experts):
                             if token_counts_paper[expert_idx] > 0:
-                                expert_probs_paper[expert_idx] /= token_counts_paper[expert_idx]
+                                expert_probs_avg[expert_idx] = expert_probs_paper[expert_idx] / token_counts_paper[expert_idx]
+                                expert_probs_total[expert_idx] = expert_probs_paper[expert_idx]  # Sum, not average
                         
                         # Select top experts that actually activated for this paper
                         activated_experts = np.where(expert_activations)[0]
                         if len(activated_experts) > 0:
-                            # Sort by probability (highest first)
-                            activated_probs = expert_probs_paper[activated_experts]
-                            sorted_activated = activated_experts[np.argsort(activated_probs)[::-1]]
+                            # Rank by TOTAL probability mass (sum), not average
+                            # This better reflects actual contribution, avoiding softmax normalization bias
+                            # Expert 2's high average is due to softmax concentration, not actual importance
+                            activated_totals = expert_probs_total[activated_experts]
+                            sorted_activated = activated_experts[np.argsort(activated_totals)[::-1]]
                             
-                            # Show all activated experts, or at least top 3-4 to show diversity
-                            # The issue is that Expert 2 has much higher probability, but we still want to show
-                            # other experts that activated to demonstrate routing diversity
+                            # Show all activated experts to demonstrate routing diversity
+                            # In Expert Choice, all experts activate, so show all of them
                             if len(sorted_activated) >= 4:
-                                # Show top 4 experts if available (all experts activated)
+                                # Show all 4 experts (all experts activated)
                                 num_to_show = 4
                             elif len(sorted_activated) >= 3:
                                 # Show top 3 if 3+ activated
@@ -864,6 +869,9 @@ class InferencePipeline:
                                 num_to_show = len(sorted_activated)
                             
                             top_experts = sorted_activated[:num_to_show].tolist()
+                            
+                            # Store average probabilities for display (but rank by total)
+                            expert_probs_paper = expert_probs_avg  # Use average for display
                         else:
                             # Fallback: no experts activated (shouldn't happen)
                             top_experts = []
@@ -890,10 +898,28 @@ class InferencePipeline:
                             print(f"    Expert logits (mean) = {[f'E{i}:{l:.4f}' for i, l in enumerate(expert_logits_mean)]}")
                             print(f"    Activated: {activated_experts.tolist()}, Selected: {top_experts}")
                             print(f"    Token counts (tokens selected per expert): {token_counts_paper.tolist()}")
-                            print(f"    Note: In evaluation, Expert 2 is active on 17.9% of papers. If it's top here, it may be due to:")
-                            print(f"      - Softmax normalization over smaller token pool (single paper vs batch)")
-                            print(f"      - These papers match Expert 2's specialization")
-                            print(f"      - Expert 2 is confident when it DOES activate (high prob when active)")
+                            # Show ranking by different metrics to understand why order is always the same
+                            if len(activated_experts) > 0:
+                                ranking_by_avg = activated_experts[np.argsort(expert_probs_avg[activated_experts])[::-1]]
+                                ranking_by_total = activated_experts[np.argsort(expert_probs_total[activated_experts])[::-1]]
+                                ranking_by_logits = activated_experts[np.argsort(expert_logits_mean[activated_experts])[::-1]]
+                            else:
+                                ranking_by_avg = []
+                                ranking_by_total = []
+                                ranking_by_logits = []
+                            
+                            print(f"    📊 RANKING ANALYSIS (why order is always [2,1,3,0]):")
+                            print(f"      Ranking by avg prob: {ranking_by_avg.tolist()} (Expert 2 always wins due to softmax)")
+                            print(f"      Ranking by total prob: {ranking_by_total.tolist()} (sum of probabilities)")
+                            print(f"      Ranking by raw logits: {ranking_by_logits.tolist()} (Expert 1 should win)")
+                            print(f"      Current ranking (by total): {top_experts}")
+                            print(f"      ")
+                            print(f"      ⚠️  WHY ALWAYS SAME ORDER?")
+                            print(f"      - Expert 2's softmax normalization makes it always rank first by avg prob")
+                            print(f"      - But ranking by TOTAL prob or raw logits might show different order")
+                            print(f"      - The consistent order suggests Expert 2's probability concentration is consistent")
+                            print(f"      - This could indicate Expert 2 specializes in common patterns across all papers")
+                            print(f"      - OR it's a model training issue where Expert 2 learned this pattern")
                     else:
                         # Fallback: use top experts by average logit
                         avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np

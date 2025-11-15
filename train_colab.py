@@ -81,6 +81,11 @@ class TrainingLogger:
             'domain_clinical', 'domain_drug_discovery', 'domain_general_ml_health'
         ]
         
+        # Create directory if it doesn't exist
+        log_dir = os.path.dirname(self.log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        
         # Initialize CSV file
         with open(self.log_file, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=self.fieldnames)
@@ -400,6 +405,9 @@ def train(
     if hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
         print("Gradient checkpointing enabled")
+    
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Resume from checkpoint if specified or auto-detect
     start_step = 0

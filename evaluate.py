@@ -351,10 +351,10 @@ class ExpertActivationHook:
                 # Fallback: average over sequence
                 gate_logits_avg = gate_logits_np.mean(axis=0, keepdims=True)
                 num_experts = gate_logits_avg.shape[-1]
-        if isinstance(gate_logits_avg, torch.Tensor):
-            probs = F.softmax(gate_logits_avg, dim=-1).numpy()
-        else:
-            probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
+                if isinstance(gate_logits_avg, torch.Tensor):
+                    probs = F.softmax(gate_logits_avg, dim=-1).numpy()
+                else:
+                    probs = F.softmax(torch.tensor(gate_logits_avg), dim=-1).numpy()
                 top_k = min(top_k, num_experts)
                 top_k_indices = np.argsort(probs, axis=-1)[:, -top_k:]
                 activations = np.zeros((1, num_experts), dtype=bool)

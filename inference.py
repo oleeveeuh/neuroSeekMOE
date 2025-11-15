@@ -917,15 +917,20 @@ class InferencePipeline:
                             print(f"    📊 RANKING ANALYSIS:")
                             print(f"      Ranking by avg prob: {ranking_by_avg.tolist()} (Expert 2 wins - softmax bias)")
                             print(f"      Ranking by total prob: {ranking_by_total.tolist()} (sum of probabilities)")
-                            print(f"      Ranking by raw logits: {ranking_by_logits.tolist()} (Expert 1 wins - actual strength)")
+                            print(f"      Ranking by raw logits: {ranking_by_logits.tolist()} (Expert {ranking_by_logits[0] if len(ranking_by_logits) > 0 else 'N/A'} strongest)")
                             print(f"      Current ranking (by raw logits): {top_experts}")
                             print(f"      ")
-                            print(f"      ℹ️  NOTE: Consistent order [1,3,0,2] suggests:")
-                            print(f"      - Gate weights are relatively uniform across input patterns")
-                            print(f"      - Expert 1 consistently has highest logits (~2.1) → strongest routing")
-                            print(f"      - Expert 2 consistently has lowest logits (~0.1) → weakest routing")
-                            print(f"      - This indicates lack of domain specialization (training issue)")
-                            print(f"      - Ranking by raw logits correctly shows Expert 1 as strongest")
+                            print(f"      ℹ️  NOTE: Consistent order {top_experts} suggests:")
+                            print(f"      - Gate weights are still relatively uniform across input patterns")
+                            if len(expert_logits_mean) >= 4:
+                                max_expert = int(np.argmax(expert_logits_mean))
+                                min_expert = int(np.argmin(expert_logits_mean))
+                                max_logit = float(expert_logits_mean[max_expert])
+                                min_logit = float(expert_logits_mean[min_expert])
+                                print(f"      - Expert {max_expert} consistently has highest logits (~{max_logit:.2f}) → strongest routing")
+                                print(f"      - Expert {min_expert} consistently has lowest logits (~{min_logit:.2f}) → weakest routing")
+                            print(f"      - Still lacks domain specialization (same order for all paper types)")
+                            print(f"      - This may be due to dataset homogeneity (89% 'Both' papers)")
                     else:
                         # Fallback: use top experts by average logit
                         avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np

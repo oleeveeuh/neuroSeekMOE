@@ -489,11 +489,18 @@ class ExpertActivationHook:
             sample_probs = expert_probs_all[0]
             if len(sample_probs) > 1:
                 probs_std = np.std(sample_probs)
+                probs_mean = np.mean(sample_probs)
+                probs_min = np.min(sample_probs)
+                probs_max = np.max(sample_probs)
                 if probs_std < 1e-6:
-                    print(f"WARNING: Expert probabilities are nearly identical (std={probs_std:.2e}). "
-                          f"This suggests the model hasn't learned to differentiate experts.")
+                    print(f"WARNING: Expert probabilities are nearly identical (std={probs_std:.2e}). ")
+                    print(f"  Sample probabilities: {sample_probs}")
+                    print(f"  Mean: {probs_mean:.4f}, Min: {probs_min:.4f}, Max: {probs_max:.4f}")
+                    print(f"  This suggests the model's gate weights are uniform or haven't learned differentiation.")
                 else:
                     print(f"Expert probability diversity: std={probs_std:.4f} (good if > 0.01)")
+                    print(f"  Sample probabilities: {sample_probs}")
+                    print(f"  Mean: {probs_mean:.4f}, Min: {probs_min:.4f}, Max: {probs_max:.4f}")
         
         # Debug: Check activation diversity
         activation_counts = expert_activations.sum(axis=0)  # Count activations per expert
@@ -1335,11 +1342,62 @@ def evaluate_model(
             
             print(f"Creating model with: vocab_size={vocab_size}, embedding_dim={embedding_dim}, num_shared_experts={num_shared_experts}, num_routed_experts={num_routed_experts}")
             
+            # Try to load routing parameters from config.yaml (for consistency)
+            # Note: These don't affect inference routing, but help with consistency
+            moe_params = {
+                'noise_scale': 0.5,  # Default
+                'load_balance_loss_weight': 0.1,  # Default
+                'z_loss_weight': 0.001,  # Default
+                'temperature_schedule': 'linear',
+                'temperature_start': 2.0,
+                'temperature_end': 0.1,
+                'temperature_steps': 1000,
+                'top_k': 2,
+            }
+            
+            # Try to load from config.yaml
+            try:
+                from pathlib import Path
+                import yaml
+                config_path = Path('config.yaml')
+                if config_path.exists():
+                    with open(config_path, 'r') as f:
+                        config = yaml.safe_load(f)
+                        if 'training' in config:
+                            training_config = config['training']
+                            if 'noise_scale' in training_config:
+                                moe_params['noise_scale'] = training_config['noise_scale']
+                            if 'load_balance_loss_weight' in training_config:
+                                moe_params['load_balance_loss_weight'] = training_config['load_balance_loss_weight']
+                            if 'z_loss_weight' in training_config:
+                                moe_params['z_loss_weight'] = training_config['z_loss_weight']
+                            if 'temperature_schedule' in training_config:
+                                moe_params['temperature_schedule'] = training_config['temperature_schedule']
+                            if 'temperature_start' in training_config:
+                                moe_params['temperature_start'] = training_config['temperature_start']
+                            if 'temperature_end' in training_config:
+                                moe_params['temperature_end'] = training_config['temperature_end']
+                            if 'temperature_steps' in training_config:
+                                moe_params['temperature_steps'] = training_config['temperature_steps']
+                            if 'top_k' in training_config:
+                                moe_params['top_k'] = training_config['top_k']
+            except Exception as e:
+                # If config.yaml not found or error, use defaults
+                pass
+            
             base_model = SimpleMoEModel(
                 vocab_size=vocab_size,
                 embedding_dim=embedding_dim,
                 num_shared_experts=num_shared_experts,
                 num_routed_experts=num_routed_experts,
+                top_k=moe_params['top_k'],
+                noise_scale=moe_params['noise_scale'],
+                load_balance_loss_weight=moe_params['load_balance_loss_weight'],
+                z_loss_weight=moe_params['z_loss_weight'],
+                temperature_schedule=moe_params['temperature_schedule'],
+                temperature_start=moe_params['temperature_start'],
+                temperature_end=moe_params['temperature_end'],
+                temperature_steps=moe_params['temperature_steps'],
             )
             
             # Wrap model
@@ -1364,6 +1422,27 @@ def evaluate_model(
             
             model.to(device)
             model.eval()
+            
+            # Debug: Check gate weights to see if they're uniform
+            if hasattr(base_model, 'gate') and hasattr(base_model.gate, 'weight'):
+                gate_weights = base_model.gate.weight.detach().cpu().numpy()
+                gate_std = np.std(gate_weights)
+                gate_mean = np.mean(gate_weights)
+                print(f"\nGate weight statistics:")
+                print(f"  Mean: {gate_mean:.4f}, Std: {gate_std:.4f}")
+                print(f"  Shape: {gate_weights.shape}")
+                if gate_std < 0.01:
+                    print(f"  ⚠️  WARNING: Gate weights are nearly uniform (std={gate_std:.4f})")
+                    print(f"     This explains why expert probabilities are identical.")
+                    print(f"     The model may need more training or more aggressive specialization parameters.")
+                else:
+                    print(f"  ✓ Gate weights show diversity (std={gate_std:.4f})")
+                    # Show per-expert weight statistics
+                    expert_means = np.mean(gate_weights, axis=1)
+                    expert_stds = np.std(gate_weights, axis=1)
+                    print(f"  Per-expert weight means: {expert_means}")
+                    print(f"  Per-expert weight stds: {expert_stds}")
+            
             print(f"Loaded model from {model_checkpoint}")
     except Exception as e:
         print(f"Could not load model: {e}")

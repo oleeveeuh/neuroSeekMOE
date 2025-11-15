@@ -793,39 +793,82 @@ class InferencePipeline:
                     else:
                         gate_logits_np = np.array(gate_logits)
                     
-                    # For Expert Choice routing, determine which experts are most active for this paper
-                    # Use average gate probabilities across all tokens to identify top experts
+                    # For Expert Choice routing: experts select tokens, not tokens choosing experts
+                    # We need to compute which experts actually selected tokens from this paper
                     if len(gate_logits_np.shape) == 2:
-                        # [batch*seq_len, num_routed_experts]
-                        # Compute probabilities
-                        gate_probs = torch.softmax(torch.from_numpy(gate_logits_np), dim=-1).numpy()
+                        # [batch*seq_len, num_routed_experts] or [seq_len, num_routed_experts] for single paper
+                        num_routed_experts = gate_logits_np.shape[1]
                         
-                        # Average probabilities across all tokens for this paper
-                        # This gives us the overall activation strength of each expert for this paper
-                        avg_gate_probs = gate_probs.mean(axis=0)  # [num_routed_experts]
-                        
-                        # Select top experts by average probability
-                        # Show top 2-3 experts based on their actual probabilities
-                        # This ensures we show the most active experts for each paper
-                        sorted_indices = np.argsort(avg_gate_probs)[::-1]  # Sort descending
-                        
-                        # Show top 2-3 experts, prioritizing diversity
-                        # Include 3rd expert if it's reasonably active (>15% prob) to show routing diversity
-                        if num_routed_experts >= 3 and len(sorted_indices) >= 3:
-                            prob_3rd = avg_gate_probs[sorted_indices[2]]
-                            # Include 3rd expert if it has >15% probability (shows meaningful activation)
-                            if prob_3rd > 0.15:
-                                num_to_show = 3
-                            else:
-                                num_to_show = 2
+                        # For Expert Choice: transpose to [num_routed_experts, batch*seq_len]
+                        # Each expert sees scores for all tokens
+                        if isinstance(gate_logits_np, torch.Tensor):
+                            expert_logits = gate_logits_np.t()  # [num_routed_experts, batch*seq_len]
                         else:
-                            num_to_show = min(2, len(sorted_indices))
+                            expert_logits = torch.tensor(gate_logits_np, dtype=torch.float32).t()
                         
-                        top_experts = sorted_indices[:num_to_show].tolist()
+                        # For each expert, compute softmax over all tokens to get selection probabilities
+                        if not isinstance(expert_logits, torch.Tensor):
+                            expert_logits = torch.tensor(expert_logits, dtype=torch.float32)
+                        expert_probs_all = torch.softmax(expert_logits, dim=-1).detach().cpu().numpy()  # [num_routed_experts, batch*seq_len]
                         
-                        # Debug: Print expert probabilities for first few papers to diagnose routing
+                        # Get top_k for this model
+                        top_k = getattr(self.model.base_model, 'top_k', 4) if hasattr(self.model, 'base_model') else 4
+                        top_k = min(top_k, num_routed_experts)
+                        
+                        # Each expert selects top_k tokens with highest probabilities
+                        expert_token_selections = np.argsort(expert_probs_all, axis=-1)[:, -top_k:]  # [num_routed_experts, top_k]
+                        
+                        # Determine which experts selected tokens from this paper
+                        # For single paper inference, all tokens belong to paper 0
+                        paper_idx = 0
+                        seq_len = gate_logits_np.shape[0]  # All tokens are from this single paper
+                        
+                        # Track which experts selected tokens from this paper
+                        expert_activations = np.zeros(num_routed_experts, dtype=bool)
+                        expert_probs_paper = np.zeros(num_routed_experts, dtype=float)
+                        token_counts_paper = np.zeros(num_routed_experts, dtype=int)
+                        
+                        for expert_idx in range(num_routed_experts):
+                            selected_tokens = expert_token_selections[expert_idx]  # [top_k]
+                            for token_idx in selected_tokens:
+                                if token_idx < expert_probs_all.shape[1]:
+                                    expert_activations[expert_idx] = True
+                                    prob_value = float(expert_probs_all[expert_idx, token_idx])
+                                    if not np.isnan(prob_value) and prob_value > 0:
+                                        expert_probs_paper[expert_idx] += prob_value
+                                        token_counts_paper[expert_idx] += 1
+                        
+                        # Normalize probabilities (average over tokens that activated each expert)
+                        for expert_idx in range(num_routed_experts):
+                            if token_counts_paper[expert_idx] > 0:
+                                expert_probs_paper[expert_idx] /= token_counts_paper[expert_idx]
+                        
+                        # Select top experts that actually activated for this paper
+                        activated_experts = np.where(expert_activations)[0]
+                        if len(activated_experts) > 0:
+                            # Sort by probability (highest first)
+                            activated_probs = expert_probs_paper[activated_experts]
+                            sorted_activated = activated_experts[np.argsort(activated_probs)[::-1]]
+                            
+                            # Show top 2-3 activated experts
+                            if len(sorted_activated) >= 3:
+                                # Include 3rd expert if it has reasonable probability
+                                prob_3rd = expert_probs_paper[sorted_activated[2]]
+                                if prob_3rd > np.max(expert_probs_paper) * 0.3:  # At least 30% of max
+                                    num_to_show = 3
+                                else:
+                                    num_to_show = 2
+                            else:
+                                num_to_show = len(sorted_activated)
+                            
+                            top_experts = sorted_activated[:num_to_show].tolist()
+                        else:
+                            # Fallback: no experts activated (shouldn't happen)
+                            top_experts = []
+                        
+                        # Debug: Print expert probabilities for first few papers
                         if len(example_predictions) < 3:  # Only for first 3 papers to avoid spam
-                            print(f"  DEBUG {paper_id}: Expert avg probs = {[f'E{i}:{p:.3f}' for i, p in enumerate(avg_gate_probs)]}, Selected: {top_experts}")
+                            print(f"  DEBUG {paper_id}: Expert probs (Expert Choice) = {[f'E{i}:{p:.6f}' for i, p in enumerate(expert_probs_paper)]}, Activated: {activated_experts.tolist()}, Selected: {top_experts}")
                     else:
                         # Fallback: use top experts by average logit
                         avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np

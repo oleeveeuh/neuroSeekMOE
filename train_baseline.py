@@ -36,6 +36,13 @@ except ImportError:
     SENTENCEPIECE_AVAILABLE = False
     print("Warning: sentencepiece not available")
 
+try:
+    from tokenizer_wrapper import TokenizerWrapper, load_medical_tokenizer, DEFAULT_MEDICAL_TOKENIZER
+    TOKENIZER_WRAPPER_AVAILABLE = True
+except ImportError:
+    TOKENIZER_WRAPPER_AVAILABLE = False
+    print("tokenizer_wrapper not available, falling back to SentencePiece only")
+
 # Import evaluation utilities
 from evaluate import (
     compute_perplexity, compute_domain_classification_accuracy,
@@ -169,12 +176,34 @@ def train_baseline_model(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    # Load tokenizer
-    if not SENTENCEPIECE_AVAILABLE:
-        raise ImportError("sentencepiece package required")
+    # Load tokenizer (try HuggingFace first, fallback to SentencePiece)
+    if TOKENIZER_WRAPPER_AVAILABLE:
+        # Check if it's a HuggingFace model name or SentencePiece file
+        if os.path.exists(tokenizer_path) and (tokenizer_path.endswith('.model') or os.path.isfile(tokenizer_path)):
+            # SentencePiece file
+            tokenizer = TokenizerWrapper(tokenizer_path, tokenizer_type='sentencepiece')
+            print(f"Loaded SentencePiece tokenizer from: {tokenizer_path}")
+        elif '/' in tokenizer_path and not os.path.exists(tokenizer_path):
+            # HuggingFace model name (e.g., "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext")
+            try:
+                tokenizer = TokenizerWrapper(tokenizer_path, tokenizer_type='huggingface')
+                print(f"✅ Loaded HuggingFace tokenizer: {tokenizer_path}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load HuggingFace tokenizer '{tokenizer_path}': {e}")
+                print(f"   Falling back to default medical tokenizer: {DEFAULT_MEDICAL_TOKENIZER}")
+                tokenizer = load_medical_tokenizer()
+        else:
+            # Use default medical tokenizer
+            print(f"Using default medical tokenizer: {DEFAULT_MEDICAL_TOKENIZER}")
+            tokenizer = load_medical_tokenizer()
+    elif SENTENCEPIECE_AVAILABLE:
+        # Fallback to SentencePiece only
+        tokenizer = spm.SentencePieceProcessor()
+        tokenizer.load(tokenizer_path)
+        print(f"Loaded SentencePiece tokenizer from: {tokenizer_path}")
+    else:
+        raise ImportError("Neither tokenizer_wrapper nor sentencepiece available. Install transformers or sentencepiece.")
     
-    tokenizer = spm.SentencePieceProcessor()
-    tokenizer.load(tokenizer_path)
     vocab_size = tokenizer.get_piece_size()
     print(f"Loaded tokenizer (vocab_size={vocab_size})")
     

@@ -1666,19 +1666,37 @@ class InferencePipeline:
         """Get path for saving files, preferring Google Drive if available.
         
         Args:
-            local_path: Local fallback path
+            local_path: Local fallback path (may include subdirectories like pretrained/)
             
         Returns:
             Path string (Drive path if available, otherwise local)
         """
+        # If the path is already a Drive path, return it as-is
+        if local_path.startswith('/content/drive/MyDrive/neuroMOE_results'):
+            return local_path
+        
         # Check for Google Drive
         drive_base = os.environ.get('DRIVE_BASE', '/content/drive/MyDrive/neuroMOE_results')
         
         # Check if Drive is mounted
         if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
-            # Extract filename from local_path
+            # Extract relative path from evaluations directory, preserving subdirectories
+            # If local_path is like "./evaluations/pretrained/example_predictions.json"
+            # or "evaluations/pretrained/example_predictions.json", extract "pretrained/example_predictions.json"
+            local_path_normalized = os.path.normpath(local_path)
+            
+            # Try to extract the relative path from evaluations
+            if 'evaluations' in local_path_normalized:
+                # Split on 'evaluations' and take everything after it
+                parts = local_path_normalized.split('evaluations', 1)
+                if len(parts) > 1:
+                    # Remove leading slash if present
+                    relative_path = parts[1].lstrip(os.sep)
+                    drive_path = os.path.join(drive_base, 'evaluations', relative_path)
+                    return drive_path
+            
+            # If no subdirectory structure found, just use filename
             filename = os.path.basename(local_path)
-            # Save to Drive evaluations folder (same location as eval_results.json)
             drive_path = os.path.join(drive_base, 'evaluations', filename)
             return drive_path
         
@@ -1687,6 +1705,17 @@ class InferencePipeline:
             # Try neuroMOE_results/evaluations first
             drive_base = '/content/drive/MyDrive/neuroMOE_results'
             if os.path.exists(drive_base) and os.access(drive_base, os.W_OK):
+                # Extract relative path from evaluations directory, preserving subdirectories
+                local_path_normalized = os.path.normpath(local_path)
+                
+                if 'evaluations' in local_path_normalized:
+                    parts = local_path_normalized.split('evaluations', 1)
+                    if len(parts) > 1:
+                        relative_path = parts[1].lstrip(os.sep)
+                        drive_path = os.path.join(drive_base, 'evaluations', relative_path)
+                        return drive_path
+                
+                # If no subdirectory structure found, just use filename
                 filename = os.path.basename(local_path)
                 drive_path = os.path.join(drive_base, 'evaluations', filename)
                 return drive_path

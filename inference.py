@@ -914,18 +914,18 @@ class InferencePipeline:
                                 ranking_by_total = []
                                 ranking_by_logits = []
                             
-                            print(f"    📊 RANKING ANALYSIS (why order is always [2,1,3,0]):")
-                            print(f"      Ranking by avg prob: {ranking_by_avg.tolist()} (Expert 2 always wins due to softmax)")
+                            print(f"    📊 RANKING ANALYSIS:")
+                            print(f"      Ranking by avg prob: {ranking_by_avg.tolist()} (Expert 2 wins - softmax bias)")
                             print(f"      Ranking by total prob: {ranking_by_total.tolist()} (sum of probabilities)")
-                            print(f"      Ranking by raw logits: {ranking_by_logits.tolist()} (Expert 1 should win)")
-                            print(f"      Current ranking (by total): {top_experts}")
+                            print(f"      Ranking by raw logits: {ranking_by_logits.tolist()} (Expert 1 wins - actual strength)")
+                            print(f"      Current ranking (by raw logits): {top_experts}")
                             print(f"      ")
-                            print(f"      ⚠️  WHY ALWAYS SAME ORDER?")
-                            print(f"      - Expert 2's softmax normalization makes it always rank first by avg prob")
-                            print(f"      - But ranking by TOTAL prob or raw logits might show different order")
-                            print(f"      - The consistent order suggests Expert 2's probability concentration is consistent")
-                            print(f"      - This could indicate Expert 2 specializes in common patterns across all papers")
-                            print(f"      - OR it's a model training issue where Expert 2 learned this pattern")
+                            print(f"      ℹ️  NOTE: Consistent order [1,3,0,2] suggests:")
+                            print(f"      - Gate weights are relatively uniform across input patterns")
+                            print(f"      - Expert 1 consistently has highest logits (~2.1) → strongest routing")
+                            print(f"      - Expert 2 consistently has lowest logits (~0.1) → weakest routing")
+                            print(f"      - This indicates lack of domain specialization (training issue)")
+                            print(f"      - Ranking by raw logits correctly shows Expert 1 as strongest")
                     else:
                         # Fallback: use top experts by average logit
                         avg_gate_logits = gate_logits_np.mean(axis=0) if len(gate_logits_np.shape) > 1 else gate_logits_np

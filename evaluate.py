@@ -221,7 +221,12 @@ class ExpertActivationHook:
         
         if len(gate_logits_np.shape) == 2:  # [batch*seq_len, num_experts]
             if batch_size > 0:
-                seq_len = gate_logits_np.shape[0] // batch_size
+                total_tokens = gate_logits_np.shape[0]
+                seq_len = total_tokens // batch_size
+                # Handle case where division isn't exact (shouldn't happen, but be safe)
+                if total_tokens % batch_size != 0:
+                    print(f"WARNING: total_tokens ({total_tokens}) not divisible by batch_size ({batch_size})")
+                    seq_len = (total_tokens + batch_size - 1) // batch_size  # Ceiling division
                 gate_logits_reshaped = gate_logits_np.reshape(batch_size, seq_len, -1)
                 num_experts = gate_logits_reshaped.shape[-1]
                 
@@ -263,7 +268,15 @@ class ExpertActivationHook:
                         # Ensure token_idx is within bounds
                         if token_idx >= expert_probs_all.shape[1]:
                             continue
+                        # Map flattened token index back to (paper_idx, token_pos_in_paper)
+                        # token_idx is in range [0, batch_size * seq_len)
                         paper_idx = token_idx // seq_len
+                        token_pos = token_idx % seq_len
+                        
+                        # Debug first batch
+                        if len(self.expert_probs) == 0 and expert_idx == 0 and len([t for t in selected_tokens if t == token_idx]) == 1:
+                            print(f"  DEBUG mapping: token_idx={token_idx}, seq_len={seq_len}, paper_idx={paper_idx}, token_pos={token_pos}, batch_size={batch_size}")
+                        
                         if paper_idx < batch_size:
                             activations[paper_idx, expert_idx] = True
                             # Use the probability that this expert selected this token
@@ -272,6 +285,10 @@ class ExpertActivationHook:
                             if not np.isnan(prob_value) and prob_value > 0:
                                 probs[paper_idx, expert_idx] += prob_value
                                 token_counts[paper_idx, expert_idx] += 1
+                        else:
+                            # Debug: why is paper_idx out of bounds?
+                            if len(self.expert_probs) == 0:
+                                print(f"  WARNING: token_idx={token_idx} maps to paper_idx={paper_idx} >= batch_size={batch_size}")
                 
                 # Normalize probabilities (average over tokens that activated each expert)
                 for paper_idx in range(batch_size):
@@ -285,11 +302,19 @@ class ExpertActivationHook:
                 # Debug: Print first batch probabilities to diagnose
                 if len(self.expert_probs) == 0:  # Only for first batch
                     print(f"\nDEBUG capture_batch: First batch analysis")
+                    print(f"  batch_size: {batch_size}, seq_len: {seq_len}, total_tokens: {gate_logits_np.shape[0]}")
                     print(f"  probs shape: {probs.shape}")
                     print(f"  probs sample (first paper): {probs[0] if batch_size > 0 else 'N/A'}")
                     print(f"  token_counts sample: {token_counts[0] if batch_size > 0 else 'N/A'}")
+                    print(f"  token_counts sum: {token_counts.sum()}")
                     print(f"  expert_probs_all shape: {expert_probs_all.shape}")
                     print(f"  expert_probs_all sample (expert 0, first 5 tokens): {expert_probs_all[0, :5] if expert_probs_all.shape[1] >= 5 else expert_probs_all[0]}")
+                    
+                    # Show sample token selections
+                    print(f"  Sample token selections:")
+                    for expert_idx in range(min(4, num_experts)):
+                        selected = expert_token_selections[expert_idx]
+                        print(f"    Expert {expert_idx}: selected tokens {selected[:5]}..." if len(selected) > 5 else f"    Expert {expert_idx}: selected tokens {selected}")
                     
                     # Check if Expert 2 has lower probabilities in expert_probs_all
                     if expert_probs_all.shape[0] >= 3:

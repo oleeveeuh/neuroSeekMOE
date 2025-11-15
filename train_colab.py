@@ -61,6 +61,13 @@ except ImportError:
     SENTENCEPIECE_AVAILABLE = False
     print("sentencepiece not available")
 
+try:
+    from tokenizer_wrapper import TokenizerWrapper, load_medical_tokenizer, DEFAULT_MEDICAL_TOKENIZER
+    TOKENIZER_WRAPPER_AVAILABLE = True
+except ImportError:
+    TOKENIZER_WRAPPER_AVAILABLE = False
+    print("tokenizer_wrapper not available, falling back to SentencePiece only")
+
 
 class TrainingLogger:
     """Logger for training metrics with CSV export."""
@@ -586,14 +593,36 @@ def main():
         args.gradient_accumulation = args.gradient_accumulation_steps
         print("Warning: --gradient-accumulation-steps is deprecated, use --gradient-accumulation instead")
     
-    # Load tokenizer
-    if not SENTENCEPIECE_AVAILABLE:
-        raise ImportError("sentencepiece package required. Install with: pip install sentencepiece")
+    # Load tokenizer (try HuggingFace first, fallback to SentencePiece)
+    if TOKENIZER_WRAPPER_AVAILABLE:
+        # Check if it's a HuggingFace model name or SentencePiece file
+        if os.path.exists(args.tokenizer_path) and (args.tokenizer_path.endswith('.model') or os.path.isfile(args.tokenizer_path)):
+            # SentencePiece file
+            tokenizer = TokenizerWrapper(args.tokenizer_path, tokenizer_type='sentencepiece')
+            print(f"Loaded SentencePiece tokenizer from: {args.tokenizer_path}")
+        elif '/' in args.tokenizer_path and not os.path.exists(args.tokenizer_path):
+            # HuggingFace model name (e.g., "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext")
+            try:
+                tokenizer = TokenizerWrapper(args.tokenizer_path, tokenizer_type='huggingface')
+                print(f"✅ Loaded HuggingFace tokenizer: {args.tokenizer_path}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load HuggingFace tokenizer '{args.tokenizer_path}': {e}")
+                print(f"   Falling back to default medical tokenizer: {DEFAULT_MEDICAL_TOKENIZER}")
+                tokenizer = load_medical_tokenizer()
+        else:
+            # Use default medical tokenizer
+            print(f"Using default medical tokenizer: {DEFAULT_MEDICAL_TOKENIZER}")
+            tokenizer = load_medical_tokenizer()
+    elif SENTENCEPIECE_AVAILABLE:
+        # Fallback to SentencePiece only
+        tokenizer = spm.SentencePieceProcessor()
+        tokenizer.load(args.tokenizer_path)
+        print(f"Loaded SentencePiece tokenizer from: {args.tokenizer_path}")
+    else:
+        raise ImportError("Neither tokenizer_wrapper nor sentencepiece available. Install transformers or sentencepiece.")
     
-    tokenizer = spm.SentencePieceProcessor()
-    tokenizer.load(args.tokenizer_path)
-    print(f"Loaded tokenizer from {args.tokenizer_path}")
-    print(f"   Vocabulary size: {tokenizer.get_piece_size()}")
+    vocab_size = tokenizer.get_piece_size()
+    print(f"   Vocabulary size: {vocab_size}")
     
     # Create dataset
     dataset = ArXivStreamingDataset(
@@ -606,7 +635,7 @@ def main():
     print(f"Created dataset with ~{len(dataset)} samples")
     
     # Load model - use SimpleMoEModel from train_real.py
-    vocab_size = tokenizer.get_piece_size()
+    # vocab_size already set above
     
     try:
         from train_real import SimpleMoEModel

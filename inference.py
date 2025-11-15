@@ -850,11 +850,12 @@ class InferencePipeline:
                         # Select top experts that actually activated for this paper
                         activated_experts = np.where(expert_activations)[0]
                         if len(activated_experts) > 0:
-                            # Rank by TOTAL probability mass (sum), not average
-                            # This better reflects actual contribution, avoiding softmax normalization bias
-                            # Expert 2's high average is due to softmax concentration, not actual importance
-                            activated_totals = expert_probs_total[activated_experts]
-                            sorted_activated = activated_experts[np.argsort(activated_totals)[::-1]]
+                            # Rank by RAW LOGITS (mean), not probabilities
+                            # Raw logits better reflect actual routing strength before softmax normalization
+                            # Expert 2's high probabilities are due to softmax concentration, not actual importance
+                            # Expert 1 has highest raw logits (~2.1) and should rank first
+                            activated_logits = expert_logits_mean[activated_experts]
+                            sorted_activated = activated_experts[np.argsort(activated_logits)[::-1]]
                             
                             # Show all activated experts to demonstrate routing diversity
                             # In Expert Choice, all experts activate, so show all of them

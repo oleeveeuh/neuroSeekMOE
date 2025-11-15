@@ -92,7 +92,7 @@ def classify_paper_domain(paper: Dict) -> str:
     if len(title + ' ' + abstract) < 50 and full_text:
         text = full_text[:2000]  # Use first 2000 chars of full text for keyword matching
     else:
-    text = title + ' ' + abstract
+        text = title + ' ' + abstract
     
     # Check categories (ArXiv format: 'cs.CV', 'q-bio.NC', etc.)
     # Also check for processed domain labels like 'medical_imaging', 'neuroscience', etc.

@@ -377,11 +377,62 @@ class InferencePipeline:
                         embedding_dim = weight.shape[1]
                         break
                 
+                # Try to load routing parameters from config.yaml (for consistency)
+                # Note: These don't affect inference routing, but help with consistency
+                moe_params = {
+                    'noise_scale': 0.5,  # Default
+                    'load_balance_loss_weight': 0.1,  # Default
+                    'z_loss_weight': 0.001,  # Default
+                    'temperature_schedule': 'linear',
+                    'temperature_start': 2.0,
+                    'temperature_end': 0.1,
+                    'temperature_steps': 1000,
+                    'top_k': 2,
+                }
+                
+                # Try to load from config.yaml
+                try:
+                    from pathlib import Path
+                    import yaml
+                    config_path = Path('config.yaml')
+                    if config_path.exists():
+                        with open(config_path, 'r') as f:
+                            config = yaml.safe_load(f)
+                            if 'training' in config:
+                                training_config = config['training']
+                                if 'noise_scale' in training_config:
+                                    moe_params['noise_scale'] = training_config['noise_scale']
+                                if 'load_balance_loss_weight' in training_config:
+                                    moe_params['load_balance_loss_weight'] = training_config['load_balance_loss_weight']
+                                if 'z_loss_weight' in training_config:
+                                    moe_params['z_loss_weight'] = training_config['z_loss_weight']
+                                if 'temperature_schedule' in training_config:
+                                    moe_params['temperature_schedule'] = training_config['temperature_schedule']
+                                if 'temperature_start' in training_config:
+                                    moe_params['temperature_start'] = training_config['temperature_start']
+                                if 'temperature_end' in training_config:
+                                    moe_params['temperature_end'] = training_config['temperature_end']
+                                if 'temperature_steps' in training_config:
+                                    moe_params['temperature_steps'] = training_config['temperature_steps']
+                                if 'top_k' in training_config:
+                                    moe_params['top_k'] = training_config['top_k']
+                except Exception as e:
+                    # If config.yaml not found or error, use defaults
+                    pass
+                
                 base_model = SimpleMoEModel(
                     vocab_size=model_vocab_size,  # Use checkpoint vocab_size
                     embedding_dim=embedding_dim,
                     num_shared_experts=2,
                     num_routed_experts=num_routed_experts,
+                    top_k=moe_params['top_k'],
+                    noise_scale=moe_params['noise_scale'],
+                    load_balance_loss_weight=moe_params['load_balance_loss_weight'],
+                    z_loss_weight=moe_params['z_loss_weight'],
+                    temperature_schedule=moe_params['temperature_schedule'],
+                    temperature_start=moe_params['temperature_start'],
+                    temperature_end=moe_params['temperature_end'],
+                    temperature_steps=moe_params['temperature_steps'],
                 )
                 
                 # Store base_model reference for expert activation capture

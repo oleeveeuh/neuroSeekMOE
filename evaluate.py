@@ -235,11 +235,14 @@ class ExpertActivationHook:
                 if isinstance(gate_logits_flat, torch.Tensor):
                     expert_logits = gate_logits_flat.t()  # [num_experts, batch*seq_len]
                 else:
-                    expert_logits = torch.tensor(gate_logits_flat).t()  # [num_experts, batch*seq_len]
+                    expert_logits = torch.tensor(gate_logits_flat, dtype=torch.float32).t()  # [num_experts, batch*seq_len]
                 
                 # For each expert, compute softmax over all tokens to get selection probabilities
                 # This gives each expert a probability distribution over all tokens
-                expert_probs_all = F.softmax(expert_logits, dim=-1).numpy()  # [num_experts, batch*seq_len]
+                # Ensure we use torch tensor for softmax
+                if not isinstance(expert_logits, torch.Tensor):
+                    expert_logits = torch.tensor(expert_logits, dtype=torch.float32)
+                expert_probs_all = F.softmax(expert_logits, dim=-1).detach().cpu().numpy()  # [num_experts, batch*seq_len]
                 
                 # Each expert selects top_k tokens with highest probabilities
                 top_k = min(top_k, num_experts)
@@ -257,13 +260,18 @@ class ExpertActivationHook:
                     
                     # Map tokens back to papers
                     for token_idx in selected_tokens:
+                        # Ensure token_idx is within bounds
+                        if token_idx >= expert_probs_all.shape[1]:
+                            continue
                         paper_idx = token_idx // seq_len
                         if paper_idx < batch_size:
                             activations[paper_idx, expert_idx] = True
                             # Use the probability that this expert selected this token
                             # expert_probs_all[expert_idx, token_idx] is the probability expert_idx selected token_idx
-                            probs[paper_idx, expert_idx] += expert_probs_all[expert_idx, token_idx]
-                            token_counts[paper_idx, expert_idx] += 1
+                            prob_value = float(expert_probs_all[expert_idx, token_idx])
+                            if not np.isnan(prob_value) and prob_value > 0:
+                                probs[paper_idx, expert_idx] += prob_value
+                                token_counts[paper_idx, expert_idx] += 1
                 
                 # Normalize probabilities (average over tokens that activated each expert)
                 for paper_idx in range(batch_size):
@@ -273,6 +281,30 @@ class ExpertActivationHook:
                         else:
                             # If expert didn't select any tokens from this paper, probability is 0
                             probs[paper_idx, expert_idx] = 0.0
+                
+                # Debug: Print first batch probabilities to diagnose
+                if len(self.expert_probs) == 0:  # Only for first batch
+                    print(f"\nDEBUG capture_batch: First batch analysis")
+                    print(f"  probs shape: {probs.shape}")
+                    print(f"  probs sample (first paper): {probs[0] if batch_size > 0 else 'N/A'}")
+                    print(f"  token_counts sample: {token_counts[0] if batch_size > 0 else 'N/A'}")
+                    print(f"  expert_probs_all shape: {expert_probs_all.shape}")
+                    print(f"  expert_probs_all sample (expert 0, first 5 tokens): {expert_probs_all[0, :5] if expert_probs_all.shape[1] >= 5 else expert_probs_all[0]}")
+                    
+                    # Check if Expert 2 has lower probabilities in expert_probs_all
+                    if expert_probs_all.shape[0] >= 3:
+                        expert_2_probs = expert_probs_all[2, :]  # All tokens for Expert 2
+                        other_experts_probs = np.concatenate([expert_probs_all[:2, :], expert_probs_all[3:, :]], axis=0)
+                        print(f"  Expert 2 avg prob across all tokens: {np.mean(expert_2_probs):.6f}")
+                        print(f"  Other experts avg prob: {np.mean(other_experts_probs):.6f}")
+                        print(f"  Expert 2 max prob: {np.max(expert_2_probs):.6f}")
+                        print(f"  Other experts max prob: {np.max(other_experts_probs):.6f}")
+                        
+                        # Check how many tokens Expert 2 selected
+                        expert_2_selected = len(expert_token_selections[2])
+                        other_selected = [len(expert_token_selections[i]) for i in range(len(expert_token_selections)) if i != 2]
+                        print(f"  Expert 2 selected {expert_2_selected} tokens")
+                        print(f"  Other experts selected: {other_selected}")
             else:
                 # Fallback: average over sequence
                 gate_logits_avg = gate_logits_np.mean(axis=0, keepdims=True)
@@ -294,10 +326,13 @@ class ExpertActivationHook:
             if isinstance(gate_logits_flat, torch.Tensor):
                 expert_logits = gate_logits_flat.t()  # [num_experts, batch*seq_len]
             else:
-                expert_logits = torch.tensor(gate_logits_flat).t()  # [num_experts, batch*seq_len]
+                expert_logits = torch.tensor(gate_logits_flat, dtype=torch.float32).t()  # [num_experts, batch*seq_len]
             
             # For each expert, compute softmax over all tokens
-            expert_probs_all = F.softmax(expert_logits, dim=-1).numpy()  # [num_experts, batch*seq_len]
+            # Ensure we use torch tensor for softmax
+            if not isinstance(expert_logits, torch.Tensor):
+                expert_logits = torch.tensor(expert_logits, dtype=torch.float32)
+            expert_probs_all = F.softmax(expert_logits, dim=-1).detach().cpu().numpy()  # [num_experts, batch*seq_len]
             
             top_k = min(top_k, num_experts)
             expert_token_selections = np.argsort(expert_probs_all, axis=-1)[:, -top_k:]  # [num_experts, top_k]
@@ -309,12 +344,17 @@ class ExpertActivationHook:
             for expert_idx in range(num_experts):
                 selected_tokens = expert_token_selections[expert_idx]
                 for token_idx in selected_tokens:
+                    # Ensure token_idx is within bounds
+                    if token_idx >= expert_probs_all.shape[1]:
+                        continue
                     paper_idx = token_idx // seq_len
                     if paper_idx < batch_size:
                         activations[paper_idx, expert_idx] = True
                         # Use the probability that this expert selected this token
-                        probs[paper_idx, expert_idx] += expert_probs_all[expert_idx, token_idx]
-                        token_counts[paper_idx, expert_idx] += 1
+                        prob_value = expert_probs_all[expert_idx, token_idx]
+                        if not np.isnan(prob_value) and prob_value > 0:
+                            probs[paper_idx, expert_idx] += prob_value
+                            token_counts[paper_idx, expert_idx] += 1
             
             for paper_idx in range(batch_size):
                 for expert_idx in range(num_experts):
@@ -1442,17 +1482,50 @@ def evaluate_model(
                 print(f"\nGate weight statistics:")
                 print(f"  Mean: {gate_mean:.4f}, Std: {gate_std:.4f}")
                 print(f"  Shape: {gate_weights.shape}")
+                
+                # Per-expert analysis
+                expert_means = np.mean(gate_weights, axis=1)  # Mean weight per expert
+                expert_stds = np.std(gate_weights, axis=1)   # Std weight per expert
+                expert_norms = np.linalg.norm(gate_weights, axis=1)  # L2 norm per expert
+                
+                print(f"\n  Per-expert analysis:")
+                for expert_idx in range(len(expert_means)):
+                    print(f"    Expert {expert_idx}: mean={expert_means[expert_idx]:.6f}, std={expert_stds[expert_idx]:.4f}, norm={expert_norms[expert_idx]:.4f}")
+                
+                # Check if any expert has significantly smaller weights
+                mean_of_means = np.mean(expert_means)
+                std_of_means = np.std(expert_means)
+                min_expert = np.argmin(expert_means)
+                max_expert = np.argmax(expert_means)
+                
+                print(f"\n  Expert comparison:")
+                print(f"    Mean of expert means: {mean_of_means:.6f}, Std: {std_of_means:.6f}")
+                print(f"    Min expert (Expert {min_expert}): {expert_means[min_expert]:.6f}")
+                print(f"    Max expert (Expert {max_expert}): {expert_means[max_expert]:.6f}")
+                print(f"    Ratio (max/min): {expert_means[max_expert] / abs(expert_means[min_expert]) if expert_means[min_expert] != 0 else 'inf':.2f}")
+                
+                # Check if Expert 2 (or any expert) is significantly underutilized
+                if len(expert_means) >= 3:
+                    expert_2_mean = expert_means[2]
+                    other_means = np.concatenate([expert_means[:2], expert_means[3:]])
+                    other_mean = np.mean(other_means)
+                    if abs(expert_2_mean) < abs(other_mean) * 0.5:  # Expert 2 is < 50% of others
+                        print(f"\n  ⚠️  WARNING: Expert 2 has significantly smaller weights!")
+                        print(f"     Expert 2 mean: {expert_2_mean:.6f}")
+                        print(f"     Other experts mean: {other_mean:.6f}")
+                        print(f"     This explains why Expert 2 is underutilized in routing.")
+                
                 if gate_std < 0.01:
-                    print(f"  ⚠️  WARNING: Gate weights are nearly uniform (std={gate_std:.4f})")
+                    print(f"\n  ⚠️  WARNING: Gate weights are nearly uniform (std={gate_std:.4f})")
                     print(f"     This explains why expert probabilities are identical.")
                     print(f"     The model may need more training or more aggressive specialization parameters.")
                 else:
-                    print(f"  ✓ Gate weights show diversity (std={gate_std:.4f})")
-                    # Show per-expert weight statistics
-                    expert_means = np.mean(gate_weights, axis=1)
-                    expert_stds = np.std(gate_weights, axis=1)
-                    print(f"  Per-expert weight means: {expert_means}")
-                    print(f"  Per-expert weight stds: {expert_stds}")
+                    print(f"\n  ✓ Gate weights show diversity (std={gate_std:.4f})")
+                    
+                # Check if weights are too small (could indicate poor initialization or training)
+                if np.max(np.abs(gate_weights)) < 0.1:
+                    print(f"\n  ⚠️  WARNING: Gate weights are very small (max abs: {np.max(np.abs(gate_weights)):.4f})")
+                    print(f"     This could indicate the model hasn't learned strong routing preferences.")
             
             print(f"Loaded model from {model_checkpoint}")
     except Exception as e:

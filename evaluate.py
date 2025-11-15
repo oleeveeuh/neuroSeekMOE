@@ -224,7 +224,7 @@ class ExpertActivationHook:
         # Handle different gate_logits shapes
         # For Expert Choice routing, we need to track which tokens each expert selected
         # Don't average - keep per-token routing decisions
-            batch_size = len(batch_metadata.get('arxiv_ids', []))
+        batch_size = len(batch_metadata.get('arxiv_ids', []))
         
         if len(gate_logits_np.shape) == 2:  # [batch*seq_len, num_experts]
             if batch_size > 0:
@@ -246,7 +246,7 @@ class ExpertActivationHook:
                 # Each expert sees scores for all tokens
                 if isinstance(gate_logits_flat, torch.Tensor):
                     expert_logits = gate_logits_flat.t()  # [num_experts, batch*seq_len]
-            else:
+                else:
                     expert_logits = torch.tensor(gate_logits_flat, dtype=torch.float32).t()  # [num_experts, batch*seq_len]
                 
                 # For each expert, compute softmax over all tokens to get selection probabilities

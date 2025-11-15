@@ -123,7 +123,8 @@ def train_baseline_model(
     output_dir: str,
     checkpoint_dir: str = "./checkpoints/baseline",
     epochs: int = 10,  # Default: 10 epochs to match train_real.py
-    batch_size: int = 8,
+    batch_size: int = 6,  # Changed from 8 to match MoE training
+    gradient_accumulation_steps: int = 4,  # Added to match MoE training
     learning_rate: float = 5e-4,
     embedding_dim: int = 256,
     num_layers: int = 6,
@@ -144,6 +145,7 @@ def train_baseline_model(
         checkpoint_dir: Directory for model checkpoints
         epochs: Number of training epochs
         batch_size: Batch size for training
+        gradient_accumulation_steps: Gradient accumulation steps (for fair comparison with MoE)
         learning_rate: Learning rate
         embedding_dim: Embedding dimension
         num_layers: Number of transformer layers
@@ -377,6 +379,32 @@ def train_baseline_model(
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
     
+    # Setup learning rate scheduler (warmup + cosine decay) to match MoE training
+    # This ensures fair comparison with MoE model
+    warmup_steps = 2000 if max_steps is not None else 0
+    if max_steps is not None and max_steps > warmup_steps:
+        from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+        warmup_scheduler = LinearLR(
+            optimizer,
+            start_factor=0.01,  # Start at 1% of learning rate
+            end_factor=1.0,
+            total_iters=warmup_steps
+        )
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=max_steps - warmup_steps,
+            eta_min=learning_rate * 0.1
+        )
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps]
+        )
+        print(f"Using learning rate schedule: warmup ({warmup_steps} steps) + cosine decay")
+    else:
+        scheduler = None
+        print("Using constant learning rate (no scheduler)")
+    
     # Create checkpoint directory
     # Handle case where checkpoint_dir might be a file path instead of directory
     if os.path.isfile(checkpoint_dir):
@@ -400,6 +428,8 @@ def train_baseline_model(
     else:
         print(f"Epochs: {epochs}")
     print(f"Batch size: {batch_size}")
+    print(f"Gradient accumulation: {gradient_accumulation_steps}")
+    print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
     print(f"Learning rate: {learning_rate}")
     
     model.train()
@@ -442,13 +472,23 @@ def train_baseline_model(
                 # Compute loss
                 loss = criterion(logits_flat, targets_flat)
                 
-                # Backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                # Scale loss by gradient accumulation steps
+                loss = loss / gradient_accumulation_steps
                 
-                epoch_loss += loss.item()
+                # Backward pass
+                if global_step % gradient_accumulation_steps == 0:
+                    optimizer.zero_grad()
+                
+                loss.backward()
+                
+                # Update weights only after accumulating gradients
+                if (global_step + 1) % gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
+                
+                epoch_loss += loss.item() * gradient_accumulation_steps  # Scale back for logging
                 num_batches += 1
                 global_step += 1
                 
@@ -457,7 +497,7 @@ def train_baseline_model(
                     break
                 
                 # Update progress bar
-                progress_bar.set_postfix({'loss': f'{loss.item():.4f}', 'step': global_step})
+                progress_bar.set_postfix({'loss': f'{loss.item() * gradient_accumulation_steps:.4f}', 'step': global_step})
                 
                 # Save checkpoint
                 if global_step % save_interval == 0:
@@ -504,18 +544,26 @@ def train_baseline_model(
                 # Compute loss
                 loss = criterion(logits_flat, targets_flat)
                 
-                # Backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                # Scale loss by gradient accumulation steps
+                loss = loss / gradient_accumulation_steps
                 
-                epoch_loss += loss.item()
+                # Backward pass
+                if num_batches % gradient_accumulation_steps == 0:
+                    optimizer.zero_grad()
+                
+                loss.backward()
+                
+                # Update weights only after accumulating gradients
+                if (num_batches + 1) % gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                
+                epoch_loss += loss.item() * gradient_accumulation_steps  # Scale back for logging
                 num_batches += 1
                 global_step += 1
                 
                 # Update progress bar
-                progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
+                progress_bar.set_postfix({'loss': f'{loss.item() * gradient_accumulation_steps:.4f}'})
                 
                 # Save checkpoint
                 if global_step % save_interval == 0:
@@ -702,8 +750,14 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=8,
-        help="Batch size for training"
+        default=6,
+        help="Batch size for training (default: 6 to match MoE training)"
+    )
+    parser.add_argument(
+        "--gradient-accumulation",
+        type=int,
+        default=4,
+        help="Gradient accumulation steps (default: 4 to match MoE training, effective batch size = 24)"
     )
     parser.add_argument(
         "--learning-rate",
@@ -757,8 +811,8 @@ def main():
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=None,
-        help="Maximum training steps (None = use epochs). If set, overrides epochs. Use 50000 to match train_colab.py"
+        default=50000,
+        help="Maximum training steps (default: 50000 to match MoE training). If None, uses epochs instead"
     )
     
     args = parser.parse_args()
@@ -771,6 +825,7 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation,
         learning_rate=args.learning_rate,
         embedding_dim=args.embedding_dim,
         num_layers=args.num_layers,

@@ -999,6 +999,13 @@ def compute_perplexity(
     avg_loss = total_loss / total_tokens
     perplexity = np.exp(avg_loss)
     
+    # Debug: Warn if perplexity is suspiciously low (likely a calculation error)
+    if perplexity < 2.0:
+        print(f"\n⚠️  WARNING: Computed perplexity ({perplexity:.2f}) is suspiciously low!")
+        print(f"   This may indicate a calculation error or data leakage.")
+        print(f"   Total loss: {total_loss:.2f}, Total tokens: {total_tokens}, Avg loss: {avg_loss:.6f}")
+        print(f"   For reference, typical perplexities: 10-50 (good), 50-200 (moderate), 200+ (poor)")
+    
     # Compute per-domain metrics
     domain_metrics = {}
     for domain in domain_losses:

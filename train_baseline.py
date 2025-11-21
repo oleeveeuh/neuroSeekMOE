@@ -47,7 +47,7 @@ except ImportError:
 from evaluate import (
     compute_perplexity, compute_domain_classification_accuracy,
     compute_mrr_at_k, compute_section_classification_accuracy,
-    extract_embeddings, get_drive_results_path
+    extract_embeddings
 )
 from arxiv_dataset import ArXivStreamingDataset, create_dataloader
 from training_adapter import ModelAdapter
@@ -650,6 +650,16 @@ def train_baseline_model(
     perplexity, domain_metrics = compute_perplexity(wrapped_model, adapter, test_dataloader, activation_hook=None)
     print(f"   Perplexity: {perplexity:.2f}")
     
+    # Debug: Check if perplexity seems suspiciously low
+    if perplexity < 2.0:
+        print(f"   ⚠️  WARNING: Perplexity {perplexity:.2f} is suspiciously low!")
+        print(f"      This may indicate:")
+        print(f"      1. Data leakage (test set contains training data)")
+        print(f"      2. Very small/easy test set")
+        print(f"      3. Loss calculation bug")
+        print(f"      Expected perplexity for a baseline model: 50-500+")
+        print(f"      Inference perplexities (50,000+) are more realistic.")
+    
     # Print domain-specific results
     if domain_metrics:
         print("\n   Domain-Specific Perplexity:")
@@ -700,7 +710,9 @@ def train_baseline_model(
     }
     
     # Save baseline results
-    results_dir = get_drive_results_path(output_dir)
+    # Use the output_dir parameter directly (respect user's choice)
+    # Convert to absolute path to ensure consistency
+    results_dir = os.path.abspath(output_dir)
     os.makedirs(results_dir, exist_ok=True)
     print(f"\n📁 Saving results to: {results_dir}")
     

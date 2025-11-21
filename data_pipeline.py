@@ -362,15 +362,7 @@ def _parse_xml_total_results(root: ET.Element, debug: bool = False) -> Optional[
         try:
             return int(total_elem.text)
         except ValueError:
-            if debug:
-                print(f"   DEBUG: totalResults found but invalid value: '{total_elem.text}'")
             return None
-    
-    # Debug: Print XML structure if parsing failed
-    if debug:
-        print("   DEBUG: Could not find totalResults. XML structure:")
-        print(f"   Root tag: {root.tag}")
-        print(f"   Root children: {[child.tag for child in list(root)[:5]]}")
         # Print first few elements
         for i, elem in enumerate(root.iter()):
             if i < 10:
@@ -453,8 +445,6 @@ def analyze_query_feasibility(query: str) -> Dict:
                 root = ET.fromstring(response.content)
             except ET.ParseError as e:
                 error_msg = f"Invalid XML response: {e}"
-                print(f"   DEBUG: {error_msg}")
-                print(f"   DEBUG: Response content (first 500 chars): {response.content[:500]}")
                 if retry_attempt < max_retries:
                     delay = retry_delays[retry_attempt]
                     print(f"   Retrying in {delay}s...")

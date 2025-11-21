@@ -561,11 +561,6 @@ class PipelineOrchestrator:
             # Otherwise, use Pipeline API to download from scratch
             text_files_exist = self.text_dir.exists() and any(self.text_dir.glob("*.txt"))
             
-            print(f"\nDebug: Checking NeMo Curator step...", flush=True)
-            print(f"   Text files exist: {text_files_exist}", flush=True)
-            print(f"   Text directory: {self.text_dir}", flush=True)
-            print(f"   Metadata file: {self.metadata_jsonl}", flush=True)
-            print(f"   Output file: {self.curated_jsonl}", flush=True)
             sys.stdout.flush()
             
             if text_files_exist:

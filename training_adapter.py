@@ -211,18 +211,6 @@ class ModelAdapter:
         # Move to device (this only moves tensors, not lists like categories)
         device_batch = self._move_to_device(batch)
         
-        # Debug: Check batch contents (first batch only)
-        if not hasattr(self, '_debug_batch_checked'):
-            self._debug_batch_checked = True
-            print(f"DEBUG ModelAdapter.process_batch: batch keys: {list(batch.keys())}")
-            print(f"DEBUG ModelAdapter.process_batch: device_batch keys: {list(device_batch.keys())}")
-            if 'categories' in batch:
-                print(f"DEBUG ModelAdapter.process_batch: batch['categories'] type: {type(batch['categories'])}, len: {len(batch['categories']) if batch['categories'] else 0}")
-                if batch['categories'] and len(batch['categories']) > 0:
-                    print(f"DEBUG ModelAdapter.process_batch: batch['categories'][0]: {batch['categories'][0]}")
-            else:
-                print(f"DEBUG ModelAdapter.process_batch: 'categories' NOT in batch!")
-        
         input_ids = device_batch['input_ids']
         target_ids = device_batch['target_ids']
         domains = device_batch['domains']

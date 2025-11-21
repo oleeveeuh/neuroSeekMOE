@@ -337,15 +337,6 @@ class ArXivStreamingDataset(IterableDataset):
             if not hasattr(self, '_debug_count'):
                 self._debug_count = 0
             if self._debug_count < 5:
-                if not metadata:
-                    # Check if arxiv_id exists in metadata at all
-                    exists = arxiv_id in self.metadata
-                    sample_keys = list(self.metadata.keys())[:3] if self.metadata else []
-                    print(f"DEBUG _process_paper: {arxiv_id} - metadata is EMPTY, arxiv_id in metadata: {exists}, sample keys: {sample_keys}, total metadata entries: {len(self.metadata) if self.metadata else 0}")
-                else:
-                    categories_in_meta = metadata.get('categories', [])
-                    has_categories = bool(categories_in_meta)
-                    print(f"DEBUG _process_paper: {arxiv_id} - metadata keys: {list(metadata.keys())}, has_categories: {has_categories}, categories: {categories_in_meta}")
                 self._debug_count += 1
             
             domains = metadata.get('domains', [])

@@ -903,12 +903,6 @@ class InferencePipeline:
                             
                             # expert_logits_mean already computed above for ranking
                             
-                            print(f"  DEBUG {paper_id}:")
-                            print(f"    Expert probs (avg selection prob) = {[f'E{i}:{p:.6f}' for i, p in enumerate(expert_probs_paper)]}")
-                            print(f"    Prob ratios (relative to max) = {[f'E{i}:{r:.2%}' for i, r in enumerate(prob_ratios)]}")
-                            print(f"    Expert logits (mean) = {[f'E{i}:{l:.4f}' for i, l in enumerate(expert_logits_mean)]}")
-                            print(f"    Activated: {activated_experts.tolist()}, Selected: {top_experts}")
-                            print(f"    Token counts (tokens selected per expert): {token_counts_paper.tolist()}")
                             # Show ranking by different metrics to understand why order is always the same
                             if len(activated_experts) > 0:
                                 ranking_by_avg = activated_experts[np.argsort(expert_probs_avg[activated_experts])[::-1]]

@@ -2469,11 +2469,6 @@ def train_real_model(
                 if output.shape[0] != target.shape[0]:
                     raise ValueError(f"Batch size mismatch: output {output.shape[0]} != target {target.shape[0]} (original output shape: {original_output_shape})")
                 
-                # Debug: Print shapes for first batch
-                if batch_idx == 0 and epoch == start_epoch:
-                    print(f"   Debug - output shape: {output.shape}, target shape: {target.shape}")
-                    print(f"   Debug - input_tokens shape: {input_tokens.shape}, target_tokens shape: {target_tokens.shape}")
-                
                 # Ignore padding tokens (0) in loss calculation
                 # Padding uses token ID 0, which is masked out
                 mask = (target != 0)
@@ -2688,36 +2683,6 @@ def train_real_model(
                     print(f"     Aux loss: {aux_loss.item() if not torch.isnan(aux_loss) else 'NaN'}")
                     print(f"     Total loss: {loss.item() if not torch.isnan(loss) else 'NaN'}")
                     continue
-                
-                # Debug first batch after resuming to check loss
-                if batch_idx == 0 and epoch == start_epoch and start_epoch > 0:
-                    print(f"  Debug - First batch after resume:")
-                    print(f"     Output shape: {output.shape}, Target shape: {target.shape}")
-                    print(f"     Mask sum: {mask.sum().item()}/{len(target)}")
-                    print(f"     Output range: [{output.min().item():.2f}, {output.max().item():.2f}]")
-                    print(f"     Target range: [{target.min().item()}, {target.max().item()}]")
-                    print(f"     Raw loss (before mask): {criterion(output, target).item():.4f}")
-                    print(f"     Main loss: {main_loss.item():.4f}")
-                    print(f"     Load balance loss: {load_bal_loss.item():.4f}")
-                    z_loss_w = model_engine.z_loss_weight if hasattr(model_engine, 'z_loss_weight') else (model.z_loss_weight if hasattr(model, 'z_loss_weight') else 0.001)
-                    print(f"     Z-loss: {z_loss_val.item():.4f} (weight: {z_loss_w})")
-                    cap_loss_val = cap_loss.item() if isinstance(cap_loss, torch.Tensor) else cap_loss
-                    print(f"     Capacity loss: {cap_loss_val:.4f} (weight: 0.1)")
-                    if hasattr(model_engine, '_capacity_metrics'):
-                        dropped = model_engine._capacity_metrics.get('dropped_token_fraction', 0.0) * 100
-                        util_rate = model_engine._capacity_metrics.get('expert_utilization_rate', None)
-                        if util_rate is not None:
-                            # expert_utilization_rate is now a tensor [num_experts], compute mean
-                            if isinstance(util_rate, torch.Tensor):
-                                util = util_rate.mean().item() * 100
-                            else:
-                                util = float(util_rate) * 100
-                        else:
-                            util = 0.0
-                        print(f"     Capacity: Dropped {dropped:.2f}%, Utilization {util:.2f}%")
-                    # aux_loss is already the weighted sum, so no need to multiply again
-                    print(f"     Combined aux loss: {aux_loss.item():.4f}")
-                    print(f"     Total loss: {loss.item():.4f}")
                 
                 # Backward pass and optimizer step
                 if use_deepspeed and DEEPSPEED_AVAILABLE and model_engine is not None:
@@ -2961,11 +2926,6 @@ def train_real_model(
                         # Silently skip metric computation on error to not interrupt training
                         print(f"Metric computation error (batch {batch_idx}): {e}")
                         pass
-                
-                # Debug: Print target statistics occasionally
-                if not diagnostics_run and epoch == start_epoch:
-                    print(f"  Debug - First batch targets: min={target.min().item()}, max={target.max().item()}, "
-                          f"unique={torch.unique(target).numel()}, non-zero={mask.sum().item()}/{len(target)}")
                 
                 if batch_idx % max(1, len(train_dataloader) // 10) == 0:
                     progress_pct = (batch_idx / len(train_dataloader)) * 100

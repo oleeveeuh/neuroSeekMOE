@@ -201,20 +201,6 @@ class ExpertActivationHook:
             batch_metadata: Batch metadata with paper IDs and domains
             top_k: Number of top experts selected
         """
-        # Debug: Check what batch_metadata contains when received
-        if not hasattr(self, '_debug_batch_metadata_received'):
-            self._debug_batch_metadata_received = True
-            if batch_metadata:
-                print(f"DEBUG activation_hook.capture_batch: batch_metadata keys: {list(batch_metadata.keys())}")
-                print(f"DEBUG activation_hook.capture_batch: 'categories' in batch_metadata: {'categories' in batch_metadata}")
-                if 'categories' in batch_metadata:
-                    cats = batch_metadata['categories']
-                    print(f"DEBUG activation_hook.capture_batch: batch_metadata['categories'] type: {type(cats)}, len: {len(cats) if cats else 0}")
-                else:
-                    print(f"DEBUG activation_hook.capture_batch: 'categories' key is MISSING from batch_metadata!")
-            else:
-                print(f"DEBUG activation_hook.capture_batch: batch_metadata is None!")
-        
         # Move to CPU and detach
         if isinstance(gate_logits, torch.Tensor):
             gate_logits_np = gate_logits.detach().cpu()
@@ -280,10 +266,6 @@ class ExpertActivationHook:
                         paper_idx = token_idx // seq_len
                         token_pos = token_idx % seq_len
                         
-                        # Debug first batch
-                        if len(self.expert_probs) == 0 and expert_idx == 0 and len([t for t in selected_tokens if t == token_idx]) == 1:
-                            print(f"  DEBUG mapping: token_idx={token_idx}, seq_len={seq_len}, paper_idx={paper_idx}, token_pos={token_pos}, batch_size={batch_size}")
-                        
                         if paper_idx < batch_size:
                             activations[paper_idx, expert_idx] = True
                             # Use the probability that this expert selected this token
@@ -293,7 +275,6 @@ class ExpertActivationHook:
                                 probs[paper_idx, expert_idx] += prob_value
                                 token_counts[paper_idx, expert_idx] += 1
                         else:
-                            # Debug: why is paper_idx out of bounds?
                             if len(self.expert_probs) == 0:
                                 print(f"  WARNING: token_idx={token_idx} maps to paper_idx={paper_idx} >= batch_size={batch_size}")
                 
@@ -306,16 +287,7 @@ class ExpertActivationHook:
                             # If expert didn't select any tokens from this paper, probability is 0
                             probs[paper_idx, expert_idx] = 0.0
                 
-                # Debug: Print first batch probabilities to diagnose
-                if len(self.expert_probs) == 0:  # Only for first batch
-                    print(f"\nDEBUG capture_batch: First batch analysis")
-                    print(f"  batch_size: {batch_size}, seq_len: {seq_len}, total_tokens: {gate_logits_np.shape[0]}")
-                    print(f"  probs shape: {probs.shape}")
-                    print(f"  probs sample (first paper): {probs[0] if batch_size > 0 else 'N/A'}")
-                    print(f"  token_counts sample: {token_counts[0] if batch_size > 0 else 'N/A'}")
-                    print(f"  token_counts sum: {token_counts.sum()}")
-                    
-                    # Find papers that actually have tokens
+                # Find papers that actually have tokens
                     papers_with_tokens = np.where(token_counts.sum(axis=1) > 0)[0]
                     if len(papers_with_tokens) > 0:
                         paper_idx = papers_with_tokens[0]
@@ -480,14 +452,9 @@ class ExpertActivationHook:
                     if categories_list and not isinstance(categories_list, list):
                         categories_list = [categories_list] if categories_list else []
             
-            # Debug: Check if categories are missing in batch_metadata (first 5 papers)
-            if len(self.paper_domains) < 5:
-                arxiv_id = arxiv_ids[i] if i < len(arxiv_ids) else f'paper_{i}'
-                has_categories_in_batch = 'categories' in batch_metadata
-                batch_categories_len = len(batch_metadata.get('categories', [])) if has_categories_in_batch else 0
-                print(f"DEBUG activation_hook: {arxiv_id} - has_categories_in_batch={has_categories_in_batch}, batch_categories_len={batch_categories_len}, categories_list={categories_list}")
-                if not categories_list:
-                    print(f"  WARNING: categories_list is empty for {arxiv_id}, trying fallback lookup...")
+            if not categories_list:
+                # Try fallback lookup if categories are missing
+                pass
             
             # Try to get title/abstract from batch metadata if available
             title = ''
@@ -531,15 +498,6 @@ class ExpertActivationHook:
             # Use classify_paper_domain for consistent classification
             # Combine both categories (ArXiv) and domains (NeMo Curator) for classification
             all_categories = categories_list + domain_list  # Combine both for classification
-            
-            # Debug: Show first 5 papers
-            if len(self.paper_domains) < 5:
-                arxiv_id = arxiv_ids[i] if i < len(arxiv_ids) else f'paper_{i}'
-                print(f"\n  {arxiv_id}:")
-                print(f"    Metadata domains: {domain_list} (type: {type(domain_list)})")
-                print(f"    Metadata categories: {categories_list} (type: {type(categories_list)})")
-                print(f"    Title length: {len(title)}, Abstract length: {len(abstract)}")
-                print(f"    Combined categories for classification: {all_categories}")
             
             paper_dict = {
                 'categories': all_categories,  # Use combined list
@@ -1379,7 +1337,7 @@ def evaluate_model(
             # Both models have same state_dict structure, so we detect from filename/path
             from train_baseline import BaselineTransformer, DecoderOnlyTransformer
             
-            is_decoder = 'decoder' in model_checkpoint.lower() or 'decoder' in str(checkpoint_dir).lower()
+            is_decoder = 'decoder' in model_checkpoint.lower() 
             
             if is_decoder:
                 print(f"Inferred baseline config: embedding_dim={embedding_dim}, num_layers={num_layers}, type=decoder")
@@ -1789,13 +1747,6 @@ def evaluate_model(
             self.text_files = text_files
             self._estimated_length = None
             
-            # Debug: Verify metadata has categories for test files
-            if len(text_files) > 0:
-                sample_id = text_files[0][0]
-                sample_meta = metadata_dict.get(sample_id, {})
-                has_cats = 'categories' in sample_meta and sample_meta.get('categories')
-                print(f"DEBUG TestDataset: Sample paper {sample_id} has categories: {has_cats}, categories: {sample_meta.get('categories', [])}")
-        
         def _get_text_files(self) -> List[Tuple[str, str]]:
             """Override to use the provided text_files instead of scanning directory."""
             return self.text_files
@@ -1809,14 +1760,6 @@ def evaluate_model(
         max_length=512,
         min_length=64
     )
-    
-    # Debug: Check if categories are in metadata for test files
-    sample_test_ids = [arxiv_id for arxiv_id, _ in test_files[:3]]
-    print(f"\nDebug: Checking categories in metadata for sample test papers:")
-    for arxiv_id in sample_test_ids:
-        meta = full_dataset.metadata.get(arxiv_id, {})
-        has_categories = 'categories' in meta and meta.get('categories')
-        print(f"  {arxiv_id}: has_categories={has_categories}, categories={meta.get('categories', [])}")
     
     print(f"Created test dataset: {len(test_files)} papers")
     
@@ -1946,9 +1889,7 @@ def evaluate_model(
             print(f"  {domain}: {count} papers ({count/len(activation_hook.paper_domains)*100:.1f}%)")
         print("="*60)
         
-        # Debug: Show sample of domains from metadata vs classification
         if len(activation_hook.paper_ids) > 0:
-            print(f"\nDebug: Sample domain classifications (first 5 papers):")
             sample_count = 0
             for i in range(min(5, len(activation_hook.paper_ids))):
                 arxiv_id = activation_hook.paper_ids[i]

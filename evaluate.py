@@ -1353,7 +1353,7 @@ def evaluate_model(
             print("Detected SimpleMoEModel (MoE) model")
         
         if is_baseline:
-            # Handle baseline model
+            # Handle baseline model (encoder or decoder)
             # Infer embedding_dim from embedding layer
             embedding_dim = 256  # Default
             for key in state_dict.keys():
@@ -1362,7 +1362,7 @@ def evaluate_model(
                     embedding_dim = weight.shape[1]
                     break
             
-            # Infer num_layers from transformer encoder
+            # Infer num_layers from transformer encoder/decoder
             num_layers = 6  # Default
             for key in state_dict.keys():
                 if 'transformer.layers.' in key:
@@ -1375,13 +1375,28 @@ def evaluate_model(
                             except ValueError:
                                 pass
             
-            print(f"Inferred baseline config: embedding_dim={embedding_dim}, num_layers={num_layers}")
+            # Detect model type from checkpoint path (encoder or decoder)
+            # Both models have same state_dict structure, so we detect from filename/path
+            from train_baseline import BaselineTransformer, DecoderOnlyTransformer
             
-            base_model = BaselineTransformer(
-                vocab_size=vocab_size,
-                embedding_dim=embedding_dim,
-                num_layers=num_layers,
-            )
+            is_decoder = 'decoder' in model_checkpoint.lower() or 'decoder' in str(checkpoint_dir).lower()
+            
+            if is_decoder:
+                print(f"Inferred baseline config: embedding_dim={embedding_dim}, num_layers={num_layers}, type=decoder")
+                base_model = DecoderOnlyTransformer(
+                    vocab_size=vocab_size,
+                    embedding_dim=embedding_dim,
+                    num_layers=num_layers,
+                )
+                print("Using DecoderOnlyTransformer (GPT-style, causal attention)")
+            else:
+                print(f"Inferred baseline config: embedding_dim={embedding_dim}, num_layers={num_layers}, type=encoder")
+                base_model = BaselineTransformer(
+                    vocab_size=vocab_size,
+                    embedding_dim=embedding_dim,
+                    num_layers=num_layers,
+                )
+                print("Using BaselineTransformer (BERT-style, bidirectional attention)")
             
             # Wrap model (baseline doesn't need special handling)
             class ModelWrapper(nn.Module):

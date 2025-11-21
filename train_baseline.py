@@ -4,13 +4,31 @@ Train Baseline Model (Standard Transformer without MoE)
 This script trains a baseline transformer model without MoE routing
 and evaluates it to generate baseline_results.json for comparison.
 
+Supports two model types:
+- encoder: Bidirectional transformer (BERT-style) with full attention
+- decoder: Decoder-only transformer (GPT-style) with causal attention
+
 Usage:
+    # Train encoder-only baseline (bidirectional)
     python train_baseline.py \
         --dataset-text-dir ./data/arxiv/texts \
         --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
         --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
         --output-dir ./evaluations \
         --checkpoint-dir ./checkpoints/baseline \
+        --model-type encoder \
+        --epochs 10 \
+        --batch-size 8 \
+        --learning-rate 5e-4
+    
+    # Train decoder-only baseline (GPT-style, causal)
+    python train_baseline.py \
+        --dataset-text-dir ./data/arxiv/texts \
+        --dataset-metadata ./data/arxiv/processed_dataset.jsonl \
+        --tokenizer-path ./data/arxiv/healthcare_tokenizer.model \
+        --output-dir ./evaluations \
+        --checkpoint-dir ./checkpoints/baseline \
+        --model-type decoder \
         --epochs 10 \
         --batch-size 8 \
         --learning-rate 5e-4
@@ -54,10 +72,11 @@ from training_adapter import ModelAdapter
 
 
 class BaselineTransformer(nn.Module):
-    """Standard Transformer model without MoE routing.
+    """Standard Transformer encoder model without MoE routing.
     
     This is a baseline model that uses a standard feedforward network
     instead of MoE routing, for comparison with the MoE model.
+    Uses bidirectional attention (encoder-style).
     """
     
     def __init__(
@@ -78,7 +97,7 @@ class BaselineTransformer(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.pos_embedding = nn.Embedding(max_length, embedding_dim)
         
-        # Transformer encoder layers
+        # Transformer encoder layers (bidirectional attention)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embedding_dim,
             nhead=num_heads,
@@ -92,7 +111,7 @@ class BaselineTransformer(nn.Module):
         # Output projection
         self.lm_head = nn.Linear(embedding_dim, vocab_size)
         self.dropout = nn.Dropout(dropout)
-        
+    
     def forward(self, input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False):
         """Forward pass.
         
@@ -114,8 +133,102 @@ class BaselineTransformer(nn.Module):
         x = self.embedding(input_ids) + self.pos_embedding(positions)
         x = self.dropout(x)
         
-        # Transformer encoding
+        # Transformer encoding (bidirectional)
         x = self.transformer(x)
+        
+        # Project to vocabulary
+        logits = self.lm_head(x)
+        
+        return logits
+
+
+class DecoderOnlyTransformer(nn.Module):
+    """Decoder-only Transformer model (GPT-style) without MoE routing.
+    
+    This is a decoder-only baseline model that uses causal (unidirectional) attention,
+    similar to GPT models. This mimics LLM behavior for autoregressive language modeling.
+    Uses TransformerEncoderLayer with causal masking for efficiency.
+    """
+    
+    def __init__(
+        self,
+        vocab_size: int = 10007,
+        embedding_dim: int = 256,
+        num_layers: int = 6,
+        num_heads: int = 8,
+        ff_dim: int = 1024,
+        max_length: int = 512,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.vocab_size = vocab_size
+        self.max_length = max_length
+        
+        # Embedding layer
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.pos_embedding = nn.Embedding(max_length, embedding_dim)
+        
+        # Transformer encoder layers (we'll apply causal mask in forward)
+        # Using encoder layers but with causal masking gives us decoder-only behavior
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu'
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # Output projection
+        self.lm_head = nn.Linear(embedding_dim, vocab_size)
+        self.dropout = nn.Dropout(dropout)
+    
+    def _generate_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        """Generate causal attention mask for decoder-only model.
+        
+        Args:
+            seq_len: Sequence length
+            device: Device to create mask on
+            
+        Returns:
+            Causal mask: [seq_len, seq_len] where True means "masked" (can't attend)
+        """
+        # Create upper triangular mask (causal)
+        # True = masked (can't attend), False = can attend
+        # Position i can only attend to positions <= i
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
+        return mask
+    
+    def forward(self, input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False):
+        """Forward pass with causal attention.
+        
+        Args:
+            input_ids: [batch, seq_len] token IDs
+            image_features: Ignored (for compatibility)
+            return_load_balance_loss: Ignored (for compatibility)
+            return_gate_logits: Ignored (for compatibility)
+            
+        Returns:
+            logits: [batch, seq_len, vocab_size] logits
+        """
+        batch_size, seq_len = input_ids.shape
+        
+        # Create position embeddings
+        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+        
+        # Embed tokens and positions
+        x = self.embedding(input_ids) + self.pos_embedding(positions)
+        x = self.dropout(x)
+        
+        # Generate causal mask for decoder-only attention
+        # True = masked (can't attend), False = can attend
+        causal_mask = self._generate_causal_mask(seq_len, x.device)
+        
+        # Transformer encoding with causal mask (decoder-only behavior)
+        # The mask ensures each position can only attend to previous positions
+        x = self.transformer(x, mask=causal_mask)
         
         # Project to vocabulary
         logits = self.lm_head(x)
@@ -141,6 +254,7 @@ def train_baseline_model(
     test_split: float = 0.1,
     save_interval: int = 5000,
     max_steps: int = None,
+    model_type: str = "encoder",  # "encoder" or "decoder"
 ) -> str:
     """Train baseline transformer model and evaluate it.
     
@@ -162,12 +276,16 @@ def train_baseline_model(
         test_split: Fraction of data for testing
         save_interval: Steps between checkpoints
         max_steps: Maximum training steps (None = use epochs)
+        model_type: Type of baseline model ('encoder' or 'decoder')
+            - 'encoder': Bidirectional transformer (BERT-style) with full attention
+            - 'decoder': Decoder-only transformer (GPT-style) with causal attention
         
     Returns:
-        Path to baseline_results.json
+        Path to baseline_results.json (includes model_type in filename)
     """
     print("=" * 60)
-    print("Training Baseline Transformer Model")
+    model_type_display = "Decoder-only (GPT-style)" if model_type == "decoder" else "Encoder-only"
+    print(f"Training Baseline Transformer Model ({model_type_display})")
     print("=" * 60)
     print()
     
@@ -391,13 +509,24 @@ def train_baseline_model(
     
     # Create model
     print(f"\nCreating baseline transformer model...")
-    model = BaselineTransformer(
-        vocab_size=vocab_size,
-        embedding_dim=embedding_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        ff_dim=ff_dim,
-    )
+    if model_type == "decoder":
+        print(f"  Model type: Decoder-only (GPT-style, causal attention)")
+        model = DecoderOnlyTransformer(
+            vocab_size=vocab_size,
+            embedding_dim=embedding_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            ff_dim=ff_dim,
+        )
+    else:
+        print(f"  Model type: Encoder-only (bidirectional attention)")
+        model = BaselineTransformer(
+            vocab_size=vocab_size,
+            embedding_dim=embedding_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            ff_dim=ff_dim,
+        )
     model = model.to(device)
     
     total_params = sum(p.numel() for p in model.parameters())
@@ -434,7 +563,7 @@ def train_baseline_model(
         scheduler = None
         print("Using constant learning rate (no scheduler)")
     
-    # Create checkpoint directory
+    # Create checkpoint directory (include model type in path)
     # Handle case where checkpoint_dir might be a file path instead of directory
     if os.path.isfile(checkpoint_dir):
         # If it's an existing file, use its parent directory
@@ -445,6 +574,9 @@ def train_baseline_model(
     elif not os.path.exists(checkpoint_dir) and os.path.splitext(checkpoint_dir)[1]:
         # If it doesn't exist but looks like a file path (has extension), extract directory
         checkpoint_dir = os.path.dirname(checkpoint_dir)
+    
+    # Add model type to checkpoint directory to avoid overwriting encoder/decoder models
+    checkpoint_dir = os.path.join(checkpoint_dir, model_type)
     
     # Ensure the directory exists
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -530,7 +662,7 @@ def train_baseline_model(
                 
                 # Save checkpoint
                 if global_step % save_interval == 0:
-                    checkpoint_path = os.path.join(checkpoint_dir, f"baseline_step_{global_step}.pt")
+                    checkpoint_path = os.path.join(checkpoint_dir, f"baseline_{model_type}_step_{global_step}.pt")
                     torch.save({
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
@@ -596,7 +728,7 @@ def train_baseline_model(
                 
                 # Save checkpoint
                 if global_step % save_interval == 0:
-                    checkpoint_path = os.path.join(checkpoint_dir, f"baseline_step_{global_step}.pt")
+                    checkpoint_path = os.path.join(checkpoint_dir, f"baseline_{model_type}_step_{global_step}.pt")
                     torch.save({
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
@@ -609,8 +741,8 @@ def train_baseline_model(
             avg_loss = epoch_loss / max(num_batches, 1)
             print(f"Epoch {epoch+1} completed: avg_loss={avg_loss:.4f}")
     
-    # Save final model
-    final_model_path = os.path.join(checkpoint_dir, "baseline_final.pt")
+    # Save final model (include model type in filename)
+    final_model_path = os.path.join(checkpoint_dir, f"baseline_{model_type}_final.pt")
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -709,18 +841,19 @@ def train_baseline_model(
         'domain_metrics': domain_metrics
     }
     
-    # Save baseline results
+    # Save baseline results (include model type in filename)
     # Use the output_dir parameter directly (respect user's choice)
     # Convert to absolute path to ensure consistency
     results_dir = os.path.abspath(output_dir)
     os.makedirs(results_dir, exist_ok=True)
     print(f"\n📁 Saving results to: {results_dir}")
     
-    baseline_results_path = os.path.join(results_dir, "baseline_results.json")
+    baseline_results_path = os.path.join(results_dir, f"baseline_{model_type}_results.json")
     
     # Add baseline-specific metadata
     baseline_results = {
-        'model_type': 'baseline_transformer',
+        'model_type': f'baseline_transformer_{model_type}',  # 'baseline_transformer_encoder' or 'baseline_transformer_decoder'
+        'architecture': model_type,  # 'encoder' or 'decoder'
         'timestamp': datetime.now().isoformat(),
         'model_checkpoint': final_model_path,
         'training_config': {
@@ -732,6 +865,7 @@ def train_baseline_model(
             'num_heads': num_heads,
             'ff_dim': ff_dim,
             'total_steps': global_step,
+            'model_type': model_type,
         },
         'test_samples': results['test_samples'],
         'metrics': results['metrics'],
@@ -855,6 +989,13 @@ def main():
         default=50000,
         help="Maximum training steps (default: 50000 to match MoE training). If None, uses epochs instead"
     )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="encoder",
+        choices=["encoder", "decoder"],
+        help="Type of baseline model: 'encoder' (bidirectional, BERT-style) or 'decoder' (causal, GPT-style). Default: encoder"
+    )
     
     args = parser.parse_args()
     
@@ -876,6 +1017,7 @@ def main():
         test_split=args.test_split,
         save_interval=args.save_interval,
         max_steps=args.max_steps,
+        model_type=args.model_type,
     )
     
     print(f"\n✅ Baseline training complete!")

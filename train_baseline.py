@@ -255,6 +255,7 @@ def train_baseline_model(
     save_interval: int = 5000,
     max_steps: int = None,
     model_type: str = "encoder",  # "encoder" or "decoder"
+    keep_last_n_checkpoints: int = 2,  # Number of checkpoints to keep (delete older ones)
 ) -> str:
     """Train baseline transformer model and evaluate it.
     
@@ -279,6 +280,7 @@ def train_baseline_model(
         model_type: Type of baseline model ('encoder' or 'decoder')
             - 'encoder': Bidirectional transformer (BERT-style) with full attention
             - 'decoder': Decoder-only transformer (GPT-style) with causal attention
+        keep_last_n_checkpoints: Number of checkpoints to keep (older ones are deleted)
         
     Returns:
         Path to baseline_results.json (includes model_type in filename)
@@ -533,8 +535,11 @@ def train_baseline_model(
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
     
-    # Setup optimizer and loss
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    # Setup optimizer and loss (matching MoE training settings for fair comparison)
+    # Match MoE training settings for fair comparison:
+    # - weight_decay=0.01 (same as MoE, stronger regularization)
+    # - warmup_start=0.1 (same as MoE, 10% of LR instead of 1%)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
     
     # Setup learning rate scheduler (warmup + cosine decay) to match MoE training
@@ -544,7 +549,7 @@ def train_baseline_model(
         from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
         warmup_scheduler = LinearLR(
             optimizer,
-            start_factor=0.01,  # Start at 1% of learning rate
+            start_factor=0.1,  # Start at 10% of learning rate (matches MoE training)
             end_factor=1.0,
             total_iters=warmup_steps
         )
@@ -558,7 +563,7 @@ def train_baseline_model(
             schedulers=[warmup_scheduler, cosine_scheduler],
             milestones=[warmup_steps]
         )
-        print(f"Using learning rate schedule: warmup ({warmup_steps} steps) + cosine decay")
+        print(f"Using learning rate schedule: warmup ({warmup_steps} steps, start=10% LR) + cosine decay (matches MoE training)")
     else:
         scheduler = None
         print("Using constant learning rate (no scheduler)")
@@ -580,6 +585,40 @@ def train_baseline_model(
     
     # Ensure the directory exists
     os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Helper function to clean up old checkpoints
+    def cleanup_old_checkpoints(checkpoint_dir: str, model_type: str, keep_last_n: int):
+        """Delete old checkpoints, keeping only the most recent N."""
+        if keep_last_n <= 0:
+            return
+        
+        # Find all checkpoints matching the pattern
+        checkpoint_pattern = f"baseline_{model_type}_step_"
+        checkpoints = []
+        
+        if not os.path.exists(checkpoint_dir):
+            return
+        
+        for filename in os.listdir(checkpoint_dir):
+            if filename.startswith(checkpoint_pattern) and filename.endswith('.pt'):
+                try:
+                    # Extract step number from filename: baseline_{model_type}_step_{N}.pt
+                    step_str = filename.replace(checkpoint_pattern, '').replace('.pt', '')
+                    step_num = int(step_str)
+                    checkpoints.append((step_num, os.path.join(checkpoint_dir, filename)))
+                except ValueError:
+                    continue
+        
+        # Sort by step number and keep only the last N
+        if len(checkpoints) > keep_last_n:
+            checkpoints.sort(key=lambda x: x[0])
+            # Delete oldest checkpoints (all except the last N)
+            for step_num, path in checkpoints[:-keep_last_n]:
+                try:
+                    os.remove(path)
+                    print(f"  Deleted old checkpoint: baseline_{model_type}_step_{step_num}.pt")
+                except OSError as e:
+                    print(f"  Warning: Could not delete checkpoint {path}: {e}")
     
     # Training loop
     print(f"\nStarting training...")
@@ -671,6 +710,9 @@ def train_baseline_model(
                         'loss': loss.item(),
                     }, checkpoint_path)
                     print(f"\nCheckpoint saved: {checkpoint_path}")
+                    
+                    # Clean up old checkpoints
+                    cleanup_old_checkpoints(checkpoint_dir, model_type, keep_last_n_checkpoints)
             
             if global_step >= max_steps:
                 print(f"\nReached max_steps={max_steps}, stopping training")
@@ -737,6 +779,9 @@ def train_baseline_model(
                         'loss': loss.item(),
                     }, checkpoint_path)
                     print(f"\nCheckpoint saved: {checkpoint_path}")
+                    
+                    # Clean up old checkpoints
+                    cleanup_old_checkpoints(checkpoint_dir, model_type, keep_last_n_checkpoints)
             
             avg_loss = epoch_loss / max(num_batches, 1)
             print(f"Epoch {epoch+1} completed: avg_loss={avg_loss:.4f}")
@@ -996,6 +1041,12 @@ def main():
         choices=["encoder", "decoder"],
         help="Type of baseline model: 'encoder' (bidirectional, BERT-style) or 'decoder' (causal, GPT-style). Default: encoder"
     )
+    parser.add_argument(
+        "--keep-last-n-checkpoints",
+        type=int,
+        default=2,
+        help="Number of checkpoints to keep (older ones are deleted during training). Default: 2"
+    )
     
     args = parser.parse_args()
     
@@ -1018,6 +1069,7 @@ def main():
         save_interval=args.save_interval,
         max_steps=args.max_steps,
         model_type=args.model_type,
+        keep_last_n_checkpoints=args.keep_last_n_checkpoints,
     )
     
     print(f"\n✅ Baseline training complete!")

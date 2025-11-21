@@ -1523,8 +1523,8 @@ def evaluate_model(
                 # If config.yaml not found or error, use defaults
                 pass
             
-        base_model = SimpleMoEModel(
-            vocab_size=vocab_size,
+            base_model = SimpleMoEModel(
+                vocab_size=vocab_size,
                 embedding_dim=embedding_dim,
                 num_shared_experts=num_shared_experts,
                 num_routed_experts=num_routed_experts,
@@ -1536,85 +1536,85 @@ def evaluate_model(
                 temperature_start=moe_params['temperature_start'],
                 temperature_end=moe_params['temperature_end'],
                 temperature_steps=moe_params['temperature_steps'],
-        )
-        
-        # Wrap model
-        class ModelWrapper(nn.Module):
-            def __init__(self, base_model):
-                super().__init__()
-                self.base_model = base_model
+            )
             
-            def forward(self, input_ids):
-                output = self.base_model(input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False)
-                if isinstance(output, tuple):
-                    return output[0]
-                return output
-        
-        model = ModelWrapper(base_model)
-        
-        # Load checkpoint weights
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        else:
-            model.load_state_dict(checkpoint, strict=False)
-        
-        model.to(device)
-        model.eval()
-        
-        # Debug: Check gate weights to see if they're uniform
-        if hasattr(base_model, 'gate') and hasattr(base_model.gate, 'weight'):
-            gate_weights = base_model.gate.weight.detach().cpu().numpy()
-            gate_std = np.std(gate_weights)
-            gate_mean = np.mean(gate_weights)
-            print(f"\nGate weight statistics:")
-            print(f"  Mean: {gate_mean:.4f}, Std: {gate_std:.4f}")
-            print(f"  Shape: {gate_weights.shape}")
-            
-            # Per-expert analysis
-            expert_means = np.mean(gate_weights, axis=1)  # Mean weight per expert
-            expert_stds = np.std(gate_weights, axis=1)   # Std weight per expert
-            expert_norms = np.linalg.norm(gate_weights, axis=1)  # L2 norm per expert
-            
-            print(f"\n  Per-expert analysis:")
-            for expert_idx in range(len(expert_means)):
-                print(f"    Expert {expert_idx}: mean={expert_means[expert_idx]:.6f}, std={expert_stds[expert_idx]:.4f}, norm={expert_norms[expert_idx]:.4f}")
-            
-            # Check if any expert has significantly smaller weights
-            mean_of_means = np.mean(expert_means)
-            std_of_means = np.std(expert_means)
-            min_expert = np.argmin(expert_means)
-            max_expert = np.argmax(expert_means)
-            
-            print(f"\n  Expert comparison:")
-            print(f"    Mean of expert means: {mean_of_means:.6f}, Std: {std_of_means:.6f}")
-            print(f"    Min expert (Expert {min_expert}): {expert_means[min_expert]:.6f}")
-            print(f"    Max expert (Expert {max_expert}): {expert_means[max_expert]:.6f}")
-            print(f"    Ratio (max/min): {expert_means[max_expert] / abs(expert_means[min_expert]) if expert_means[min_expert] != 0 else 'inf':.2f}")
-            
-            # Check if Expert 2 (or any expert) is significantly underutilized
-            if len(expert_means) >= 3:
-                expert_2_mean = expert_means[2]
-                other_means = np.concatenate([expert_means[:2], expert_means[3:]])
-                other_mean = np.mean(other_means)
-                if abs(expert_2_mean) < abs(other_mean) * 0.5:  # Expert 2 is < 50% of others
-                    print(f"\n  ⚠️  WARNING: Expert 2 has significantly smaller weights!")
-                    print(f"     Expert 2 mean: {expert_2_mean:.6f}")
-                    print(f"     Other experts mean: {other_mean:.6f}")
-                    print(f"     This explains why Expert 2 is underutilized in routing.")
-            
-            if gate_std < 0.01:
-                print(f"\n  ⚠️  WARNING: Gate weights are nearly uniform (std={gate_std:.4f})")
-                print(f"     This explains why expert probabilities are identical.")
-                print(f"     The model may need more training or more aggressive specialization parameters.")
-            else:
-                print(f"\n  ✓ Gate weights show diversity (std={gate_std:.4f})")
+            # Wrap model
+            class ModelWrapper(nn.Module):
+                def __init__(self, base_model):
+                    super().__init__()
+                    self.base_model = base_model
                 
-            # Check if weights are too small (could indicate poor initialization or training)
-            if np.max(np.abs(gate_weights)) < 0.1:
-                print(f"\n  ⚠️  WARNING: Gate weights are very small (max abs: {np.max(np.abs(gate_weights)):.4f})")
-                print(f"     This could indicate the model hasn't learned strong routing preferences.")
+                def forward(self, input_ids):
+                    output = self.base_model(input_ids, image_features=None, return_load_balance_loss=False, return_gate_logits=False)
+                    if isinstance(output, tuple):
+                        return output[0]
+                    return output
             
-        print(f"Loaded model from {model_checkpoint}")
+            model = ModelWrapper(base_model)
+            
+            # Load checkpoint weights
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            else:
+                model.load_state_dict(checkpoint, strict=False)
+            
+            model.to(device)
+            model.eval()
+            
+            # Debug: Check gate weights to see if they're uniform
+            if hasattr(base_model, 'gate') and hasattr(base_model.gate, 'weight'):
+                gate_weights = base_model.gate.weight.detach().cpu().numpy()
+                gate_std = np.std(gate_weights)
+                gate_mean = np.mean(gate_weights)
+                print(f"\nGate weight statistics:")
+                print(f"  Mean: {gate_mean:.4f}, Std: {gate_std:.4f}")
+                print(f"  Shape: {gate_weights.shape}")
+                
+                # Per-expert analysis
+                expert_means = np.mean(gate_weights, axis=1)  # Mean weight per expert
+                expert_stds = np.std(gate_weights, axis=1)   # Std weight per expert
+                expert_norms = np.linalg.norm(gate_weights, axis=1)  # L2 norm per expert
+                
+                print(f"\n  Per-expert analysis:")
+                for expert_idx in range(len(expert_means)):
+                    print(f"    Expert {expert_idx}: mean={expert_means[expert_idx]:.6f}, std={expert_stds[expert_idx]:.4f}, norm={expert_norms[expert_idx]:.4f}")
+                
+                # Check if any expert has significantly smaller weights
+                mean_of_means = np.mean(expert_means)
+                std_of_means = np.std(expert_means)
+                min_expert = np.argmin(expert_means)
+                max_expert = np.argmax(expert_means)
+                
+                print(f"\n  Expert comparison:")
+                print(f"    Mean of expert means: {mean_of_means:.6f}, Std: {std_of_means:.6f}")
+                print(f"    Min expert (Expert {min_expert}): {expert_means[min_expert]:.6f}")
+                print(f"    Max expert (Expert {max_expert}): {expert_means[max_expert]:.6f}")
+                print(f"    Ratio (max/min): {expert_means[max_expert] / abs(expert_means[min_expert]) if expert_means[min_expert] != 0 else 'inf':.2f}")
+                
+                # Check if Expert 2 (or any expert) is significantly underutilized
+                if len(expert_means) >= 3:
+                    expert_2_mean = expert_means[2]
+                    other_means = np.concatenate([expert_means[:2], expert_means[3:]])
+                    other_mean = np.mean(other_means)
+                    if abs(expert_2_mean) < abs(other_mean) * 0.5:  # Expert 2 is < 50% of others
+                        print(f"\n  ⚠️  WARNING: Expert 2 has significantly smaller weights!")
+                        print(f"     Expert 2 mean: {expert_2_mean:.6f}")
+                        print(f"     Other experts mean: {other_mean:.6f}")
+                        print(f"     This explains why Expert 2 is underutilized in routing.")
+                
+                if gate_std < 0.01:
+                    print(f"\n  ⚠️  WARNING: Gate weights are nearly uniform (std={gate_std:.4f})")
+                    print(f"     This explains why expert probabilities are identical.")
+                    print(f"     The model may need more training or more aggressive specialization parameters.")
+                else:
+                    print(f"\n  ✓ Gate weights show diversity (std={gate_std:.4f})")
+                    
+                # Check if weights are too small (could indicate poor initialization or training)
+                if np.max(np.abs(gate_weights)) < 0.1:
+                    print(f"\n  ⚠️  WARNING: Gate weights are very small (max abs: {np.max(np.abs(gate_weights)):.4f})")
+                    print(f"     This could indicate the model hasn't learned strong routing preferences.")
+            
+            print(f"Loaded MoE model from {model_checkpoint}")
     except Exception as e:
         print(f"Could not load model: {e}")
         raise

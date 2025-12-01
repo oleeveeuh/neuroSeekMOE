@@ -203,47 +203,27 @@ This isolates architectural benefits vs. other factors.
 
 ### Key Findings
 
--**Training Stability**: Smooth convergence over 50,000 steps with balanced auxiliary losses preventing expert collapse. 
+#### - **Training Stability**: Smooth convergence over 50,000 steps with balanced auxiliary losses preventing expert collapse. 
 ![Training Loss Curves](outputs/training_curves.png)
 *Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
 
-
--**Tokenizer Analysis**: Pretrained PubMedBERT tokenizer selected for final model despite the custom SentencePiece baseline achieving better perplexity (123.66 vs 147.45), prioritizing medical terminology coverage and production-ready tokenization over raw metrics.
+#### -**Tokenizer Analysis**: Pretrained PubMedBERT tokenizer selected for final model despite the custom SentencePiece baseline achieving better perplexity (123.66 vs 147.45), prioritizing medical terminology coverage and production-ready tokenization over raw metrics.
 ![Tokenizer Comparison](outputs/tokenizer_comparison.png)
 *Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
 
--**Expert Load Distribution**: Excellent balance with Gini coefficient of 0.0201 (very low inequality)
-- **Zero Dead Experts**: All 4 routed experts remain active (>5% activations), confirming robust utilization
+#### -**Zero Dead Experts**: All 4 routed experts remain active (>5% activations), confirming robust utilization
   ![Dead Experts](outputs/dead_experts.png)
-*Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts*
+*Figure 2: All 4 experts equally utilized (Gini: 0.0201)*
 
-- **Specialization Pattern**: All experts classified as 'Generalist' (handling diverse patterns broadly) with 100% showing specialization index >30% (meaningful differentiation in learned patterns)
+#### - **Specialization Pattern**: All experts classified as 'Generalist' (handling diverse patterns broadly) with 100% showing specialization index >30% (meaningful differentiation in learned patterns)
     ![Expert Type](outputs/expert_type.png)
 *Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts*
 
-- **Co-activation**: Single primary expert community indicates highly interconnected functional module rather than distinct isolated groups
+#### - **Test Perplexity**: 147.45 (PubMedBERT tokenizer) outperforms Baseline Decoder (36,718.3) and Baseline Encoder (36,059.3)
+  ![Expert Load Distribution](outputs/baseline_comparison_perplexity.png)
+*Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts **Important Note**: SentencePiece baseline achieved lower perplexity (123.66), suggesting tokenizer-model interaction effects worth investigating*
 
-
--**Performance Metrics** (Section 5):
-- **Test Perplexity**: 147.45 (PubMedBERT tokenizer) outperforms Baseline Decoder (36,718.3) and Baseline Encoder (36,059.3)
-  ![Expert Load Distribution](outputs/dead_experts.png)
-*Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts*
-- **Important Note**: SentencePiece baseline achieved lower perplexity (123.66), suggesting tokenizer-model interaction effects worth investigating
-- **Domain-Specific**: ML papers (143.83) < Both domains (149.58) < Healthcare papers (165.54)—better on ML-heavy content
-- **Cross-domain Reasoning**: 4.2/5.0 average, effectively connecting ML concepts with Healthcare applications
-
-**Efficiency & Scale** (Section 4-5):
-- **Total Parameters**: 3.730 Billion with 0.332 Billion active per token (91.1% sparsity)
-- **Computational Trade-offs**: Active parameter overhead results in 0.49x theoretical speedup vs dense equivalent—MoE enables much larger total capacity but at higher computational cost per token (0.294 GFLOPs)
-- **Resource Requirements**: 59.69 GB training memory, 14.94 GB inference memory—significant resources reflecting model scale
-
-**2. Cross-Domain Reasoning** (Qualitative)
-- Score: 4.2/5.0 average
-- Model effectively connects ML concepts with healthcare applications
-
-**3. Domain Classification Accuracy**
-- Trains lightweight classifier on embeddings
-- Measures semantic domain understanding: [XX]%
+#### - **Domain-Specific**: ML papers (143.83) < Both domains (149.58) < Healthcare papers (165.54)—better on ML-heavy content
 
 ---
 
@@ -258,10 +238,14 @@ This isolates architectural benefits vs. other factors.
 ![Load Imbalance Heatmap](outputs/expert_load_imbalance.png)
 *Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
 
-**Domain Performance Imbalance**
+**Domain Performance Discrepancies**
 - Healthcare perplexity 23% worse than ML (165.54 vs 143.83)
 - **Root Cause**: Dataset skewed toward ML papers
 - **Impact**: Model performs better on ML-heavy content; limited clinical applicability
+
+  ![Load Imbalance Heatmap](outputs/domain_performance.png)
+*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+
 
 **Generation Quality Issues**
 - 67% of sampled generations (10/15) show high perplexity (>100)
@@ -274,10 +258,32 @@ This isolates architectural benefits vs. other factors.
 **Data & Training Constraints**
 - **Dataset**: ~500 papers (limited by ArXiv API rate limits)
 - **English-Only**: Restricts applicability to non-English research
-- **Temporal**: Data ends 2025; missing recent developments
-- **Geographic Bias**: ArXiv primarily Western institutions
+- **Temporal**: Data heavily skewed to 2025; missing recent developments
+```bash
+  Papers per year:
+  2020:  232 papers
+  2021:  145 papers
+  2022:  293 papers
+  2023:  569 papers
+  2024:  625 papers
+  2025: 2735 papers
+```
+- **Geographic Bias**: ArXiv comprises primarily Western institutions
 - **Category Imbalance**: cs.LG overrepresented
+```bash
+TOP 10 CATEGORIES BY COUNT
 
+ 1. cs.LG                 3,532 papers (70.61%)
+ 2. cs.AI                 2,048 papers (40.94%)
+ 3. q-bio.NC              1,496 papers (29.91%)
+ 4. cs.CV                   967 papers (19.33%)
+ 5. stat.ML                 591 papers (11.82%)
+ 6. eess.IV                 409 papers ( 8.18%)
+ 7. cs.CL                   363 papers ( 7.26%)
+ 8. eess.SP                 346 papers ( 6.92%)
+ 9. q-bio.QM                245 papers ( 4.90%)
+10. cs.HC                   190 papers ( 3.80%)
+```
 
 **Architectural Constraints**
 - **Context Length**: 512 tokens (limits long-document processing)

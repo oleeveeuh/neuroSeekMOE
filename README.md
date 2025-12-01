@@ -67,6 +67,16 @@ Implemented **Expert Choice routing** (experts select tokens, not vice versa) ra
 - Better load balancing with predictable computation
 - 91.1% parameter efficiency through sparse activation
 
+### Temperature Annealing for Stable Routing
+
+Implements linear temperature decay during training:
+- **Start**: 2.0 (soft routing, encourages exploration)
+- **End**: 0.5 (sharper routing, forces specialization)
+- **Duration**: 5,000 steps (~10% of training)
+
+Early training: High temperature allows tokens to explore different experts
+Late training: Low temperature forces specialization and sparse activation
+
 **Architecture**:
 - **12 transformer layers**, 768 embedding dimension, 12 attention heads
 - **4 routed experts + 2 shared experts** using Expert Choice routing

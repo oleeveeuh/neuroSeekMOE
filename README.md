@@ -70,8 +70,8 @@ Implemented **Expert Choice routing** (experts select tokens, not vice versa) ra
 ### Temperature Annealing for Stable Routing
 
 Implements linear temperature decay during training:
-- **Start**: 2.0 (soft routing, encourages exploration)
-- **End**: 0.5 (sharper routing, forces specialization)
+- **Start**: 3.0 (soft routing, encourages exploration)
+- **End**: 0.3 (sharper routing, forces specialization)
 - **Duration**: 5,000 steps (~10% of training)
 
 Early training: High temperature allows tokens to explore different experts

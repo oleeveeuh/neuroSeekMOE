@@ -203,16 +203,16 @@ This isolates architectural benefits vs. other factors.
 
 ### Key Findings
 
-**Training Stability**: Smooth convergence over 50,000 steps with balanced auxiliary losses preventing expert collapse. 
+-**Training Stability**: Smooth convergence over 50,000 steps with balanced auxiliary losses preventing expert collapse. 
 ![Training Loss Curves](outputs/training_curves.png)
 *Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
 
-**Tokenizer Analysis**: Pretrained PubMedBERT tokenizer selected for final model despite the custom SentencePiece baseline achieving better perplexity (123.66 vs 147.45), prioritizing medical terminology coverage and production-ready tokenization over raw metrics.
+
+-**Tokenizer Analysis**: Pretrained PubMedBERT tokenizer selected for final model despite the custom SentencePiece baseline achieving better perplexity (123.66 vs 147.45), prioritizing medical terminology coverage and production-ready tokenization over raw metrics.
 ![Tokenizer Comparison](outputs/tokenizer_comparison.png)
 *Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
 
-**Expert Utilization** (Section 4):
-- **Load Distribution**: Excellent balance with Gini coefficient of 0.0201 (very low inequality)
+-**Expert Load Distribution**: Excellent balance with Gini coefficient of 0.0201 (very low inequality)
 - **Zero Dead Experts**: All 4 routed experts remain active (>5% activations), confirming robust utilization
   ![Dead Experts](outputs/dead_experts.png)
 *Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts*
@@ -224,7 +224,7 @@ This isolates architectural benefits vs. other factors.
 - **Co-activation**: Single primary expert community indicates highly interconnected functional module rather than distinct isolated groups
 
 
-**Performance Metrics** (Section 5):
+-**Performance Metrics** (Section 5):
 - **Test Perplexity**: 147.45 (PubMedBERT tokenizer) outperforms Baseline Decoder (36,718.3) and Baseline Encoder (36,059.3)
   ![Expert Load Distribution](outputs/dead_experts.png)
 *Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts*

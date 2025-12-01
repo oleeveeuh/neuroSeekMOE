@@ -315,6 +315,9 @@ The `model_analysis.ipynb` notebook provides 6 sections:
 
 ### High-Impact Improvements
 
+**Rerun Data Collection** 
+- ArXiv API pagination limit (10,000 results max) and lack of tear-Splitting on broad queries caused recent papers (2025) to be returned first, saturating the 10,000 limit before older papers were reached. This caused the large spike in papers from 2025.
+
 **Model Scaling** (Expected: 10-15% perplexity reduction)
 - Scale to 24 layers, 1024 hidden size, 32-64 experts (~500M total, ~200M active)
 - Better capacity distribution and finer-grained specialization
@@ -329,17 +332,28 @@ The `model_analysis.ipynb` notebook provides 6 sections:
 - Curriculum learning (easy → difficult categories)
 - Longer training with optimized learning rate schedules
 
-### Research Questions
+### Research Questions 
 
-**Expert Analysis**:
+**Model Analysis**:
 - What linguistic patterns trigger specific experts?
-- Can we manually control routing for task-specific optimization?
-- Which expert pairs naturally co-activate?
+- Why did Expert E3 dominate routing (60-70% activation)?
+- Can we improve load balancing to force semantic specialization?
 
-**Comparative Studies**:
-- vs. larger general models (GPT-4, Claude)
-- vs. domain-specific models (BioBERT, PubMedBERT)
-- vs. other MoE architectures (Switch Transformer, GLaM)
+**Architectural Improvements**:
+- Scaling to 32-64 experts: Would finer granularity improve specialization?
+- Alternative routing: Would soft routing (Gumbel-Softmax) vs Expert Choice reduce imbalance?
+- Longer training: Does extended training improve domain-specific performance?
+
+**Evaluation on Domain-Specific Tasks**:
+- Fine-tune on neurodegeneration papers and evaluate specialized performance
+- Test transfer learning to other healthcare subdomains
+- Compare embedding quality (via retrieval tasks) vs PubMedBERT baseline
+
+**Deployment Experiments**:
+- Quantization (INT8) for inference speedup and memory reduction
+- Streaming inference on edge devices
+- Batch inference optimization for literature review use cases
+  
 
 ---
 
@@ -380,7 +394,6 @@ pip install -r requirements.txt
 python run_pipeline.py --collect --curate --train --evaluate
 ```
 
-Pre-trained model: [Download from Hugging Face](https://huggingface.co/yourusername/neuroseek-moe)
 
 ---
 

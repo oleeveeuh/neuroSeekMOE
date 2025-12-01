@@ -43,18 +43,12 @@
 **Key Insight**: Model significantly outperforms dense baselines while maintaining <500MB RAM footprint. Note: SentencePiece baseline achieved 123.66 perplexity; selected PubMedBERT for medical terminology coverage.
 
 ### Key Visualizations
-
-![Training Loss Curves](https://via.placeholder.com/700x400?text=Training+Loss+Curves+Over+50k+Steps)
+![Baseline Comparison Perplexity](outputs/baseline_comparison_perplexity.png)
 *Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
 
-![Expert Load Distribution](https://via.placeholder.com/700x400?text=Expert+Activation+%28Perfectly+Balanced%29)
-*Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts*
-
-![Load Imbalance Heatmap](https://via.placeholder.com/700x400?text=Expert+E3+Dominance+in+Semantic+Clusters)
+![Baseline](outputs/performance_comparison.png)
 *Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
 
-![Domain Performance](https://via.placeholder.com/700x400?text=Perplexity+by+Domain)
-*Figure 4: Better performance on ML-heavy content (143.83) than pure healthcare (165.54)*
 
 ---
 
@@ -87,6 +81,9 @@ DeepSeekMoE uses fine-grained expert segmentation and shared expert isolation to
 - Many smaller experts > few large experts
 - Shared experts reduce redundancy in routed experts
 - Expert Choice routing improves stability and load balancing
+
+![Model Architecture](outputs/model_architecture.png)
+*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
 
 ---
 
@@ -186,7 +183,6 @@ Evaluated two approaches with rigorous methodology:
 | Optimizer | AdamW (β₁=0.9, β₂=0.999) | Stable convergence with weight decay |
 | Weight Decay | 0.01 | Prevent expert co-adaptation |
 
-**Training Time**: ~[X] hours on Colab T4
 
 ### Domain-Aware Loss Weighting
 
@@ -205,28 +201,102 @@ This isolates architectural benefits vs. other factors.
 
 ## Evaluation & Analysis
 
-### Evaluation Metrics
+### Key Findings
 
-**1. Perplexity** (Language Modeling)
-- Domain-specific breakdown: ML [143.83] < Both [149.58] < Healthcare [165.54]
-- Better on ML-heavy content due to dataset composition
+#### - **Training Stability**: Smooth convergence over 50,000 steps with balanced auxiliary losses preventing expert collapse. 
+![Training Loss Curves](outputs/training_curves.png)
+*Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
 
-**2. Cross-Domain Reasoning** (Qualitative)
-- Score: 4.2/5.0 average
-- Model effectively connects ML concepts with healthcare applications
+#### -**Tokenizer Analysis**: Pretrained PubMedBERT tokenizer selected for final model despite the custom SentencePiece baseline achieving better perplexity (123.66 vs 147.45), prioritizing medical terminology coverage and production-ready tokenization over raw metrics.
+![Tokenizer Comparison](outputs/tokenizer_comparison.png)
+*Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
 
-**3. Domain Classification Accuracy**
-- Trains lightweight classifier on embeddings
-- Measures semantic domain understanding: [XX]%
+#### -**Zero Dead Experts**: All 4 routed experts remain active (>5% activations), confirming robust utilization
+  ![Dead Experts](outputs/dead_experts.png)
+*Figure 2: All 4 experts equally utilized (Gini: 0.0201)*
 
-**4. Retrieval Ranking (MRR@20)**
-- Neurodegeneration relevance ranking
-- Measures information retrieval quality: [X.XX]
+#### - **Specialization Pattern**: All experts classified as 'Generalist' (handling diverse patterns broadly) with 100% showing specialization index >30% (meaningful differentiation in learned patterns)
+    ![Expert Type](outputs/expert_type.png)
+*Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts*
 
-**5. Expert Utilization Analysis**
-- **Load Balance (Gini)**: 0.0201 — nearly perfect equality
-- **Dead Experts**: 0/4 — all experts remain active
-- **Specialization Type**: 100% generalist (handle diverse patterns broadly)
+#### - **Test Perplexity**: 147.45 (PubMedBERT tokenizer) outperforms Baseline Decoder (36,718.3) and Baseline Encoder (36,059.3)
+  ![Expert Load Distribution](outputs/baseline_comparison_perplexity.png)
+*Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts **Important Note**: SentencePiece baseline achieved lower perplexity (123.66), suggesting tokenizer-model interaction effects worth investigating*
+
+#### - **Domain-Specific**: ML papers (143.83) < Both domains (149.58) < Healthcare papers (165.54)—better on ML-heavy content
+
+---
+
+## Known Limitations
+
+**Load Imbalance & Routing**
+- Expert E3 dominates ~60-70% activation (Figure 3); E1/E2 support with 20-30%
+- **Root Cause**: Single-domain dataset (no contrastive signal for semantic differentiation)
+- **Impact**: Routing converged to default expert; true semantic specialization didn't emerge
+- **Implication**: Experts learn task-type specialization, not domain-specific patterns
+
+![Load Imbalance Heatmap](outputs/expert_load_imbalance.png)
+*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+
+**Domain Performance Discrepancies**
+- Healthcare perplexity 23% worse than ML (165.54 vs 143.83)
+- **Root Cause**: Dataset skewed toward ML papers
+- **Impact**: Model performs better on ML-heavy content; limited clinical applicability
+
+  ![Load Imbalance Heatmap](outputs/domain_performance.png)
+*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+
+
+**Generation Quality Issues**
+- 67% of sampled generations (10/15) show high perplexity (>100)
+- **Root Cause**: Trained only on language modeling, not generation-optimized decoding
+- **Impact**: Better suited for embeddings/classification than open-ended generation
+
+![Load Imbalance Heatmap](outputs/expert_load_imbalance.png)
+*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+
+**Data & Training Constraints**
+- **Dataset**: ~500 papers (limited by ArXiv API rate limits)
+- **English-Only**: Restricts applicability to non-English research
+- **Temporal**: Data heavily skewed to 2025; missing recent developments
+```bash
+  Papers per year:
+  2020:  232 papers
+  2021:  145 papers
+  2022:  293 papers
+  2023:  569 papers
+  2024:  625 papers
+  2025: 2735 papers
+```
+- **Geographic Bias**: ArXiv comprises primarily Western institutions
+- **Category Imbalance**: cs.LG overrepresented
+```bash
+TOP 10 CATEGORIES BY COUNT
+
+ 1. cs.LG                 3,532 papers (70.61%)
+ 2. cs.AI                 2,048 papers (40.94%)
+ 3. q-bio.NC              1,496 papers (29.91%)
+ 4. cs.CV                   967 papers (19.33%)
+ 5. stat.ML                 591 papers (11.82%)
+ 6. eess.IV                 409 papers ( 8.18%)
+ 7. cs.CL                   363 papers ( 7.26%)
+ 8. eess.SP                 346 papers ( 6.92%)
+ 9. q-bio.QM                245 papers ( 4.90%)
+10. cs.HC                   190 papers ( 3.80%)
+```
+
+**Architectural Constraints**
+- **Context Length**: 512 tokens (limits long-document processing)
+- **Tokenizer Trade-off**: Chose PubMedBERT for coverage despite SentencePiece outperforming (123.66 vs 147.45)
+- **Not for Clinical Use**: Research-only; hallucinations possible; requires validation for healthcare deployment
+- **Scaling**: Current 4-expert design efficient; 64+ experts need multi-GPU infrastructure
+
+
+### Computational Trade-offs
+
+- **Active Parameter Overhead**: 0.332B active params = 0.49x theoretical speedup vs dense equivalent (means ~2x slower per-token computation despite parameter efficiency)
+- **Memory**: 59.69 GB training, 14.94 GB inference—significant resources
+- **Inference Latency**: Routing overhead adds ?% computational cost
 
 ### Comprehensive Analysis Notebook
 
@@ -238,47 +308,6 @@ The `model_analysis.ipynb` notebook provides 6 sections:
 4. **Expert Routing Analysis** — Load balancing, utilization patterns, semantic clustering
 5. **Tokenizer Comparison** — Coverage on medical terminology, OOV rates, token efficiency
 6. **Conclusions** — Key findings, limitations, future directions
-
----
-
-## Known Limitations
-
-### From Evaluation Analysis
-
-**Load Imbalance & Routing**
-- Expert E3 dominates ~60-70% activation (Figure 3); E1/E2 support with 20-30%
-- **Root Cause**: Single-domain dataset (no contrastive signal for semantic differentiation)
-- **Impact**: Routing converged to default expert; true semantic specialization didn't emerge
-- **Implication**: Experts learn task-type specialization, not domain-specific patterns
-
-**Domain Performance Imbalance**
-- Healthcare perplexity 23% worse than ML (165.54 vs 143.83)
-- **Root Cause**: Dataset skewed toward ML papers
-- **Impact**: Model performs better on ML-heavy content; limited clinical applicability
-
-**Generation Quality Issues**
-- 67% of sampled generations (10/15) show high perplexity (>100)
-- **Root Cause**: Trained only on language modeling, not generation-optimized decoding
-- **Impact**: Better suited for embeddings/classification than open-ended generation
-
-**Data & Training Constraints**
-- **Dataset**: ~500 papers (limited by ArXiv API rate limits)
-- **English-Only**: Restricts applicability to non-English research
-- **Temporal**: Data ends 2025; missing recent developments
-- **Geographic Bias**: ArXiv primarily Western institutions
-- **Category Imbalance**: cs.LG overrepresented
-
-**Architectural Constraints**
-- **Context Length**: 512 tokens (limits long-document processing)
-- **Tokenizer Trade-off**: Chose PubMedBERT for coverage despite SentencePiece outperforming (123.66 vs 147.45)
-- **Not for Clinical Use**: Research-only; hallucinations possible; requires validation for healthcare deployment
-- **Scaling**: Current 4-expert design efficient; 64+ experts need multi-GPU infrastructure
-
-### Computational Trade-offs
-
-- **Active Parameter Overhead**: 0.332B active params = 0.49x theoretical speedup vs dense equivalent (means ~2x slower per-token computation despite parameter efficiency)
-- **Memory**: 59.69 GB training, 14.94 GB inference—significant resources
-- **Inference Latency**: Routing overhead adds ~[X]% computational cost
 
 ---
 

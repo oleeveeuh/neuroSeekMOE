@@ -44,10 +44,10 @@
 
 ### Key Visualizations
 ![Baseline Comparison Perplexity](outputs/baseline_comparison_perplexity.png)
-*Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
+*Figure 1: Comparison of DeepSeekMOE perplexity vs baseline models, both tokenizer variations achieve lower values than both Dense Transformers*
 
 ![Baseline](outputs/performance_comparison.png)
-*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+*Figure 2: Comparison of DeepSeekMOE generation quality vs baseline models; outperform in all categories except fluency*
 
 
 ---
@@ -67,6 +67,16 @@ Implemented **Expert Choice routing** (experts select tokens, not vice versa) ra
 - Better load balancing with predictable computation
 - 91.1% parameter efficiency through sparse activation
 
+### Temperature Annealing for Stable Routing
+
+Implements linear temperature decay during training:
+- **Start**: 2.0 (soft routing, encourages exploration)
+- **End**: 0.5 (sharper routing, forces specialization)
+- **Duration**: 5,000 steps (~10% of training)
+
+Early training: High temperature allows tokens to explore different experts
+Late training: Low temperature forces specialization and sparse activation
+
 **Architecture**:
 - **12 transformer layers**, 768 embedding dimension, 12 attention heads
 - **4 routed experts + 2 shared experts** using Expert Choice routing
@@ -83,7 +93,7 @@ DeepSeekMoE uses fine-grained expert segmentation and shared expert isolation to
 - Expert Choice routing improves stability and load balancing
 
 ![Model Architecture](outputs/model_architecture.png)
-*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+*Figure 3: Model Architecture Visualization*
 
 ---
 
@@ -114,7 +124,7 @@ DeepSeekMoE uses fine-grained expert segmentation and shared expert isolation to
 **Additional Optimizations**:
 - Mixed precision training (FP16) halves weight memory
 - Gradient accumulation (size 4) for effective batch size 32
-- Parallel Dask preprocessing for ~[X]x speedup
+- Parallel Dask preprocessing
 
 ### Auxiliary Loss Design
 
@@ -134,7 +144,7 @@ Prevents expert collapse through multi-component loss:
 ### Collection & Curation (3 Stages)
 
 **Stage 1: Collection**
-- Query ArXiv API (ML + Healthcare categories, 2015-2024)
+- Query ArXiv API (ML + Healthcare categories, 2015-2025)
 - ~5,000 papers with metadata and full text
 - Format: JSONL for streaming processing
 
@@ -142,7 +152,7 @@ Prevents expert collapse through multi-component loss:
 - Quality filtering (removes 0.1% low-quality docs)
 - Fuzzy deduplication (MinHash, >0.95 similarity)
 - Domain classification (ML, Healthcare, Both, Other)
-- Result: 99.9% clean, balanced corpus
+- Result: 99.9% clean corpus (not balanced, see Limitations section)
 
 **Stage 3: Processing**
 - Text cleaning (normalize whitespace, remove URLs)
@@ -155,8 +165,8 @@ Evaluated two approaches with rigorous methodology:
 
 | Approach | Vocabulary | Perplexity | Medical Coverage |
 |----------|-----------|-----------|------------------|
-| **Custom SentencePiece** | 50k, domain-trained | [X.XX] | Good |
-| **Pretrained PubMedBERT** | 30k, biomedical-optimized | [X.XX] | Excellent |
+| **Custom SentencePiece** | 50k, domain-trained | [123.66] | Good |
+| **Pretrained PubMedBERT** | 30k, biomedical-optimized | [147.45] | Excellent |
 
 **Decision**: Selected **PubMedBERT** despite SentencePiece achieving better perplexity (123.66 vs 147.45), prioritizing robust medical terminology handling for healthcare applications over raw metrics.
 
@@ -183,10 +193,10 @@ Evaluated two approaches with rigorous methodology:
 | Optimizer | AdamW (β₁=0.9, β₂=0.999) | Stable convergence with weight decay |
 | Weight Decay | 0.01 | Prevent expert co-adaptation |
 
-
 ### Domain-Aware Loss Weighting
-
-Healthcare papers weighted **[X]x higher** in first 10% of training to encourage early specialization and prevent forgetting.
+Applied selective domain weighting via the ModelAdapter:
+- **Neurodegeneration papers**: 1.5x loss weight
+- **Neuroscience papers**: 1.2x loss weight
 
 ### Baseline Models
 
@@ -205,25 +215,24 @@ This isolates architectural benefits vs. other factors.
 
 #### - **Training Stability**: Smooth convergence over 50,000 steps with balanced auxiliary losses preventing expert collapse. 
 ![Training Loss Curves](outputs/training_curves.png)
-*Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
+*Figure 4: Smooth convergence with balanced auxiliary losses preventing expert collapse*
 
 #### -**Tokenizer Analysis**: Pretrained PubMedBERT tokenizer selected for final model despite the custom SentencePiece baseline achieving better perplexity (123.66 vs 147.45), prioritizing medical terminology coverage and production-ready tokenization over raw metrics.
 ![Tokenizer Comparison](outputs/tokenizer_comparison.png)
-*Figure 1: Smooth convergence with balanced auxiliary losses preventing expert collapse*
+*Figure 5: Pretrained tokenizer shows better utilization in other metrics (Avg tokens/term: 1.00<1.30, OOV RATE ON MEDICAL TEXT: 0.00%<3.45%)
 
 #### -**Zero Dead Experts**: All 4 routed experts remain active (>5% activations), confirming robust utilization
   ![Dead Experts](outputs/dead_experts.png)
-*Figure 2: All 4 experts equally utilized (Gini: 0.0201)*
+*Figure 6: All 4 experts utilized (Gini: 0.0201)—zero dead experts*
 
 #### - **Specialization Pattern**: All experts classified as 'Generalist' (handling diverse patterns broadly) with 100% showing specialization index >30% (meaningful differentiation in learned patterns)
-    ![Expert Type](outputs/expert_type.png)
-*Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts*
+  ![Expert Type](outputs/expert_type.png)
+*Figure 7: No domain specialization; expected due to dataset topics purposely being concentrated*
 
 #### - **Test Perplexity**: 147.45 (PubMedBERT tokenizer) outperforms Baseline Decoder (36,718.3) and Baseline Encoder (36,059.3)
   ![Expert Load Distribution](outputs/baseline_comparison_perplexity.png)
-*Figure 2: All 4 experts equally utilized (Gini: 0.0201)—zero dead experts **Important Note**: SentencePiece baseline achieved lower perplexity (123.66), suggesting tokenizer-model interaction effects worth investigating*
+*Figure 8: **Important Note**: SentencePiece baseline achieved lower perplexity (123.66) but performed poorer in generation, suggesting tokenizer-model interaction effects worth investigating*
 
-#### - **Domain-Specific**: ML papers (143.83) < Both domains (149.58) < Healthcare papers (165.54)—better on ML-heavy content
 
 ---
 
@@ -236,15 +245,15 @@ This isolates architectural benefits vs. other factors.
 - **Implication**: Experts learn task-type specialization, not domain-specific patterns
 
 ![Load Imbalance Heatmap](outputs/expert_load_imbalance.png)
-*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+*Figure 9: Expert E3 dominates across clusters; indicates routing convergence to default rather than semantic specialization*
 
 **Domain Performance Discrepancies**
 - Healthcare perplexity 23% worse than ML (165.54 vs 143.83)
 - **Root Cause**: Dataset skewed toward ML papers
 - **Impact**: Model performs better on ML-heavy content; limited clinical applicability
 
-  ![Load Imbalance Heatmap](outputs/domain_performance.png)
-*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+  ![Domain Performance](outputs/domain_performance.png)
+*Figure 10: Model Performance skewed per domain, see Limitations section for dataset domain splits*
 
 
 **Generation Quality Issues**
@@ -252,8 +261,8 @@ This isolates architectural benefits vs. other factors.
 - **Root Cause**: Trained only on language modeling, not generation-optimized decoding
 - **Impact**: Better suited for embeddings/classification than open-ended generation
 
-![Load Imbalance Heatmap](outputs/expert_load_imbalance.png)
-*Figure 3: Expert E3 dominates 60-70% across clusters; indicates routing convergence to default rather than semantic specialization*
+![Generation Results](outputs/generation_results.png)
+*Figure 11: Generations show inconsistent levels of quality*
 
 **Data & Training Constraints**
 - **Dataset**: ~500 papers (limited by ArXiv API rate limits)

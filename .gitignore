@@ -41,7 +41,6 @@ ENV/
 
 # Data and outputs
 datasets/
-outputs/
 staging/
 processed/
 image_shards/

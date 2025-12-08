@@ -148,11 +148,12 @@ class PipelineOrchestrator:
             # If none exist, return the first path (usually the working directory)
             return search_dirs[0] / dirname
 
-        # Define search order: working directory first, then configured output directory
+        # Define search order: prioritize data directories, then working directory, then configured output directory
         working_dir = Path.cwd()
-        search_dirs = [working_dir, self.output_dir]
+        data_arxiv_dir = working_dir / "data" / "arxiv"
+        search_dirs = [data_arxiv_dir, working_dir, self.output_dir]
 
-        # File paths - check both working directory and configured output directory
+        # File paths - check data/arxiv first, then working directory, then configured output directory
         self.metadata_jsonl = find_file("arxiv_papers.jsonl", search_dirs)
         self.text_dir = find_dir("texts", search_dirs)
         self.curated_jsonl = find_file("curated_dataset.jsonl", search_dirs)

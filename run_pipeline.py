@@ -128,14 +128,50 @@ class PipelineOrchestrator:
         self.start_time = time.time()
         self.step_times = {}
         
-        # File paths
-        self.metadata_jsonl = self.output_dir / "arxiv_papers.jsonl"
-        self.text_dir = self.output_dir / "texts"
-        self.curated_jsonl = self.output_dir / "curated_dataset.jsonl"
-        self.processed_jsonl = self.output_dir / "processed_dataset.jsonl"
-        self.tokenizer_model = self.output_dir / f"{self.config['tokenizer']['model_prefix']}.model"
-        self.tokenizer_vocab = self.output_dir / f"{self.config['tokenizer']['model_prefix']}.vocab"
+        # Helper function to find files in multiple possible locations
+        def find_file(filename: str, search_dirs: List[Path]) -> Path:
+            """Find a file in multiple possible directories, preferring existing files."""
+            for directory in search_dirs:
+                file_path = directory / filename
+                if file_path.exists():
+                    return file_path
+            # If none exist, return the first path (usually the working directory)
+            return search_dirs[0] / filename
+
+        # Helper function to find directories in multiple possible locations
+        def find_dir(dirname: str, search_dirs: List[Path]) -> Path:
+            """Find a directory in multiple possible locations, preferring existing directories."""
+            for directory in search_dirs:
+                dir_path = directory / dirname
+                if dir_path.exists():
+                    return dir_path
+            # If none exist, return the first path (usually the working directory)
+            return search_dirs[0] / dirname
+
+        # Define search order: working directory first, then configured output directory
+        working_dir = Path.cwd()
+        search_dirs = [working_dir, self.output_dir]
+
+        # File paths - check both working directory and configured output directory
+        self.metadata_jsonl = find_file("arxiv_papers.jsonl", search_dirs)
+        self.text_dir = find_dir("texts", search_dirs)
+        self.curated_jsonl = find_file("curated_dataset.jsonl", search_dirs)
+        self.processed_jsonl = find_file("processed_dataset.jsonl", search_dirs)
+        self.tokenizer_model = find_file(f"{self.config['tokenizer']['model_prefix']}.model", search_dirs)
+        self.tokenizer_vocab = find_file(f"{self.config['tokenizer']['model_prefix']}.vocab", search_dirs)
         self.checkpoint_dir = Path(self.config['training']['checkpoint_dir'])
+
+        # Log the file locations being used
+        logger.info(f"File locations:")
+        logger.info(f"   Working directory: {working_dir}")
+        logger.info(f"   Configured output directory: {self.output_dir}")
+        logger.info(f"   Metadata file: {self.metadata_jsonl}")
+        logger.info(f"   Text directory: {self.text_dir}")
+        logger.info(f"   Curated dataset: {self.curated_jsonl}")
+        logger.info(f"   Processed dataset: {self.processed_jsonl}")
+        logger.info(f"   Tokenizer model: {self.tokenizer_model}")
+        logger.info(f"   Tokenizer vocab: {self.tokenizer_vocab}")
+        logger.info(f"   Checkpoint directory: {self.checkpoint_dir}")
         
         # Evaluation directory - use Drive if available
         eval_output_dir = self.config['evaluation']['output_dir']
@@ -605,6 +641,10 @@ class PipelineOrchestrator:
                 
                 print(f"\nCalling curate_with_nemo()...", flush=True)
                 sys.stdout.flush()
+
+                # Ensure parent directory exists for output file
+                self.curated_jsonl.parent.mkdir(parents=True, exist_ok=True)
+
                 try:
                     curate_with_nemo(
                         text_dir=str(self.text_dir),

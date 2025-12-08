@@ -1512,31 +1512,135 @@ def main():
         description="Run complete NeMo Curator + training pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    
+
     parser.add_argument(
         '--config',
         type=str,
         default='config.yaml',
         help='Path to config.yaml file (default: config.yaml)'
     )
-    
-    parser.add_argument(
+
+    # Step-specific arguments (mutually exclusive)
+    step_group = parser.add_mutually_exclusive_group()
+
+    step_group.add_argument(
+        '--collect',
+        action='store_true',
+        help='Run Step 1: Collect ArXiv papers'
+    )
+
+    step_group.add_argument(
+        '--extract',
+        action='store_true',
+        help='Run Step 2: Extract PDF texts'
+    )
+
+    step_group.add_argument(
+        '--curate',
+        action='store_true',
+        help='Run Step 3: NeMo Curator curation'
+    )
+
+    step_group.add_argument(
+        '--process',
+        action='store_true',
+        help='Run Step 4: Process curated dataset'
+    )
+
+    step_group.add_argument(
+        '--train-tokenizer',
+        action='store_true',
+        help='Run Step 5: Train tokenizer'
+    )
+
+    step_group.add_argument(
+        '--train',
+        action='store_true',
+        help='Run Step 6: Train model'
+    )
+
+    step_group.add_argument(
+        '--evaluate',
+        action='store_true',
+        help='Run Step 7: Evaluate model'
+    )
+
+    step_group.add_argument(
+        '--export',
+        action='store_true',
+        help='Run Step 8: Export inference pipeline'
+    )
+
+    # Backward compatibility
+    step_group.add_argument(
         '--start-from-step',
         type=int,
         default=None,
         choices=[1, 2, 3, 4, 5, 6, 7, 8],
         help='Start from specific step (1-8). If not specified, resumes from first incomplete step.'
     )
-    
+
+    # Combined steps option
+    parser.add_argument(
+        '--all',
+        action='store_true',
+        help='Run all steps (collect -> evaluate -> export)'
+    )
+
     args = parser.parse_args()
-    
+
     if not os.path.exists(args.config):
         print(f"Config file not found: {args.config}")
         print(f"   Please create config.yaml or specify --config")
         sys.exit(1)
-    
+
+    # Determine starting step
+    start_step = None
+
+    # Map step arguments to step numbers
+    step_map = {
+        'collect': 1,
+        'extract': 2,
+        'curate': 3,
+        'process': 4,
+        'train-tokenizer': 5,
+        'train': 6,
+        'evaluate': 7,
+        'export': 8
+    }
+
+    # Check which step argument was provided
+    for arg_name, step_num in step_map.items():
+        if getattr(args, arg_name.replace('-', '_')):
+            start_step = step_num
+            break
+
+    # If --all specified, start from step 1
+    if args.all:
+        start_step = 1
+
+    # Use --start-from-step if provided (for backward compatibility)
+    if args.start_from_step is not None:
+        start_step = args.start_from_step
+
+    # If no step specified, will auto-detect first incomplete step
+    if start_step is None:
+        print("No step specified. Will auto-detect first incomplete step.")
+    else:
+        step_names = {
+            1: "Collect Papers",
+            2: "Extract PDFs",
+            3: "NeMo Curator Curation",
+            4: "Process Curated Dataset",
+            5: "Train Tokenizer",
+            6: "Train Model",
+            7: "Evaluate Model",
+            8: "Export Inference"
+        }
+        print(f"Starting from Step {start_step}: {step_names.get(start_step, 'Unknown')}")
+
     orchestrator = PipelineOrchestrator(args.config)
-    orchestrator.run(start_from_step=args.start_from_step)
+    orchestrator.run(start_from_step=start_step)
 
 
 if __name__ == "__main__":

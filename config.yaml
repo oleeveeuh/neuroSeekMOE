@@ -3,7 +3,7 @@
 # Pipeline Settings
 pipeline:
   output_dir: "./data/arxiv"  # Local fallback directory
-  max_papers: 30000  # Target number of papers
+  max_papers: 50000  # Target number of papers
   skip_stages: []  # List of stages to skip: [collect, extract, curate, preprocess, tokenize]
   resume: true  # Resume from last completed step
   cleanup_intermediate: true  # Delete intermediate files after processing
@@ -12,14 +12,14 @@ pipeline:
 
 # Step 1: ArXiv Paper Collection
 collection:
-  max_papers: 30000  # Target number of papers (for backward compatibility, also in pipeline section)
+  max_papers: 50000  # Target number of papers (for backward compatibility, also in pipeline section)
   rate_limit: 0.5  # Requests per second (2 requests/sec = 0.5 delay) - optimized for Colab speed
   retry_max: 5  # Maximum retry attempts with exponential backoff
   batch_size: 30  # Papers per batch (increased from 25 for faster collection, still RAM-safe)
   ram_target: 50.0  # Target RAM percentage to stay below (default: 50.0)
   
   # Optimized query execution (recommended for large collections)
-  use_optimized_queries: false  # Set to true to use query optimization pipeline
+  use_optimized_queries: true  # Set to true to use query optimization pipeline
   skip_diagnostic: false  # Skip diagnostic analysis (faster, if you already know queries)
   max_papers_per_query: 1000  # Maximum papers per sub-query (ArXiv pagination limit)
   rate_limit_delay: 2.0  # Delay between requests in seconds (for optimized execution)

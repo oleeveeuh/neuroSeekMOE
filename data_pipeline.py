@@ -645,71 +645,108 @@ def curate_with_nemo(
 
     # This is a placeholder implementation
     # In a real scenario, you would use NeMo Curator's Pipeline API
-    # For now, we'll do basic filtering and processing
+    # For now, we'll do basic filtering and processing with streaming to disk
 
-    curated_papers = []
+    curated_count = 0
+    processed_count = 0
+    start_time = time.time()
 
-    # Read metadata and filter
-    with open(metadata_jsonl, 'r') as f:
-        for line_num, line in enumerate(f):
-            if not line.strip():
-                continue
+    print("Starting streaming curation...", flush=True)
 
-            try:
-                paper = json.loads(line)
-                paper_id = paper.get('id', '').split('/')[-1]
-
-                # Check if corresponding text file exists
-                text_file = os.path.join(text_dir, f"{paper_id}.txt")
-                if not os.path.exists(text_file):
+    # Stream output directly to disk to avoid memory accumulation
+    with open(output_jsonl, 'w', encoding='utf-8') as outfile:
+        # Read metadata and filter one paper at a time
+        with open(metadata_jsonl, 'r') as infile:
+            for line_num, line in enumerate(infile):
+                if not line.strip():
                     continue
 
-                # Read text content
-                with open(text_file, 'r', encoding='utf-8', errors='ignore') as tf:
-                    text_content = tf.read()
+                processed_count += 1
 
-                if len(text_content.strip()) < 100:
+                # More frequent progress reporting for large datasets
+                if processed_count % 100 == 0:
+                    elapsed = time.time() - start_time
+                    papers_per_sec = processed_count / elapsed if elapsed > 0 else 0
+                    print(f"Processed {processed_count:,} papers, curated {curated_count:,} ({papers_per_sec:.1f} papers/sec)...", flush=True)
+
+                # Additional milestone reporting every 1000 papers
+                if processed_count % 1000 == 0:
+                    elapsed = time.time() - start_time
+                    papers_per_sec = processed_count / elapsed if elapsed > 0 else 0
+                    eta_seconds = (50000 - processed_count) / papers_per_sec if papers_per_sec > 0 else 0
+                    eta_minutes = eta_seconds / 60
+                    print(f"📍 Milestone: {processed_count:,} papers | Rate: {papers_per_sec:.1f}/sec | ETA: {eta_minutes:.1f} min", flush=True)
+
+                try:
+                    paper = json.loads(line)
+                    paper_id = paper.get('id', '').split('/')[-1]
+
+                    # Check if corresponding text file exists
+                    text_file = os.path.join(text_dir, f"{paper_id}.txt")
+                    if not os.path.exists(text_file):
+                        continue
+
+                    # Read text content
+                    with open(text_file, 'r', encoding='utf-8', errors='ignore') as tf:
+                        text_content = tf.read()
+
+                    if len(text_content.strip()) < 100:
+                        continue
+
+                    # Basic healthcare relevance check
+                    healthcare_keywords = [
+                        'healthcare', 'medical', 'clinical', 'patient', 'diagnosis',
+                        'treatment', 'disease', 'medicine', 'health', 'hospital'
+                    ]
+
+                    text_lower = text_content.lower()
+                    relevance_score = sum(1 for keyword in healthcare_keywords if keyword in text_lower)
+                    relevance_score = min(relevance_score / len(healthcare_keywords), 1.0)
+
+                    if relevance_score < min_relevance_score:
+                        continue
+
+                    # Create curated paper object
+                    curated_paper = {
+                        'arxiv_id': paper_id,
+                        'title': paper.get('title', ''),
+                        'authors': paper.get('authors', []),
+                        'published': paper.get('published', ''),
+                        'categories': paper.get('categories', []),
+                        'text': text_content,
+                        'relevance_score': relevance_score,
+                        'text_length': len(text_content),
+                        'curated_at': datetime.now().isoformat()
+                    }
+
+                    # Write directly to output file (streaming)
+                    outfile.write(json.dumps(curated_paper, ensure_ascii=False) + '\n')
+                    curated_count += 1
+
+                    # Periodic flush to ensure data is written
+                    if curated_count % 50 == 0:
+                        outfile.flush()
+
+                except Exception as e:
+                    print(f"Error processing paper {line_num}: {e}")
                     continue
 
-                # Basic healthcare relevance check
-                healthcare_keywords = [
-                    'healthcare', 'medical', 'clinical', 'patient', 'diagnosis',
-                    'treatment', 'disease', 'medicine', 'health', 'hospital'
-                ]
+    # Final summary
+    total_time = time.time() - start_time
+    avg_rate = processed_count / total_time if total_time > 0 else 0
+    retention_rate = (curated_count / processed_count * 100) if processed_count > 0 else 0
 
-                text_lower = text_content.lower()
-                relevance_score = sum(1 for keyword in healthcare_keywords if keyword in text_lower)
-                relevance_score = min(relevance_score / len(healthcare_keywords), 1.0)
-
-                if relevance_score < min_relevance_score:
-                    continue
-
-                # Add curated paper
-                curated_paper = {
-                    'arxiv_id': paper_id,
-                    'title': paper.get('title', ''),
-                    'authors': paper.get('authors', []),
-                    'published': paper.get('published', ''),
-                    'categories': paper.get('categories', []),
-                    'text': text_content,
-                    'relevance_score': relevance_score,
-                    'text_length': len(text_content),
-                    'curated_at': datetime.now().isoformat()
-                }
-
-                curated_papers.append(curated_paper)
-
-            except Exception as e:
-                print(f"Error processing paper {line_num}: {e}")
-                continue
-
-    # Write curated output
-    with open(output_jsonl, 'w', encoding='utf-8') as f:
-        for paper in curated_papers:
-            f.write(json.dumps(paper, ensure_ascii=False) + '\n')
-
-    print(f"Curated {len(curated_papers)} papers")
-    print(f"Output: {output_jsonl}")
+    print(f"\n{'='*60}")
+    print(f"🎉 CURATION COMPLETE!")
+    print(f"{'='*60}")
+    print(f"📊 Total papers processed: {processed_count:,}")
+    print(f"✅ Papers curated: {curated_count:,}")
+    print(f"📈 Retention rate: {retention_rate:.1f}%")
+    print(f"⏱️  Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
+    print(f"⚡ Average processing rate: {avg_rate:.1f} papers/second")
+    print(f"💾 Output file: {output_jsonl}")
+    print(f"📁 File size: {os.path.getsize(output_jsonl) / (1024*1024):.1f} MB")
+    print(f"{'='*60}")
 
 
 def run_nemo_curator_pipeline(

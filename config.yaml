@@ -46,7 +46,7 @@ nemo_curator:
   
   # Legacy settings (if use_pipeline_api: false)
   use_gpu: true  # Use GPU for deduplication (Linux only)
-  skip_dedup: false  # Skip deduplication if memory-constrained
+  skip_dedup: true  # Skip deduplication if memory-constrained
   min_relevance_score: 0.3  # Minimum domain relevance to keep paper (lowered from 0.5 for better coverage)
   
   # Quality filters

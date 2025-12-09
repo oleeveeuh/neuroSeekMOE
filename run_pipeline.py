@@ -103,17 +103,22 @@ class PipelineOrchestrator:
         # Check if we should use Google Drive (Colab)
         use_drive = self.config['pipeline'].get('use_drive', True)
         local_output_dir = self.config['pipeline']['output_dir']
-        
+
         if use_drive:
             # Try to use Google Drive if available
             try:
-                from data_pipeline import get_drive_output_dir
-                output_dir_str = get_drive_output_dir(
-                    local_output_dir=local_output_dir,
-                    drive_base=self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
-                )
-                self.output_dir = Path(output_dir_str)
-                logger.info(f"Output directory: {self.output_dir} (Google Drive if available)")
+                from data_pipeline import is_colab_environment, is_drive_mounted
+                if is_colab_environment() and is_drive_mounted():
+                    # Use Drive directly without copying
+                    drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                    self.output_dir = Path(drive_base) / "data" / "arxiv"
+                    self.output_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Output directory: {self.output_dir} (Google Drive - direct access)")
+                else:
+                    # Not in Colab or Drive not mounted
+                    self.output_dir = Path(local_output_dir)
+                    self.output_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Using local output directory: {self.output_dir}")
             except Exception as e:
                 # Fall back to local
                 self.output_dir = Path(local_output_dir)
@@ -122,6 +127,7 @@ class PipelineOrchestrator:
         else:
             self.output_dir = Path(local_output_dir)
             self.output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Using local output directory: {self.output_dir}")
         
         # Pipeline state
         self.step_status = {}
@@ -130,22 +136,68 @@ class PipelineOrchestrator:
         
         # Helper function to find files in multiple possible locations
         def find_file(filename: str, search_dirs: List[Path]) -> Path:
-            """Find a file in multiple possible directories, preferring existing files."""
+            """Find a file in multiple possible directories, prioritizing Drive paths."""
+            # First check Google Drive base path (if available)
+            try:
+                from data_pipeline import is_colab_environment, is_drive_mounted
+                if is_colab_environment() and is_drive_mounted():
+                    drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                    drive_file = Path(drive_base) / "data" / "arxiv" / filename
+                    if drive_file.exists():
+                        return drive_file
+                    # Also check in drive root for certain files
+                    drive_root_file = Path(drive_base) / "data" / filename
+                    if drive_root_file.exists():
+                        return drive_root_file
+            except:
+                pass
+
+            # Fall back to local search
             for directory in search_dirs:
                 file_path = directory / filename
                 if file_path.exists():
                     return file_path
-            # If none exist, return the first path (usually the working directory)
+            # If none exist, return the Drive path (preferred for new files)
+            try:
+                from data_pipeline import is_colab_environment, is_drive_mounted
+                if is_colab_environment() and is_drive_mounted():
+                    drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                    return Path(drive_base) / "data" / "arxiv" / filename
+            except:
+                pass
             return search_dirs[0] / filename
 
         # Helper function to find directories in multiple possible locations
         def find_dir(dirname: str, search_dirs: List[Path]) -> Path:
-            """Find a directory in multiple possible locations, preferring existing directories."""
+            """Find a directory in multiple possible locations, prioritizing Drive paths."""
+            # First check Google Drive base path (if available)
+            try:
+                from data_pipeline import is_colab_environment, is_drive_mounted
+                if is_colab_environment() and is_drive_mounted():
+                    drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                    drive_dir = Path(drive_base) / "data" / "arxiv" / dirname
+                    if drive_dir.exists():
+                        return drive_dir
+                    # Also check in drive root for certain directories
+                    drive_root_dir = Path(drive_base) / dirname
+                    if drive_root_dir.exists():
+                        return drive_root_dir
+            except:
+                pass
+
+            # Fall back to local search
             for directory in search_dirs:
                 dir_path = directory / dirname
                 if dir_path.exists():
                     return dir_path
-            # If none exist, return the first path (usually the working directory)
+            # If none exist, return the Drive path (preferred for new directories)
+            try:
+                from data_pipeline import is_colab_environment, is_drive_mounted
+                if is_colab_environment() and is_drive_mounted():
+                    drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                    return Path(drive_base) / "data" / "arxiv" / dirname
+            except:
+                pass
             return search_dirs[0] / dirname
 
         # Define search order: prioritize data directories, then working directory, then configured output directory
@@ -160,7 +212,29 @@ class PipelineOrchestrator:
         self.processed_jsonl = find_file("processed_dataset.jsonl", search_dirs)
         self.tokenizer_model = find_file(f"{self.config['tokenizer']['model_prefix']}.model", search_dirs)
         self.tokenizer_vocab = find_file(f"{self.config['tokenizer']['model_prefix']}.vocab", search_dirs)
-        self.checkpoint_dir = Path(self.config['training']['checkpoint_dir'])
+        # Checkpoint directory - use Drive if available
+        checkpoint_config = self.config['training']['checkpoint_dir']
+        use_drive = self.config['pipeline'].get('use_drive', True)
+
+        if use_drive:
+            try:
+                from data_pipeline import is_colab_environment, is_drive_mounted
+                if is_colab_environment() and is_drive_mounted():
+                    drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                    self.checkpoint_dir = Path(drive_base) / "checkpoints"
+                    self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Checkpoint directory: {self.checkpoint_dir} (Google Drive - direct access)")
+                else:
+                    self.checkpoint_dir = Path(checkpoint_config)
+                    self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Checkpoint directory: {self.checkpoint_dir}")
+            except Exception as e:
+                self.checkpoint_dir = Path(checkpoint_config)
+                self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Checkpoint directory: {self.checkpoint_dir}")
+        else:
+            self.checkpoint_dir = Path(checkpoint_config)
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         # Log the file locations being used
         logger.info(f"File locations:")
@@ -178,20 +252,45 @@ class PipelineOrchestrator:
         eval_output_dir = self.config['evaluation']['output_dir']
         if use_drive:
             try:
-                # Use Drive base path for evaluations
-                drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
-                drive_base_path = Path(drive_base)
-                if drive_base_path.exists() and os.access(drive_base_path, os.W_OK):
-                    # Evaluations go in Drive base/evaluations
-                    eval_output_dir = str(drive_base_path / "evaluations")
-                    logger.info(f"Evaluation directory: {eval_output_dir} (Google Drive)")
+                from data_pipeline import is_colab_environment, is_drive_mounted
+                if is_colab_environment() and is_drive_mounted():
+                    drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                    eval_output_dir = str(Path(drive_base) / "evaluations")
+                    Path(eval_output_dir).mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Evaluation directory: {eval_output_dir} (Google Drive - direct access)")
                 else:
-                    logger.warning("Drive base path not accessible, using local evaluation directory")
+                    self.eval_dir = Path(eval_output_dir)
+                    self.eval_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Evaluation directory: {self.eval_dir}")
             except Exception as e:
+                self.eval_dir = Path(eval_output_dir)
+                self.eval_dir.mkdir(parents=True, exist_ok=True)
                 logger.warning(f"Could not set Drive path for evaluations, using local: {e}")
-        self.eval_dir = Path(eval_output_dir)
-        
-        self.inference_dir = Path(self.config['inference']['output_dir'])
+        else:
+            self.eval_dir = Path(eval_output_dir)
+            self.eval_dir.mkdir(parents=True, exist_ok=True)
+
+        # Inference directory - use Drive if available
+        inference_output_dir = self.config['inference']['output_dir']
+        if use_drive:
+            try:
+                from data_pipeline import is_colab_environment, is_drive_mounted
+                if is_colab_environment() and is_drive_mounted():
+                    drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
+                    inference_output_dir = str(Path(drive_base) / "inference")
+                    Path(inference_output_dir).mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Inference directory: {inference_output_dir} (Google Drive - direct access)")
+                else:
+                    self.inference_dir = Path(inference_output_dir)
+                    self.inference_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Inference directory: {self.inference_dir}")
+            except Exception as e:
+                self.inference_dir = Path(inference_output_dir)
+                self.inference_dir.mkdir(parents=True, exist_ok=True)
+                logger.warning(f"Could not set Drive path for inference, using local: {e}")
+        else:
+            self.inference_dir = Path(inference_output_dir)
+            self.inference_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info("=" * 80)
         logger.info("Pipeline Orchestrator Initialized")

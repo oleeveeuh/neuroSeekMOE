@@ -40,7 +40,7 @@ nemo_curator:
   filter_query: "cs.LG OR cs.AI OR q-bio.NC"  # ArXiv search query (healthcare+ML)
   max_workers: 1  # Number of workers (1 is Colab safe, no rate limiting issues)
   max_papers: 40000  # Maximum total papers to download
-  batch_size: 5000  # Process papers in batches (for memory efficiency)
+  batch_size: 1000  # Process papers in batches (for memory efficiency)
   checkpoint_interval: 1000  # Save checkpoint every N papers (for resume capability)
   resume: true  # Resume from checkpoint if interrupted
   

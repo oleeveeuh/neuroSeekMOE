@@ -693,10 +693,43 @@ def curate_with_nemo(
                     if len(text_content.strip()) < 100:
                         continue
 
-                    # Basic healthcare relevance check
+                    # Enhanced healthcare relevance check with comprehensive keywords
                     healthcare_keywords = [
+                        # Core medical terms
                         'healthcare', 'medical', 'clinical', 'patient', 'diagnosis',
-                        'treatment', 'disease', 'medicine', 'health', 'hospital'
+                        'treatment', 'disease', 'medicine', 'health', 'hospital',
+
+                        # Medical specialties
+                        'cardiology', 'oncology', 'neurology', 'pediatrics', 'radiology',
+                        'pathology', 'dermatology', 'psychiatry', 'surgery', 'anesthesia',
+
+                        # Anatomy and biology
+                        'brain', 'heart', 'lung', 'liver', 'kidney', 'blood', 'cell',
+                        'molecular', 'genetic', 'protein', 'dna', 'rna', 'tissue',
+
+                        # Medical conditions
+                        'cancer', 'diabetes', 'alzheimer', 'parkinson', 'epilepsy',
+                        'stroke', 'tumor', 'infection', 'inflammation', 'fracture',
+
+                        # Medical procedures and tests
+                        'imaging', 'mri', 'ct', 'x-ray', 'ultrasound', 'ecg', 'eeg',
+                        'biopsy', 'surgery', 'therapy', 'rehabilitation', 'vaccination',
+
+                        # Drugs and pharmaceutical
+                        'drug', 'pharmaceutical', 'medication', 'antibiotic', 'vaccine',
+                        'clinical trial', 'dosage', 'prescription', 'side effect',
+
+                        # Public health
+                        'epidemic', 'pandemic', 'public health', 'prevention', 'screening',
+                        'outbreak', 'quarantine', 'mortality', 'morbidity',
+
+                        # Healthcare systems
+                        'healthcare system', 'hospital', 'clinic', 'nursing', 'physician',
+                        'doctor', 'nurse', 'therapist', 'medical center', 'emergency',
+
+                        # General health terms
+                        'wellness', 'fitness', 'nutrition', 'mental health', 'stress',
+                        'obesity', 'cholesterol', 'blood pressure', 'metabolism'
                     ]
 
                     text_lower = text_content.lower()

@@ -52,7 +52,7 @@ nemo_curator:
   # Quality filters
   quality_filters:
     word_count_min: 100
-    word_count_max: 5000
+    word_count_max: 25000
     alphanumeric_ratio_min: 0.4
     language: "en"  # Keep English only
   

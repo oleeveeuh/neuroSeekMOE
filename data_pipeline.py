@@ -998,7 +998,8 @@ def train_healthcare_tokenizer(
     input_jsonl: str,
     output_dir: str,
     model_prefix: str = "healthcare_tokenizer",
-    vocab_size: int = 32000
+    vocab_size: int = 30000,
+    max_papers: int = 5000000  # Limit to 5M papers for faster training
 ):
     """Train SentencePiece tokenizer on healthcare texts.
 
@@ -1007,6 +1008,7 @@ def train_healthcare_tokenizer(
         output_dir: Output directory for tokenizer files
         model_prefix: Prefix for tokenizer model files
         vocab_size: Vocabulary size for tokenizer
+        max_papers: Maximum number of papers to use for training (to prevent timeouts)
     """
     if not SENTENCEPIECE_AVAILABLE:
         print("Error: sentencepiece not available")
@@ -1018,67 +1020,134 @@ def train_healthcare_tokenizer(
     print(f"Output: {output_dir}")
     print(f"Model prefix: {model_prefix}")
     print(f"Vocab size: {vocab_size}")
+    print(f"Max papers: {max_papers:,}")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Collect all text
+    # Count total lines first for progress tracking
+    print("Counting total papers in dataset...")
+    total_lines = 0
+    with open(input_jsonl, 'r') as f:
+        for line in f:
+            if line.strip():
+                total_lines += 1
+
+    print(f"Found {total_lines:,} total papers")
+    papers_to_use = min(total_lines, max_papers)
+    print(f"Will use {papers_to_use:,} papers for training")
+
+    # Collect text with progress tracking
     all_text = []
+    processed_count = 0
+
+    print("Collecting text samples...")
     with open(input_jsonl, 'r') as f:
         for line_num, line in enumerate(f):
             if not line.strip():
                 continue
 
+            # Stop if we've reached our limit
+            if processed_count >= max_papers:
+                break
+
             try:
                 paper = json.loads(line)
                 text = paper.get('text', '')
-                if text:
-                    all_text.append(text)
+                if text and len(text.strip()) > 100:  # Skip very short texts
+                    all_text.append(text.strip())
+                    processed_count += 1
+
+                # Progress update every 100k papers
+                if processed_count % 100000 == 0:
+                    print(f"  Processed {processed_count:,} papers...")
+
             except Exception as e:
-                print(f"Error processing line {line_num}: {e}")
                 continue
+
+    print(f"Collected text from {len(all_text):,} papers")
 
     if not all_text:
         print("Error: No text found in input file")
         return
 
-    print(f"Collected text from {len(all_text)} papers")
+    # Calculate text statistics
+    total_chars = sum(len(text) for text in all_text)
+    avg_chars = total_chars // len(all_text)
+    print(f"Total characters: {total_chars:,}")
+    print(f"Average text length: {avg_chars:,} chars")
 
     # Write all text to temporary file for SentencePiece training
     temp_text_file = os.path.join(output_dir, "all_text.txt")
+    print(f"Writing temporary text file: {temp_text_file}")
+
     with open(temp_text_file, 'w', encoding='utf-8') as f:
-        for text in all_text:
+        for i, text in enumerate(all_text):
             f.write(text + '\n')
+            if (i + 1) % 50000 == 0:
+                print(f"  Wrote {i + 1:,} texts...")
+
+    print("Starting SentencePiece training...")
+    print("This may take 10-30 minutes depending on dataset size...")
 
     # Train SentencePiece model
     model_prefix_path = os.path.join(output_dir, model_prefix)
 
     import sentencepiece as spm
 
+    # Optimized training parameters for speed
     spm.SentencePieceTrainer.train(
         input=temp_text_file,
         model_prefix=model_prefix_path,
         vocab_size=vocab_size,
         model_type='bpe',
-        max_sentence_length=4096,
+        max_sentence_length=2048,  # Reduced from 4096 for speed
         shuffle_input_sentence=True,
         train_extremely_large_corpus=False,
-        character_coverage=0.995,
-        num_threads=os.cpu_count() or 4
+        character_coverage=0.995,  # Slightly reduced for faster training
+        num_threads=min(os.cpu_count() or 4, 8),  # Cap threads for efficiency
+        input_sentence_size=1000000,  # Limit sentences for faster training
+        shuffle_factor=1,  # Minimal shuffling for speed
     )
 
     # Clean up temp file
     os.remove(temp_text_file)
+    print("Temporary file cleaned up")
 
     # Verify tokenizer was created
     model_file = f"{model_prefix_path}.model"
     vocab_file = f"{model_prefix_path}.vocab"
 
     if os.path.exists(model_file) and os.path.exists(vocab_file):
-        print(f"Tokenizer trained successfully!")
-        print(f"Model: {model_file}")
-        print(f"Vocab: {vocab_file}")
+        print(f"✓ Tokenizer trained successfully!")
+        print(f"  Model: {model_file}")
+        print(f"  Vocab: {vocab_file}")
+
+        # Show vocabulary info
+        vocab_size_actual = 0
+        with open(vocab_file, 'r') as f:
+            vocab_size_actual = sum(1 for line in f) - 1  # -1 for header
+
+        print(f"  Actual vocabulary size: {vocab_size_actual:,} tokens")
+
+        # Test tokenizer
+        try:
+            sp = spm.SentencePieceProcessor()
+            sp.load(model_file)
+
+            test_text = "neural network for healthcare diagnosis"
+            encoded = sp.encode_as_ids(test_text)
+            decoded = sp.decode_ids(encoded)
+
+            print(f"  Test: '{test_text}'")
+            print(f"  Encoded: {len(encoded)} tokens")
+            print(f"  Decoded: '{decoded}'")
+        except Exception as e:
+            print(f"  Warning: Could not test tokenizer: {e}")
     else:
         print("Error: Tokenizer files not created")
+        return None, None
+
+    return model_file, vocab_file
 
 
 # ============================================================================

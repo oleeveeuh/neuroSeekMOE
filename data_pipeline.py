@@ -711,48 +711,117 @@ def curate_with_nemo(
                         if alphanumeric_ratio < alphanumeric_ratio_min:
                             continue
 
-                    # Enhanced healthcare relevance check with comprehensive keywords
+                    # Enhanced healthcare relevance check with comprehensive keywords and variations
                     healthcare_keywords = [
-                        # Core medical terms
-                        'healthcare', 'medical', 'clinical', 'patient', 'diagnosis',
-                        'treatment', 'disease', 'medicine', 'health', 'hospital',
+                        # Core medical terms + variations
+                        'healthcare', 'health care', 'medical', 'medicine', 'clinical', 'clinic',
+                        'patient', 'patients', 'diagnosis', 'diagnose', 'diagnostic',
+                        'treatment', 'therapy', 'therapies', 'disease', 'disorders', 'disorder',
+                        'health', 'healthy', 'hospital', 'hospitals', 'medical center',
 
-                        # Medical specialties
-                        'cardiology', 'oncology', 'neurology', 'pediatrics', 'radiology',
-                        'pathology', 'dermatology', 'psychiatry', 'surgery', 'anesthesia',
+                        # Medical specialties + variations
+                        'cardiology', 'cardiac', 'cardiovascular', 'oncology', 'cancer', 'tumor',
+                        'neurology', 'neurological', 'neuroscience', 'brain', 'neural',
+                        'pediatrics', 'pediatric', 'children', 'child health',
+                        'radiology', 'radiological', 'imaging', 'medical imaging',
+                        'pathology', 'pathological', 'dermatology', 'skin', 'dermatological',
+                        'psychiatry', 'psychological', 'mental health', 'mental illness',
+                        'surgery', 'surgical', 'operation', 'anesthesia', 'anesthetic',
 
-                        # Anatomy and biology
-                        'brain', 'heart', 'lung', 'liver', 'kidney', 'blood', 'cell',
-                        'molecular', 'genetic', 'protein', 'dna', 'rna', 'tissue',
+                        # Anatomy and biology + variations
+                        'brain', 'cerebral', 'neural', 'neuron', 'neurons', 'cortex',
+                        'heart', 'cardiac', 'cardiovascular', 'ventricular', 'atrial',
+                        'lung', 'pulmonary', 'respiratory', 'breathing', 'oxygen',
+                        'liver', 'hepatic', 'kidney', 'renal', 'nephrology',
+                        'blood', 'bloodstream', 'vascular', 'circulatory',
+                        'cell', 'cellular', 'molecule', 'molecular', 'molecules',
+                        'genetic', 'genetics', 'gene', 'genes', 'genomic', 'genome',
+                        'protein', 'proteins', 'proteomic', 'dna', 'rna', 'chromosome',
+                        'tissue', 'tissues', 'organ', 'organs', 'anatomy', 'biological',
 
-                        # Medical conditions
-                        'cancer', 'diabetes', 'alzheimer', 'parkinson', 'epilepsy',
-                        'stroke', 'tumor', 'infection', 'inflammation', 'fracture',
+                        # Medical conditions + variations
+                        'cancer', 'tumor', 'malignant', 'benign', 'metastasis', 'oncology',
+                        'diabetes', 'diabetic', 'insulin', 'glucose', 'blood sugar',
+                        'alzheimer', 'alzheimer\\'s', 'dementia', 'cognitive decline',
+                        'parkinson', 'parkinson\\'s', 'tremor', 'movement disorder',
+                        'epilepsy', 'seizure', 'seizures', 'convulsion',
+                        'stroke', 'cerebral stroke', 'brain attack', 'ischemic',
+                        'infection', 'infectious', 'bacterial', 'viral', 'pathogen',
+                        'inflammation', 'inflammatory', 'immune', 'immunity',
+                        'fracture', 'broken bone', 'injury', 'trauma', 'wound',
 
-                        # Medical procedures and tests
-                        'imaging', 'mri', 'ct', 'x-ray', 'ultrasound', 'ecg', 'eeg',
-                        'biopsy', 'surgery', 'therapy', 'rehabilitation', 'vaccination',
+                        # Medical procedures and tests + variations
+                        'imaging', 'medical imaging', 'scan', 'scanning', 'radiology',
+                        'mri', 'magnetic resonance', 'fmri', 'functional mri',
+                        'ct', 'cat scan', 'computed tomography', 'x-ray', 'radiography',
+                        'ultrasound', 'sonography', 'echocardiogram', 'echo',
+                        'ecg', 'ekg', 'electrocardiogram', 'electroencephalogram', 'eeg',
+                        'biopsy', 'histology', 'histopathology', 'cytology',
+                        'surgery', 'surgical', 'operation', 'procedure', 'intervention',
+                        'therapy', 'therapies', 'treatment', 'rehabilitation', 'recovery',
+                        'vaccination', 'vaccine', 'immunization', 'vaccine', 'inoculation',
 
-                        # Drugs and pharmaceutical
-                        'drug', 'pharmaceutical', 'medication', 'antibiotic', 'vaccine',
-                        'clinical trial', 'dosage', 'prescription', 'side effect',
+                        # Drugs and pharmaceutical + variations
+                        'drug', 'drugs', 'pharmaceutical', 'pharmaceuticals', 'medication', 'medications',
+                        'medicine', 'medicines', 'pharmacy', 'pharmacology', 'pharmacological',
+                        'antibiotic', 'antibiotics', 'antiviral', 'antifungal', 'antimicrobial',
+                        'vaccine', 'vaccines', 'vaccination', 'immunization',
+                        'clinical trial', 'clinical trials', 'clinical study', 'clinical research',
+                        'dosage', 'dose', 'dosing', 'prescription', 'prescribe',
+                        'side effect', 'adverse effect', 'adverse reaction', 'contraindication',
 
-                        # Public health
-                        'epidemic', 'pandemic', 'public health', 'prevention', 'screening',
-                        'outbreak', 'quarantine', 'mortality', 'morbidity',
+                        # Public health + variations
+                        'epidemic', 'epidemiology', 'epidemiological', 'pandemic', 'outbreak',
+                        'public health', 'population health', 'community health',
+                        'prevention', 'preventive', 'prophylaxis', 'screening', 'early detection',
+                        'outbreak', 'outbreaks', 'quarantine', 'isolation', 'containment',
+                        'mortality', 'mortality rate', 'morbidity', 'morbidity rate',
+                        'incidence', 'prevalence', 'surveillance', 'monitoring',
 
-                        # Healthcare systems
-                        'healthcare system', 'hospital', 'clinic', 'nursing', 'physician',
-                        'doctor', 'nurse', 'therapist', 'medical center', 'emergency',
+                        # Healthcare systems + variations
+                        'healthcare system', 'health care system', 'health system',
+                        'hospital', 'hospitals', 'medical center', 'medical centers',
+                        'clinic', 'clinics', 'outpatient', 'inpatient', 'emergency room',
+                        'nursing', 'nurse', 'nurses', 'nursing care', 'patient care',
+                        'physician', 'physicians', 'doctor', 'doctors', 'clinician',
+                        'therapist', 'therapists', 'specialist', 'specialists', 'consultant',
+                        'emergency', 'urgent care', 'primary care', 'secondary care',
+                        'healthcare provider', 'healthcare professional', 'medical staff',
 
-                        # General health terms
-                        'wellness', 'fitness', 'nutrition', 'mental health', 'stress',
-                        'obesity', 'cholesterol', 'blood pressure', 'metabolism'
+                        # General health terms + variations
+                        'wellness', 'wellbeing', 'well-being', 'fitness', 'physical fitness',
+                        'nutrition', 'nutritional', 'diet', 'dietary', 'food intake',
+                        'mental health', 'psychological health', 'emotional health',
+                        'stress', 'stress management', 'anxiety', 'depression', 'mood',
+                        'obesity', 'overweight', 'bmi', 'body mass index', 'weight management',
+                        'cholesterol', 'blood cholesterol', 'lipid', 'lipids', 'fatty acids',
+                        'blood pressure', 'hypertension', 'hypotension', 'systolic', 'diastolic',
+                        'metabolism', 'metabolic', 'metabolite', 'metabolism rate', 'energy expenditure',
+
+                        # Additional medical technology terms
+                        'medical device', 'medical devices', 'implant', 'implants', 'prosthesis',
+                        'diagnostic tool', 'diagnostic device', 'monitoring device', 'sensor',
+                        'telemedicine', 'telehealth', 'digital health', 'e-health', 'm-health',
+                        'biomarker', 'biomarkers', 'genetic testing', 'screening test',
+                        'personalized medicine', 'precision medicine', 'individualized treatment',
+                        'regenerative medicine', 'stem cell', 'tissue engineering', 'gene therapy'
                     ]
 
                     text_lower = text_content.lower()
-                    relevance_score = sum(1 for keyword in healthcare_keywords if keyword in text_lower)
-                    relevance_score = min(relevance_score / len(healthcare_keywords), 1.0)
+                    found_keywords = sum(1 for keyword in healthcare_keywords if keyword in text_lower)
+
+                    # Enhanced scoring: More intuitive relevance scores
+                    # Papers with 3+ keywords should get good scores, not 0.05
+                    if found_keywords >= 8:
+                        relevance_score = 0.8  # Very high relevance
+                    elif found_keywords >= 6:
+                        relevance_score = 0.6  # High relevance
+                    elif found_keywords >= 4:
+                        relevance_score = 0.4  # Moderate relevance
+                    elif found_keywords >= 2:
+                        relevance_score = 0.2  # Low relevance
+                    else:
+                        relevance_score = found_keywords * 0.1  # Minimal relevance
 
                     if relevance_score < min_relevance_score:
                         continue

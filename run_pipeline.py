@@ -1330,7 +1330,7 @@ class PipelineOrchestrator:
                 batch_size=training_config['batch_size'],
                 gradient_accumulation_steps=training_config['gradient_accumulation_steps'],
                 max_steps=training_config['max_steps'],
-                learning_rate=training_config['learning_rate'],
+                learning_rate=float(training_config['learning_rate']),
                 warmup_steps=training_config['warmup_steps'],
                 save_interval=training_config.get('checkpoint_interval', 5000),
                 log_interval=training_config.get('log_interval', 100),

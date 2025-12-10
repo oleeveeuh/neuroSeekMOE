@@ -376,7 +376,7 @@ def train(
     )
     
     # Setup optimizer
-    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    optimizer = AdamW(model.parameters(), lr=float(learning_rate), weight_decay=0.01)
     
     # Setup scheduler: warmup + cosine annealing
     warmup_scheduler = LinearLR(

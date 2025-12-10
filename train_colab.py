@@ -227,10 +227,10 @@ def load_checkpoint(
 
 def count_domains_in_batch(batch_metadata: Dict) -> Dict[str, int]:
     """Count domain distribution in batch.
-    
+
     Args:
         batch_metadata: Batch metadata from adapter
-        
+
     Returns:
         Dictionary with domain counts
     """
@@ -242,13 +242,13 @@ def count_domains_in_batch(batch_metadata: Dict) -> Dict[str, int]:
         'drug_discovery': 0,
         'general_ml_health': 0
     }
-    
+
     domains_list = batch_metadata.get('domains', [])
     for domains in domains_list:
         for domain in domains:
             if domain in domain_counts:
                 domain_counts[domain] += 1
-    
+
     return domain_counts
 
 

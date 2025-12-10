@@ -926,42 +926,42 @@ def classify_healthcare_domains(paper: Dict) -> List[str]:
     # Combine text for keyword matching (use first 2000 chars of full text to avoid memory issues)
     combined_text = (title + ' ' + abstract + ' ' + text[:2000]).lower()
 
-    # Domain-specific keywords
+    # Specific 6-domain keywords for healthcare expert specialization
     domain_keywords = {
         'neurodegeneration': [
             'alzheimer', 'parkinson', 'dementia', 'neurodegenerative', 'cognitive decline',
             'memory loss', 'neurodegeneration', 'amyloid', 'tau protein', 'lewy body',
-            'frontotemporal dementia', 'cognitive impairment', 'brain atrophy'
+            'frontotemporal dementia', 'cognitive impairment', 'brain atrophy', 'mild cognitive impairment'
         ],
         'neuroscience': [
             'neuron', 'neural', 'brain', 'cortical', 'synapse', 'synaptic', 'neurotransmitter',
             'dopamine', 'serotonin', 'gaba', 'glutamate', 'neuroscience', 'cognitive',
             'motor cortex', 'prefrontal', 'hippocampus', 'cerebellum', 'brain imaging',
-            'fmri', 'eeg', 'neural activity', 'brain function', 'neural circuit'
+            'fmri', 'eeg', 'neural activity', 'brain function', 'neural circuit', 'neuroimaging'
         ],
         'medical_imaging': [
             'mri', 'ct scan', 'pet scan', 'ultrasound', 'x-ray', 'radiology', 'imaging',
             'medical image', 'scan', 'tomography', 'mammography', 'angiography', 'fluoroscopy',
             'medical imaging', 'image analysis', 'computer vision', 'segmentation',
-            'image registration', 'dicom', 'pixel', 'radiograph'
+            'image registration', 'dicom', 'pixel', 'radiograph', 'medical image processing'
         ],
         'clinical': [
             'patient', 'clinical trial', 'treatment', 'therapy', 'diagnosis', 'symptom',
             'hospital', 'physician', 'medical', 'clinical', 'patient care', 'therapeutic',
             'medical treatment', 'clinical study', 'intervention', 'prognosis', 'diagnostic',
-            'medical procedure', 'clinical outcome', 'patient outcome'
+            'medical procedure', 'clinical outcome', 'patient outcome', 'clinical practice'
         ],
         'drug_discovery': [
             'drug', 'pharmaceutical', 'medication', 'compound', 'drug discovery', 'clinical trial',
             'fda approval', 'drug development', 'pharmacology', 'drug target', 'lead compound',
             'drug screening', 'medicinal chemistry', 'pharmacokinetic', 'pharmacodynamic',
-            'bioavailability', 'drug interaction', 'adverse drug reaction'
+            'bioavailability', 'drug interaction', 'adverse drug reaction', 'drug design'
         ],
         'general_ml_health': [
             'machine learning', 'deep learning', 'neural network', 'artificial intelligence',
             'algorithm', 'model', 'prediction', 'classification', 'regression', 'clustering',
             'data mining', 'feature extraction', 'training', 'validation', 'cross-validation',
-            'supervised learning', 'unsupervised learning', 'reinforcement learning'
+            'supervised learning', 'unsupervised learning', 'reinforcement learning', 'healthcare ai'
         ]
     }
 
@@ -970,10 +970,18 @@ def classify_healthcare_domains(paper: Dict) -> List[str]:
     for cat in categories:
         cat_lower = str(cat).lower()
         if any(term in cat_lower for term in ['q-bio.nc', 'q-bio.qm', 'q-bio.cb']):
-            category_domains.extend(['neuroscience', 'neurodegeneration'])
-        elif any(term in cat_lower for term in ['cs.cv', 'cs.lg', 'cs.ai']):
-            if 'medical' in combined_text or 'health' in combined_text:
-                category_domains.extend(['medical_imaging', 'general_ml_health'])
+            # Neuroscience categories map to multiple domains
+            category_domains.extend(['neuroscience'])
+            if any(term in combined_text for term in ['alzheimer', 'parkinson', 'dementia']):
+                category_domains.append('neurodegeneration')
+        elif any(term in cat_lower for term in ['q-bio.gn', 'q-bio.qm', 'bioinformatics']):
+            category_domains.append('drug_discovery')
+        elif any(term in cat_lower for term in ['cs.cv', 'cs.lg', 'cs.ai', 'cs.']):
+            if 'medical' in combined_text or 'health' in combined_text or 'patient' in combined_text:
+                if any(term in combined_text for term in ['mri', 'ct', 'scan', 'imaging', 'radiology']):
+                    category_domains.append('medical_imaging')
+                else:
+                    category_domains.append('general_ml_health')
             else:
                 category_domains.append('general_ml_health')
 
@@ -1000,14 +1008,18 @@ def classify_healthcare_domains(paper: Dict) -> List[str]:
             domains.append('general_ml_health')
         elif has_healthcare:
             # Try to be more specific with healthcare content
-            if any(term in combined_text for term in ['brain', 'neural', 'cognitive']):
+            if any(term in combined_text for term in ['alzheimer', 'parkinson', 'dementia', 'neurodegenerative']):
+                domains.append('neurodegeneration')
+            elif any(term in combined_text for term in ['brain', 'neural', 'cognitive', 'fmri', 'eeg']):
                 domains.append('neuroscience')
-            elif any(term in combined_text for term in ['imaging', 'scan', 'radiology']):
+            elif any(term in combined_text for term in ['imaging', 'scan', 'radiology', 'mri', 'ct']):
                 domains.append('medical_imaging')
             elif any(term in combined_text for term in ['drug', 'pharmaceutical', 'medication']):
                 domains.append('drug_discovery')
             else:
                 domains.append('clinical')
+        else:
+            domains.append('general_ml_health')
 
     # Remove duplicates while preserving order
     seen = set()

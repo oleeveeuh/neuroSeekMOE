@@ -822,8 +822,9 @@ def batch_expert_forward_expert_choice(
         # Step 2f: Scatter back to outputs tensor at original token indices
         # Use torch.scatter_add_ for efficient in-place accumulation
         # token_idx: [selected_k] -> expand to [selected_k, embedding_dim] for scatter
-        token_idx_expanded = token_idx.unsqueeze(1).expand(-1, embedding_dim)  # [selected_k, embedding_dim]
-        
+        # Ensure index tensor is LongTensor for scatter operation
+        token_idx_expanded = token_idx.unsqueeze(1).expand(-1, embedding_dim).long()  # [selected_k, embedding_dim]
+
         # Scatter add: accumulate weighted outputs at token positions
         # This efficiently handles cases where multiple experts select the same token
         outputs.scatter_add_(0, token_idx_expanded, weighted_output)

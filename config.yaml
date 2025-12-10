@@ -70,7 +70,7 @@ preprocessing:
 
 # Step 5: Tokenizer Training
 tokenizer:
-  vocab_size: 50000
+  vocab_size: 30000  # Optimized for healthcare domain + compatibility with pretrained models
   model_prefix: "healthcare_tokenizer"
   character_coverage: 0.9995
   model_type: "bpe"
@@ -85,7 +85,7 @@ tokenizer:
 training:
   # Model configuration
   model_path: null  # Path to pretrained model (optional)
-  vocab_size: 50000
+  vocab_size: 30000  # Match tokenizer vocab size for consistency
   embedding_dim: 768
   num_shared_experts: 2
   num_routed_experts: 8

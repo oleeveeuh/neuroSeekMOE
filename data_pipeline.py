@@ -909,6 +909,117 @@ def run_nemo_curator_pipeline(
     return {"status": "completed", "papers_processed": 0}
 
 
+def classify_healthcare_domains(paper: Dict) -> List[str]:
+    """Classify paper into healthcare-specific domains using keywords.
+
+    Args:
+        paper: Dictionary with 'title', 'abstract', 'text', and 'categories'
+
+    Returns:
+        List of healthcare domain labels
+    """
+    title = (paper.get('title', '') or '').lower()
+    abstract = (paper.get('abstract', '') or '').lower()
+    text = (paper.get('text', '') or '').lower()
+    categories = paper.get('categories', [])
+
+    # Combine text for keyword matching (use first 2000 chars of full text to avoid memory issues)
+    combined_text = (title + ' ' + abstract + ' ' + text[:2000]).lower()
+
+    # Domain-specific keywords
+    domain_keywords = {
+        'neurodegeneration': [
+            'alzheimer', 'parkinson', 'dementia', 'neurodegenerative', 'cognitive decline',
+            'memory loss', 'neurodegeneration', 'amyloid', 'tau protein', 'lewy body',
+            'frontotemporal dementia', 'cognitive impairment', 'brain atrophy'
+        ],
+        'neuroscience': [
+            'neuron', 'neural', 'brain', 'cortical', 'synapse', 'synaptic', 'neurotransmitter',
+            'dopamine', 'serotonin', 'gaba', 'glutamate', 'neuroscience', 'cognitive',
+            'motor cortex', 'prefrontal', 'hippocampus', 'cerebellum', 'brain imaging',
+            'fmri', 'eeg', 'neural activity', 'brain function', 'neural circuit'
+        ],
+        'medical_imaging': [
+            'mri', 'ct scan', 'pet scan', 'ultrasound', 'x-ray', 'radiology', 'imaging',
+            'medical image', 'scan', 'tomography', 'mammography', 'angiography', 'fluoroscopy',
+            'medical imaging', 'image analysis', 'computer vision', 'segmentation',
+            'image registration', 'dicom', 'pixel', 'radiograph'
+        ],
+        'clinical': [
+            'patient', 'clinical trial', 'treatment', 'therapy', 'diagnosis', 'symptom',
+            'hospital', 'physician', 'medical', 'clinical', 'patient care', 'therapeutic',
+            'medical treatment', 'clinical study', 'intervention', 'prognosis', 'diagnostic',
+            'medical procedure', 'clinical outcome', 'patient outcome'
+        ],
+        'drug_discovery': [
+            'drug', 'pharmaceutical', 'medication', 'compound', 'drug discovery', 'clinical trial',
+            'fda approval', 'drug development', 'pharmacology', 'drug target', 'lead compound',
+            'drug screening', 'medicinal chemistry', 'pharmacokinetic', 'pharmacodynamic',
+            'bioavailability', 'drug interaction', 'adverse drug reaction'
+        ],
+        'general_ml_health': [
+            'machine learning', 'deep learning', 'neural network', 'artificial intelligence',
+            'algorithm', 'model', 'prediction', 'classification', 'regression', 'clustering',
+            'data mining', 'feature extraction', 'training', 'validation', 'cross-validation',
+            'supervised learning', 'unsupervised learning', 'reinforcement learning'
+        ]
+    }
+
+    # Check for category-based classification first (more reliable)
+    category_domains = []
+    for cat in categories:
+        cat_lower = str(cat).lower()
+        if any(term in cat_lower for term in ['q-bio.nc', 'q-bio.qm', 'q-bio.cb']):
+            category_domains.extend(['neuroscience', 'neurodegeneration'])
+        elif any(term in cat_lower for term in ['cs.cv', 'cs.lg', 'cs.ai']):
+            if 'medical' in combined_text or 'health' in combined_text:
+                category_domains.extend(['medical_imaging', 'general_ml_health'])
+            else:
+                category_domains.append('general_ml_health')
+
+    # Keyword-based classification
+    keyword_domains = []
+    for domain, keywords in domain_keywords.items():
+        keyword_count = sum(1 for keyword in keywords if keyword in combined_text)
+        # Require at least 2 keyword matches for domain classification (or 1 for very specific terms)
+        if keyword_count >= 2 or any(keyword in combined_text for keyword in keywords if len(keyword.split()) == 1):
+            keyword_domains.append(domain)
+
+    # Combine category and keyword classifications, preferring category-based
+    domains = list(set(category_domains + keyword_domains))
+
+    # Special handling: if no specific domains found but paper has healthcare + ML content
+    if not domains:
+        healthcare_indicators = ['patient', 'medical', 'clinical', 'health', 'disease', 'treatment']
+        ml_indicators = ['machine learning', 'neural network', 'deep learning', 'algorithm', 'model', 'prediction']
+
+        has_healthcare = any(indicator in combined_text for indicator in healthcare_indicators)
+        has_ml = any(indicator in combined_text for indicator in ml_indicators)
+
+        if has_healthcare and has_ml:
+            domains.append('general_ml_health')
+        elif has_healthcare:
+            # Try to be more specific with healthcare content
+            if any(term in combined_text for term in ['brain', 'neural', 'cognitive']):
+                domains.append('neuroscience')
+            elif any(term in combined_text for term in ['imaging', 'scan', 'radiology']):
+                domains.append('medical_imaging')
+            elif any(term in combined_text for term in ['drug', 'pharmaceutical', 'medication']):
+                domains.append('drug_discovery')
+            else:
+                domains.append('clinical')
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_domains = []
+    for domain in domains:
+        if domain not in seen:
+            seen.add(domain)
+            unique_domains.append(domain)
+
+    return unique_domains
+
+
 def process_curated_dataset(
     input_jsonl: str,
     output_jsonl: str,
@@ -935,18 +1046,25 @@ def process_curated_dataset(
             try:
                 paper = json.loads(line)
 
-                # Extract domains from categories
-                domains = []
-                categories = paper.get('categories', [])
-                for cat in categories:
-                    if 'cs' in cat:
-                        domains.append('computer_science')
-                    elif 'q-bio' in cat:
-                        domains.append('biology')
-                    elif 'stat' in cat:
-                        domains.append('statistics')
-                    elif 'eess' in cat:
-                        domains.append('engineering')
+                # Extract healthcare-specific domains using keyword classification
+                domains = classify_healthcare_domains(paper)
+
+                # Fall back to generic domains if no healthcare domains found
+                if not domains or domains == ['other']:
+                    categories = paper.get('categories', [])
+                    generic_domains = []
+                    for cat in categories:
+                        if 'cs' in cat:
+                            generic_domains.append('computer_science')
+                        elif 'q-bio' in cat:
+                            generic_domains.append('biology')
+                        elif 'stat' in cat:
+                            generic_domains.append('statistics')
+                        elif 'eess' in cat:
+                            generic_domains.append('engineering')
+
+                    if generic_domains:
+                        domains.extend(generic_domains)
 
                 if not domains:
                     domains = ['other']
@@ -968,6 +1086,12 @@ def process_curated_dataset(
                 if len(text) > 100000:  # Truncate very long texts
                     text = text[:100000] + "..."
 
+                # Check for neurodegeneration-specific content for expert specialization
+                has_neurodegeneration = 'neurodegeneration' in domains or any(
+                    term in (title + ' ' + abstract + ' ' + text[:1000]).lower()
+                    for term in ['alzheimer', 'parkinson', 'dementia', 'neurodegenerative']
+                )
+
                 processed_paper = {
                     'arxiv_id': paper.get('arxiv_id', ''),
                     'text': text,
@@ -977,6 +1101,8 @@ def process_curated_dataset(
                     'authors': paper.get('authors', [])[:10],  # Limit authors
                     'categories': categories,
                     'relevance_score': paper.get('relevance_score', 0.5),
+                    'has_neurodegeneration': has_neurodegeneration,
+                    'abstract': paper.get('abstract', ''),  # Keep abstract for domain classification
                 }
 
                 processed_papers.append(processed_paper)

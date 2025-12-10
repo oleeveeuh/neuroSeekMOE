@@ -621,7 +621,10 @@ def curate_with_nemo(
     output_jsonl: str,
     use_gpu: bool = False,
     skip_dedup: bool = False,
-    min_relevance_score: float = 0.5
+    min_relevance_score: float = 0.5,
+    word_count_min: int = 100,
+    word_count_max: int = 25000,
+    alphanumeric_ratio_min: float = 0.4
 ):
     """Curate extracted texts using NeMo Curator.
 
@@ -632,6 +635,9 @@ def curate_with_nemo(
         use_gpu: Whether to use GPU for processing
         skip_dedup: Whether to skip deduplication
         min_relevance_score: Minimum relevance score for healthcare content
+        word_count_min: Minimum word count (default: 100)
+        word_count_max: Maximum word count (default: 25000)
+        alphanumeric_ratio_min: Minimum alphanumeric ratio (default: 0.4)
     """
     if not NEMO_CURATOR_AVAILABLE:
         print("NeMo Curator not available. Please install on Linux system.")
@@ -690,8 +696,20 @@ def curate_with_nemo(
                     with open(text_file, 'r', encoding='utf-8', errors='ignore') as tf:
                         text_content = tf.read()
 
-                    if len(text_content.strip()) < 100:
+                    # Apply quality filters
+                    text_content_stripped = text_content.strip()
+
+                    # Word count filter
+                    word_count = len(text_content_stripped.split())
+                    if word_count < word_count_min or word_count > word_count_max:
                         continue
+
+                    # Alphanumeric ratio filter (removes papers with too many special characters/numbers)
+                    alphanumeric_chars = sum(1 for c in text_content_stripped if c.isalnum())
+                    if len(text_content_stripped) > 0:
+                        alphanumeric_ratio = alphanumeric_chars / len(text_content_stripped)
+                        if alphanumeric_ratio < alphanumeric_ratio_min:
+                            continue
 
                     # Enhanced healthcare relevance check with comprehensive keywords
                     healthcare_keywords = [

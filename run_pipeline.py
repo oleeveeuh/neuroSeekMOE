@@ -746,13 +746,19 @@ class PipelineOrchestrator:
                 self.curated_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
                 try:
+                    # Get quality filters from config
+                    quality_filters = nemo_config.get('quality_filters', {})
+
                     curate_with_nemo(
                         text_dir=str(self.text_dir),
                         metadata_jsonl=str(self.metadata_jsonl),
                         output_jsonl=str(self.curated_jsonl),
                         use_gpu=nemo_config.get('use_gpu', False),
                         skip_dedup=nemo_config.get('skip_dedup', False),
-                        min_relevance_score=nemo_config.get('min_relevance_score', 0.5)
+                        min_relevance_score=nemo_config.get('min_relevance_score', 0.5),
+                        word_count_min=quality_filters.get('word_count_min', 100),
+                        word_count_max=quality_filters.get('word_count_max', 25000),
+                        alphanumeric_ratio_min=quality_filters.get('alphanumeric_ratio_min', 0.4)
                     )
                     print(f"curate_with_nemo() completed", flush=True)
                     sys.stdout.flush()

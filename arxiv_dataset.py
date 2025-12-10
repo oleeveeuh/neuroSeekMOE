@@ -55,7 +55,7 @@ class ArXivStreamingDataset(IterableDataset):
     
     def __init__(
         self,
-        text_dir: str,
+        text_dir: Optional[str],
         metadata_jsonl: str,
         tokenizer,
         max_length: int = 512,
@@ -64,9 +64,10 @@ class ArXivStreamingDataset(IterableDataset):
         seed: Optional[int] = None
     ):
         """Initialize streaming dataset.
-        
+
         Args:
             text_dir: Directory containing .txt files (one per paper, from extract step)
+                     If None, expects text data in metadata_jsonl (processed_dataset.jsonl)
             metadata_jsonl: JSONL file with paper metadata (from preprocess step)
                 Expected format: {arxiv_id, text, domains, year, has_neurodegeneration}
             tokenizer: SentencePiece tokenizer (or compatible tokenizer)
@@ -82,13 +83,13 @@ class ArXivStreamingDataset(IterableDataset):
         self.min_length = min_length
         self.shuffle_buffer = shuffle_buffer
         self.seed = seed
-        
+
         # Load metadata mapping
         self.metadata = self._load_metadata()
-        
+
         # Get list of text files
         self.text_files = self._get_text_files()
-        
+
         # Estimate dataset length
         self._estimated_length = None
         
@@ -245,21 +246,30 @@ class ArXivStreamingDataset(IterableDataset):
     
     def _get_text_files(self) -> List[Tuple[str, str]]:
         """Get list of (arxiv_id, file_path) tuples.
-        
+
         Returns:
-            List of (arxiv_id, file_path) tuples
+            List of (arxiv_id, file_path) tuples. If text_dir is None, returns entries from metadata.
         """
         text_files = []
+
+        if self.text_dir is None:
+            # Use entries from metadata (processed_dataset.jsonl contains text directly)
+            print("Using text data from metadata (processed_dataset.jsonl)")
+            for arxiv_id, metadata in self.metadata.items():
+                if metadata.get('text'):  # Has text content
+                    text_files.append((arxiv_id, "metadata"))  # Use "metadata" as placeholder path
+            return text_files
+
         if not os.path.exists(self.text_dir):
             print(f"Warning: Text directory not found: {self.text_dir}")
             return text_files
-        
+
         for filename in os.listdir(self.text_dir):
             if filename.endswith('.txt'):
                 arxiv_id = filename[:-4]  # Remove .txt extension
                 file_path = os.path.join(self.text_dir, filename)
                 text_files.append((arxiv_id, file_path))
-        
+
         return text_files
     
     def _tokenize_text(self, text: str) -> Optional[torch.Tensor]:
@@ -302,19 +312,27 @@ class ArXivStreamingDataset(IterableDataset):
     
     def _process_paper(self, arxiv_id: str, file_path: str) -> Optional[Dict]:
         """Process a single paper file.
-        
+
         Args:
             arxiv_id: ArXiv ID
-            file_path: Path to text file
-            
+            file_path: Path to text file, or "metadata" if text comes from metadata
+
         Returns:
             Dictionary with sample data, or None if processing fails
         """
         try:
-            # Read text file
-            with open(file_path, 'r', encoding='utf-8') as f:
-                text = f.read().strip()
-            
+            # Get text either from file or from metadata
+            if file_path == "metadata":
+                # Get text from metadata (processed_dataset.jsonl)
+                metadata = self.metadata.get(arxiv_id)
+                if not metadata or not metadata.get('text'):
+                    return None
+                text = metadata['text'].strip()
+            else:
+                # Read text file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    text = f.read().strip()
+
             if not text:
                 return None
             

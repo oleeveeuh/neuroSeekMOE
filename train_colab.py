@@ -639,14 +639,34 @@ def main():
     vocab_size = tokenizer.get_piece_size()
     print(f"   Vocabulary size: {vocab_size}")
     
-    # Create dataset
-    dataset = ArXivStreamingDataset(
-        text_dir=args.dataset_text_dir,
-        metadata_jsonl=args.dataset_metadata,
-        tokenizer=tokenizer,
-        max_length=512,
-        min_length=64
-    )
+    # Create dataset - use processed_dataset.jsonl for training data
+    # If text_dir is missing (deleted during cleanup), use processed_dataset
+    if os.path.exists(args.dataset_text_dir):
+        dataset = ArXivStreamingDataset(
+            text_dir=args.dataset_text_dir,
+            metadata_jsonl=args.dataset_metadata,
+            tokenizer=tokenizer,
+            max_length=512,
+            min_length=64
+        )
+    else:
+        print("Warning: text_dir not found, using processed_dataset.jsonl for training")
+        # Point to processed_dataset.jsonl as both source
+        processed_dataset_path = args.dataset_metadata.replace('arxiv_papers.jsonl', 'processed_dataset.jsonl')
+        if not os.path.exists(processed_dataset_path):
+            # Try alternative path
+            processed_dataset_path = args.dataset_metadata.replace('metadata', 'processed_dataset')
+
+        if os.path.exists(processed_dataset_path):
+            dataset = ArXivStreamingDataset(
+                text_dir=None,  # No separate text files
+                metadata_jsonl=processed_dataset_path,
+                tokenizer=tokenizer,
+                max_length=512,
+                min_length=64
+            )
+        else:
+            raise FileNotFoundError(f"Neither text_dir nor processed_dataset.jsonl found. Checked: {processed_dataset_path}")
     print(f"Created dataset with ~{len(dataset)} samples")
     
     # Load model - use SimpleMoEModel from train_real.py

@@ -827,8 +827,8 @@ def batch_expert_forward_expert_choice(
 
         # Debug data types before scatter operation
         if outputs.dtype != weighted_output.dtype:
-            print(f"DEBUG: dtype mismatch - outputs: {outputs.dtype}, weighted_output: {weighted_output.dtype}")
-            print(f"DEBUG: converting weighted_output to match outputs dtype")
+            # print(f"DEBUG: dtype mismatch - outputs: {outputs.dtype}, weighted_output: {weighted_output.dtype}")
+            # print(f"DEBUG: converting weighted_output to match outputs dtype")
             weighted_output = weighted_output.to(outputs.dtype)
 
         # Scatter add: accumulate weighted outputs at token positions

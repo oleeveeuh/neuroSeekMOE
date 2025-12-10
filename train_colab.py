@@ -367,12 +367,12 @@ def train(
         # For now, use provided batch_size
         pass  # Skip auto-detection for now (requires tokenizer access)
     
-    # Create dataloader
+    # Create dataloader - use 0 workers for Colab memory stability
     dataloader = create_dataloader(
         dataset,
         batch_size=batch_size,
-        num_workers=2,  # Reduced for stability
-        pin_memory=True
+        num_workers=0,  # Single-threaded for Colab stability
+        pin_memory=False  # Disable pin_memory for CPU
     )
     
     # Setup optimizer

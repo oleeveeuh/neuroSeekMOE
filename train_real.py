@@ -815,6 +815,8 @@ def batch_expert_forward_expert_choice(
         # Step 2e: Weight by probabilities: weighted_output = expert_probs * expert_output
         # Reshape probabilities to [selected_k, 1] for broadcasting
         expert_prob_expanded = expert_prob.unsqueeze(-1)  # [selected_k, 1]
+        # Ensure probabilities have same dtype as expert_output for scatter operation
+        expert_prob_expanded = expert_prob_expanded.to(expert_output.dtype)
         weighted_output = expert_output * expert_prob_expanded  # [selected_k, embedding_dim]
         
         # Step 2f: Scatter back to outputs tensor at original token indices

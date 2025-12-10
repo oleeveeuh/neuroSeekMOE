@@ -742,8 +742,8 @@ def curate_with_nemo(
                         # Medical conditions + variations
                         'cancer', 'tumor', 'malignant', 'benign', 'metastasis', 'oncology',
                         'diabetes', 'diabetic', 'insulin', 'glucose', 'blood sugar',
-                        'alzheimer', 'alzheimer\\'s', 'dementia', 'cognitive decline',
-                        'parkinson', 'parkinson\\'s', 'tremor', 'movement disorder',
+                        'alzheimer', 'alzheimers', 'dementia', 'cognitive decline',
+                        'parkinson', 'parkinsons', 'tremor', 'movement disorder',
                         'epilepsy', 'seizure', 'seizures', 'convulsion',
                         'stroke', 'cerebral stroke', 'brain attack', 'ischemic',
                         'infection', 'infectious', 'bacterial', 'viral', 'pathogen',

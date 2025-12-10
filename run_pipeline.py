@@ -255,9 +255,9 @@ class PipelineOrchestrator:
                 from data_pipeline import is_colab_environment, is_drive_mounted
                 if is_colab_environment() and is_drive_mounted():
                     drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
-                    eval_output_dir = str(Path(drive_base) / "evaluations")
-                    Path(eval_output_dir).mkdir(parents=True, exist_ok=True)
-                    logger.info(f"Evaluation directory: {eval_output_dir} (Google Drive - direct access)")
+                    self.eval_dir = Path(drive_base) / "evaluations"
+                    self.eval_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Evaluation directory: {self.eval_dir} (Google Drive - direct access)")
                 else:
                     self.eval_dir = Path(eval_output_dir)
                     self.eval_dir.mkdir(parents=True, exist_ok=True)
@@ -277,9 +277,9 @@ class PipelineOrchestrator:
                 from data_pipeline import is_colab_environment, is_drive_mounted
                 if is_colab_environment() and is_drive_mounted():
                     drive_base = self.config['pipeline'].get('drive_base', '/content/drive/MyDrive/neuroMOE_results')
-                    inference_output_dir = str(Path(drive_base) / "inference")
-                    Path(inference_output_dir).mkdir(parents=True, exist_ok=True)
-                    logger.info(f"Inference directory: {inference_output_dir} (Google Drive - direct access)")
+                    self.inference_dir = Path(drive_base) / "inference"
+                    self.inference_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Inference directory: {self.inference_dir} (Google Drive - direct access)")
                 else:
                     self.inference_dir = Path(inference_output_dir)
                     self.inference_dir.mkdir(parents=True, exist_ok=True)

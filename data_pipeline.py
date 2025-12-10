@@ -1106,7 +1106,6 @@ def train_healthcare_tokenizer(
         character_coverage=0.995,  # Slightly reduced for faster training
         num_threads=min(os.cpu_count() or 4, 8),  # Cap threads for efficiency
         input_sentence_size=1000000,  # Limit sentences for faster training
-        shuffle_factor=1,  # Minimal shuffling for speed
     )
 
     # Clean up temp file

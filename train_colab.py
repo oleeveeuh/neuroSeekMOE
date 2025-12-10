@@ -371,7 +371,7 @@ def train(
     dataloader = create_dataloader(
         dataset,
         batch_size=batch_size,
-        num_workers=4,
+        num_workers=2,  # Reduced for stability
         pin_memory=True
     )
     
@@ -452,8 +452,15 @@ def train(
         try:
             batch = next(dataloader_iter)
         except StopIteration:
+            print(f"Dataloader exhausted at step {step}, restarting...")
             dataloader_iter = iter(dataloader)
-            batch = next(dataloader_iter)
+            try:
+                batch = next(dataloader_iter)
+            except StopIteration:
+                print("ERROR: Dataset appears to be empty after restart!")
+                print(f"Dataset length: {len(dataset)}")
+                print("Breaking training loop...")
+                break
         
         # Forward pass with mixed precision
         try:

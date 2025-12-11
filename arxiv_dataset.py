@@ -132,7 +132,12 @@ class ArXivStreamingDataset(IterableDataset):
         missing_categories_count = sum(1 for m in metadata.values() if not m.get('categories'))
         if missing_categories_count > 0:
             print(f"   Found {missing_categories_count} entries without categories, attempting fallback...")
-            self._load_categories_fallback(metadata)
+            # Skip fallback for very large datasets to prevent timeouts in Colab
+            if len(metadata) > 20000:
+                print(f"   Skipping category fallback for large dataset ({len(metadata)} entries) to prevent timeout")
+                print(f"   Proceeding without categories - this may affect some domain-specific features")
+            else:
+                self._load_categories_fallback(metadata)
         
         return metadata
     

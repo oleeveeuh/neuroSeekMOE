@@ -563,63 +563,89 @@ def train_baseline_model(
 
     # Create model
     print(f"\nCreating baseline transformer model...")
-    if model_type == "decoder":
-        print(f"  Model type: Decoder-only (GPT-style, causal attention)")
-        model = DecoderOnlyTransformer(
-            vocab_size=vocab_size,
-            embedding_dim=embedding_dim,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            ff_dim=ff_dim,
-        )
-    else:
-        print(f"  Model type: Encoder-only (bidirectional attention)")
-        model = BaselineTransformer(
-            vocab_size=vocab_size,
-            embedding_dim=embedding_dim,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            ff_dim=ff_dim,
-        )
-    model = model.to(device)
-    
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+    print(f"  Model parameters: vocab_size={vocab_size}, embedding_dim={embedding_dim}, num_layers={num_layers}, num_heads={num_heads}, ff_dim={ff_dim}")
+    print(f"  Device: {device}")
+
+    try:
+        if model_type == "decoder":
+            print(f"  Model type: Decoder-only (GPT-style, causal attention)")
+            print("  Initializing DecoderOnlyTransformer...")
+            model = DecoderOnlyTransformer(
+                vocab_size=vocab_size,
+                embedding_dim=embedding_dim,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                ff_dim=ff_dim,
+            )
+            print("  DecoderOnlyTransformer created successfully")
+        else:
+            print(f"  Model type: Encoder-only (bidirectional attention)")
+            print("  Initializing BaselineTransformer...")
+            model = BaselineTransformer(
+                vocab_size=vocab_size,
+                embedding_dim=embedding_dim,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                ff_dim=ff_dim,
+            )
+            print("  BaselineTransformer created successfully")
+
+        print("  Moving model to device...")
+        model = model.to(device)
+        print("  Model moved to device successfully")
+
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"✅ Model created successfully: {total_params:,} total, {trainable_params:,} trainable")
+
+    except Exception as e:
+        print(f"❌ Error creating model: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None, None, None, None, None, None, None
     
     # Setup optimizer and loss (matching MoE training settings for fair comparison)
-    # Match MoE training settings for fair comparison:
-    # - weight_decay=0.01 (same as MoE, stronger regularization)
-    # - warmup_start=0.1 (same as MoE, 10% of LR instead of 1%)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
-    
-    # Setup learning rate scheduler (warmup + cosine decay) to match MoE training
-    # This ensures fair comparison with MoE model
-    warmup_steps = 2000 if max_steps is not None else 0
-    if max_steps is not None and max_steps > warmup_steps:
-        from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-        warmup_scheduler = LinearLR(
-            optimizer,
-            start_factor=0.1,  # Start at 10% of learning rate (matches MoE training)
-            end_factor=1.0,
-            total_iters=warmup_steps
-        )
-        cosine_scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=max_steps - warmup_steps,
-            eta_min=learning_rate * 0.1
-        )
-        scheduler = SequentialLR(
-            optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[warmup_steps]
-        )
-        print(f"Using learning rate schedule: warmup ({warmup_steps} steps, start=10% LR) + cosine decay (matches MoE training)")
-    else:
-        scheduler = None
-        print("Using constant learning rate (no scheduler)")
-    
+    print("Setting up optimizer and loss...")
+    try:
+        # Match MoE training settings for fair comparison:
+        # - weight_decay=0.01 (same as MoE, stronger regularization)
+        # - warmup_start=0.1 (same as MoE, 10% of LR instead of 1%)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+        criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
+        print("  Optimizer and loss created successfully")
+
+        # Setup learning rate scheduler (warmup + cosine decay) to match MoE training
+        # This ensures fair comparison with MoE model
+        warmup_steps = 2000 if max_steps is not None else 0
+        print(f"  Setting up scheduler with warmup_steps={warmup_steps}, max_steps={max_steps}")
+        if max_steps is not None and max_steps > warmup_steps:
+            from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+            warmup_scheduler = LinearLR(
+                optimizer,
+                start_factor=0.1,  # Start at 10% of learning rate (matches MoE training)
+                end_factor=1.0,
+                total_iters=warmup_steps
+            )
+            cosine_scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=max_steps - warmup_steps,
+                eta_min=learning_rate * 0.1
+            )
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps]
+            )
+            print(f"  Using learning rate schedule: warmup ({warmup_steps} steps, start=10% LR) + cosine decay (matches MoE training)")
+        else:
+            scheduler = None
+            print("  Using constant learning rate (no scheduler)")
+    except Exception as e:
+        print(f"❌ Error setting up optimizer/scheduler: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None, None, None, None, None, None, None
+
     # Create checkpoint directory (include model type in path)
     # Handle case where checkpoint_dir might be a file path instead of directory
     if os.path.isfile(checkpoint_dir):

@@ -2008,10 +2008,11 @@ def evaluate_model(
 
     # Create test dataloader using standard PyTorch DataLoader
     # Use num_workers=0 to avoid worker serialization issues with metadata dict
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, SequentialSampler
     test_dataloader = DataLoader(
         test_dataset,
         batch_size=batch_size,
+        sampler=SequentialSampler(test_dataset),  # Explicitly use SequentialSampler
         shuffle=False,  # Don't shuffle test set
         num_workers=0,  # Single process to avoid metadata sharing issues
         pin_memory=True,

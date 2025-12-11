@@ -406,9 +406,26 @@ def train_baseline_model(
                 return 'Other'
     
     # Classify all papers by domain (same as evaluate.py)
+    print("Creating train/test split...")
     all_files = full_dataset.text_files
+    print(f"Total text files: {len(all_files)}")
+
+    # If using processed_dataset.jsonl with text_dir=None, text_files might be metadata IDs
+    if not all_files and actual_metadata is not None:
+        print("No text files found (using processed_dataset.jsonl), creating file list from metadata...")
+        # Use the metadata entries as our "files" - create tuples (arxiv_id, None) since we don't have file paths
+        # Limit to 5000 for Colab memory constraints
+        all_files = [(arxiv_id, None) for arxiv_id in list(metadata.keys())[:5000]]
+        print(f"Created {len(all_files)} file entries from metadata (limited for Colab)")
+
+    print("Classifying papers by domain...")
     file_domains = []
-    for arxiv_id, file_path in all_files:
+    for item in all_files:
+        # Handle both tuple format (arxiv_id, file_path) and string format (just arxiv_id)
+        if isinstance(item, tuple):
+            arxiv_id, file_path = item
+        else:
+            arxiv_id, file_path = item, None
         meta = metadata.get(arxiv_id, {})
         domains = meta.get('domains', [])
         categories = meta.get('categories', [])

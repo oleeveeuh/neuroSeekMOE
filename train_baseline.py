@@ -328,6 +328,10 @@ def train_baseline_model(
     print(f"Loaded tokenizer (vocab_size={vocab_size})")
     
     # Create dataset - handle missing text directory like train_colab.py
+    print("Creating dataset (this may take a moment)...")
+    import time
+    start_time = time.time()
+
     if dataset_text_dir and not os.path.exists(dataset_text_dir):
         print(f"Warning: text_dir not found ({dataset_text_dir}), using processed_dataset.jsonl for training")
         # Try to find processed_dataset.jsonl
@@ -337,6 +341,7 @@ def train_baseline_model(
 
         if os.path.exists(processed_dataset_path):
             print(f"Using processed_dataset.jsonl: {processed_dataset_path}")
+            print("Initializing ArXivStreamingDataset...")
             full_dataset = ArXivStreamingDataset(
                 text_dir=None,  # No separate text files
                 metadata_jsonl=processed_dataset_path,
@@ -347,6 +352,7 @@ def train_baseline_model(
         else:
             raise FileNotFoundError(f"Neither text_dir nor processed_dataset.jsonl found. Checked: {processed_dataset_path}")
     else:
+        print("Initializing ArXivStreamingDataset with text files...")
         full_dataset = ArXivStreamingDataset(
             text_dir=dataset_text_dir,
             metadata_jsonl=dataset_metadata,
@@ -354,21 +360,62 @@ def train_baseline_model(
             max_length=512,
             min_length=64
         )
+
+    creation_time = time.time() - start_time
+    print(f"Dataset created in {creation_time:.2f} seconds")
     
-    # Load metadata for stratified split (same as evaluate.py)
-    import json
-    from collections import defaultdict
-    metadata = {}
-    if os.path.exists(dataset_metadata):
-        with open(dataset_metadata, 'r') as f:
-            for line in f:
-                if line.strip():
-                    paper = json.loads(line)
-                    arxiv_id = paper.get('arxiv_id', '')
-                    if arxiv_id:
-                        metadata[arxiv_id] = paper
-    
-    # Import classify_paper_domain from evaluate.py
+    # Simple train/test split (90/10) - much faster than complex domain classification
+    print("Creating simple train/test split (90/10)...")
+    import random
+
+    # Get all dataset entries
+    all_entries = list(full_dataset.text_files)  # These are (arxiv_id, file_path) tuples
+    print(f"Total entries: {len(all_entries)}")
+
+    # Simple random split
+    random.shuffle(all_entries)
+    split_point = int(0.9 * len(all_entries))
+    train_files = all_entries[:split_point]
+    test_files = all_entries[split_point:]
+
+    print(f"Train set: {len(train_files)} entries")
+    print(f"Test set: {len(test_files)} entries")
+
+    # Create simple train/test datasets
+    class SplitDataset(ArXivStreamingDataset):
+        def __init__(self, text_files, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.text_files = text_files
+
+    # Determine the actual metadata path to use
+    if dataset_text_dir and not os.path.exists(dataset_text_dir):
+        # Use processed_dataset.jsonl
+        processed_dataset_path = dataset_metadata.replace('arxiv_papers.jsonl', 'processed_dataset.jsonl')
+        if not os.path.exists(processed_dataset_path):
+            processed_dataset_path = dataset_metadata.replace('metadata', 'processed_dataset')
+        actual_metadata = processed_dataset_path if os.path.exists(processed_dataset_path) else dataset_metadata
+        actual_text_dir = None
+    else:
+        actual_metadata = dataset_metadata
+        actual_text_dir = dataset_text_dir
+
+    train_dataset = SplitDataset(
+        train_files,
+        text_dir=actual_text_dir,
+        metadata_jsonl=actual_metadata,
+        tokenizer=tokenizer,
+        max_length=512,
+        min_length=64
+    )
+
+    test_dataset = SplitDataset(
+        test_files,
+        text_dir=actual_text_dir,
+        metadata_jsonl=actual_metadata,
+        tokenizer=tokenizer,
+        max_length=512,
+        min_length=64
+    )
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:

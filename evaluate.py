@@ -845,7 +845,14 @@ def compute_perplexity(
     is_baseline_model = not (hasattr(base_model, 'gate') or hasattr(base_model, 'routed_experts'))
     
     with torch.no_grad():
-        for batch in dataloader:
+        total_batches = len(dataloader)
+        print(f"   Processing {total_batches} batches...")
+
+        for batch_idx, batch in enumerate(dataloader):
+            # Debug: Print progress every 100 batches
+            if batch_idx % 100 == 0 or batch_idx == total_batches - 1:
+                print(f"   Batch {batch_idx + 1}/{total_batches}")
+
             with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
                 # Forward pass
                 if activation_hook is not None and not is_baseline_model:
@@ -1058,7 +1065,9 @@ def compute_perplexity(
             # Accumulate loss (weighted by tokens)
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
-    
+
+        print(f"   Completed processing {batch_idx + 1} batches")
+
     if total_tokens == 0:
         print("\n🚨 CRITICAL ERROR: No tokens processed!")
         print("   This means:")

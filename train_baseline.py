@@ -528,22 +528,24 @@ def train_baseline_model(
     
     print(f"Train dataset: {len(train_files)} papers")
     print(f"Test dataset: {len(test_files)} papers")
-    
-    # Create dataloaders
+
+    # Create dataloaders - use num_workers=0 for Colab compatibility
+    print("Creating dataloaders...")
     train_dataloader = create_dataloader(
         train_dataset,
         batch_size=batch_size,
-        num_workers=2,
+        num_workers=0,  # Use 0 workers for Colab to avoid multiprocessing issues
         pin_memory=True
     )
-    
+
     test_dataloader = create_dataloader(
         test_dataset,
         batch_size=batch_size,
-        num_workers=2,
+        num_workers=0,  # Use 0 workers for Colab to avoid multiprocessing issues
         pin_memory=True
     )
-    
+    print("Dataloaders created successfully")
+
     # Create model
     print(f"\nCreating baseline transformer model...")
     if model_type == "decoder":

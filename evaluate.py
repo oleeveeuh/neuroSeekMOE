@@ -1902,9 +1902,6 @@ def evaluate_model(
                     print(f"DEBUG: No text found in metadata for {arxiv_id}")
                     raise ValueError(f"No text found in metadata for {arxiv_id}")
 
-                # Debug: Show text sample
-                text_sample = text[:100] + "..." if len(text) > 100 else text
-                print(f"DEBUG: Loaded text for {arxiv_id} (length: {len(text)}): {text_sample}")
                 return text
             else:
                 # Fallback to original file-based loading
@@ -1930,7 +1927,14 @@ def evaluate_model(
             if hasattr(self.tokenizer, 'encode'):
                 # SentencePiece tokenizer
                 tokens = self.tokenizer.encode(text)
-                input_ids = tokens.ids
+                # Handle both SentencePiece object and simple list return types
+                if hasattr(tokens, 'ids'):
+                    input_ids = tokens.ids
+                elif isinstance(tokens, list):
+                    input_ids = tokens
+                else:
+                    # Fallback: convert to list
+                    input_ids = list(tokens)
             else:
                 # HuggingFace tokenizer
                 tokens = self.tokenizer(text, truncation=True, max_length=self.max_length)

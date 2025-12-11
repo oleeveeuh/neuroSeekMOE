@@ -126,7 +126,9 @@ def create_test_config(base_config_path: str, test_config_path: str, max_papers:
     config['extraction']['rate_limit'] = 0.5
 
     # Save test config
-    os.makedirs(os.path.dirname(test_config_path), exist_ok=True)
+    test_config_dir = os.path.dirname(test_config_path)
+    if test_config_dir:  # Only create directory if path has a directory component
+        os.makedirs(test_config_dir, exist_ok=True)
     with open(test_config_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 

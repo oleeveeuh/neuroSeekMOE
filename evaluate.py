@@ -1913,8 +1913,54 @@ def evaluate_model(
 
         def __getitem__(self, idx):
             """Get item from dataset - CRITICAL missing method!"""
-            # Use parent class's __getitem__ which handles tokenization, filtering, etc.
-            return super().__getitem__(idx)
+            # Get the paper info
+            arxiv_id, file_path = self.text_files[idx]
+
+            # Load text using our custom _load_text method
+            text = self._load_text(arxiv_id, file_path)
+
+            # Get metadata for this paper
+            meta = self.metadata.get(arxiv_id, {})
+            domains = meta.get('domains', ['general_ml_health'])
+            categories = meta.get('categories', [])
+            title = meta.get('title', '')
+            abstract = meta.get('abstract', '')
+
+            # Tokenize text
+            if hasattr(self.tokenizer, 'encode'):
+                # SentencePiece tokenizer
+                tokens = self.tokenizer.encode(text)
+                input_ids = tokens.ids
+            else:
+                # HuggingFace tokenizer
+                tokens = self.tokenizer(text, truncation=True, max_length=self.max_length)
+                input_ids = tokens['input_ids']
+
+            # Apply length filtering
+            if len(input_ids) < self.min_length:
+                # Pad with padding token
+                input_ids = [0] * self.min_length
+
+            if len(input_ids) > self.max_length:
+                input_ids = input_ids[:self.max_length]
+
+            # Create target_ids (input_ids shifted by 1 for causal LM)
+            target_ids = input_ids[1:] + [0]  # Add padding token at end
+
+            # Convert to tensors
+            input_ids = torch.tensor(input_ids, dtype=torch.long)
+            target_ids = torch.tensor(target_ids, dtype=torch.long)
+
+            return {
+                'input_ids': input_ids,
+                'target_ids': target_ids,
+                'arxiv_id': arxiv_id,
+                'domains': domains,
+                'categories': categories,
+                'title': title,
+                'abstract': abstract,
+                'attention_mask': (input_ids != 0).long()
+            }
     
     test_dataset = TestDataset(
         test_files,

@@ -1910,6 +1910,11 @@ def evaluate_model(
                 # Fallback to original file-based loading
                 print(f"DEBUG: Using file-based loading for {arxiv_id}")
                 return super()._load_text(arxiv_id, file_path)
+
+        def __getitem__(self, idx):
+            """Get item from dataset - CRITICAL missing method!"""
+            # Use parent class's __getitem__ which handles tokenization, filtering, etc.
+            return super().__getitem__(idx)
     
     test_dataset = TestDataset(
         test_files,

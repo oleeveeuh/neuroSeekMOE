@@ -775,40 +775,51 @@ def compute_perplexity(
     print(f"   🔍 Testing first batch...")
     batch_count = 0
     try:
+        print(f"   🔍 Debugging DataLoader iteration...")
+        print(f"      DataLoader type: {type(dataloader)}")
+        print(f"      DataLoader batch_size: {dataloader.batch_size}")
+        print(f"      DataLoader sampler: {type(dataloader.sampler) if hasattr(dataloader, 'sampler') else 'N/A'}")
+        print(f"      DataLoader collate_fn: {type(dataloader.collate_fn)}")
+
+        # Test the collate function directly
+        print(f"   🔍 Testing collate function directly...")
+        test_items = [test_dataset[0], test_dataset[1]]
+        try:
+            test_batch = dataloader.collate_fn(test_items)
+            print(f"      ✅ Collate function works! Batch keys: {list(test_batch.keys())}")
+            for key, value in test_batch.items():
+                if isinstance(value, torch.Tensor):
+                    print(f"         {key}: {value.shape}")
+                else:
+                    print(f"         {key}: {len(value)} items")
+        except Exception as collate_error:
+            print(f"      ❌ Collate function failed: {collate_error}")
+            import traceback
+            print(f"         Traceback: {traceback.format_exc()}")
+
+        # Now try the actual dataloader iteration
+        print(f"   🔍 Testing actual DataLoader iteration...")
         for i, batch in enumerate(dataloader):
             batch_count += 1
-            print(f"      Batch {batch_count}: {type(batch)}")
+            print(f"      ✅ Batch {batch_count} received successfully!")
+            print(f"         Type: {type(batch)}")
             if isinstance(batch, dict):
-                print(f"      Batch keys: {list(batch.keys())}")
+                print(f"         Keys: {list(batch.keys())}")
                 for key, value in batch.items():
                     if isinstance(value, torch.Tensor):
                         print(f"         {key}: {value.shape} (dtype: {value.dtype})")
-                        # Check for invalid tensors
-                        if value.numel() == 0:
-                            print(f"         ❌ EMPTY TENSOR for {key}")
-                        if torch.isnan(value).any():
-                            print(f"         ❌ NAN VALUES in {key}")
                     else:
-                        print(f"         {key}: {type(value)}")
-
-                # Check if input_ids are reasonable
-                if 'input_ids' in batch:
-                    input_ids = batch['input_ids']
-                    print(f"      Input ID range: {input_ids.min().item()} to {input_ids.max().item()}")
-                    if input_ids.max() >= adapter.vocab_size:
-                        print(f"      ❌ VOCAB SIZE MISMATCH: max token {input_ids.max().item()} >= vocab_size {adapter.vocab_size}")
-
-            else:
-                print(f"      Batch type: {type(batch)}")
+                        print(f"         {key}: {type(value)} (len: {len(value)})")
 
             if batch_count >= 1:  # Only check first batch
                 break
+
     except Exception as e:
-        print(f"   ❌ Error processing batch: {e}")
+        print(f"   ❌ Error in DataLoader iteration: {e}")
         import traceback
         print(f"      Traceback: {traceback.format_exc()}")
 
-    print(f"   🔍 Actual batches available: {batch_count}")
+    print(f"   🔍 Actual batches processed: {batch_count}")
 
     if batch_count == 0:
         print(f"   ❌ DATALOADER ISSUE: No batches yielded!")

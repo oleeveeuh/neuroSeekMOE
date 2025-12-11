@@ -737,6 +737,40 @@ def compute_perplexity(
             first_paper_id, first_paper_path = dataloader.dataset.papers[0]
             print(f"      First paper: {first_paper_id} -> {first_paper_path}")
 
+    # Debug: Try to process dataset items directly
+    print(f"   🔍 Testing dataset items directly...")
+    try:
+        dataset = dataloader.dataset
+        print(f"      Dataset type: {type(dataset)}")
+        print(f"      Dataset length: {len(dataset)}")
+
+        # Try to get first few items
+        for i in range(min(3, len(dataset))):
+            try:
+                print(f"      Getting item {i}...")
+                item = dataset[i]
+                print(f"      ✅ Item {i}: {type(item)}")
+                if isinstance(item, dict):
+                    print(f"         Keys: {list(item.keys())}")
+                    for key, value in item.items():
+                        if isinstance(value, torch.Tensor):
+                            print(f"         {key}: {value.shape}")
+                        elif isinstance(value, str):
+                            print(f"         {key}: {len(value)} chars")
+                        else:
+                            print(f"         {key}: {type(value)}")
+
+            except Exception as item_error:
+                print(f"      ❌ Error getting item {i}: {item_error}")
+                import traceback
+                print(f"         Traceback: {traceback.format_exc()}")
+                break
+
+    except Exception as e:
+        print(f"   ❌ Error accessing dataset: {e}")
+        import traceback
+        print(f"      Traceback: {traceback.format_exc()}")
+
     # Debug: Try to process one batch manually
     print(f"   🔍 Testing first batch...")
     batch_count = 0

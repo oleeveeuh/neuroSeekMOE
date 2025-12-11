@@ -1993,13 +1993,25 @@ def evaluate_model(
     print(f"   Sample test paper: {first_arxiv_id}")
     print(f"   Sample path: {first_path}")
 
-    # Create test dataloader
+    # Create test dataloader using standard PyTorch DataLoader
     # Use num_workers=0 to avoid worker serialization issues with metadata dict
-    test_dataloader = create_dataloader(
+    from torch.utils.data import DataLoader
+    test_dataloader = DataLoader(
         test_dataset,
         batch_size=batch_size,
+        shuffle=False,  # Don't shuffle test set
         num_workers=0,  # Single process to avoid metadata sharing issues
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=lambda batch: {
+            'input_ids': torch.stack([item['input_ids'] for item in batch]),
+            'target_ids': torch.stack([item['target_ids'] for item in batch]),
+            'attention_mask': torch.stack([item['attention_mask'] for item in batch]),
+            'arxiv_ids': [item['arxiv_id'] for item in batch],
+            'domains': [item['domains'] for item in batch],
+            'categories': [item['categories'] for item in batch],
+            'titles': [item['title'] for item in batch],
+            'abstracts': [item['abstract'] for item in batch]
+        }
     )
     
     # Initialize activation hook for capturing expert routing

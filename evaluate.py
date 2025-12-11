@@ -783,8 +783,10 @@ def compute_perplexity(
 
         # Test the collate function directly
         print(f"   🔍 Testing collate function directly...")
-        test_items = [test_dataset[0], test_dataset[1]]
         try:
+            # Get dataset reference from dataloader
+            dataset = dataloader.dataset
+            test_items = [dataset[0], dataset[1]]
             test_batch = dataloader.collate_fn(test_items)
             print(f"      ✅ Collate function works! Batch keys: {list(test_batch.keys())}")
             for key, value in test_batch.items():

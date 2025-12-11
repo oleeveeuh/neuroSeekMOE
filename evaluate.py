@@ -1973,6 +1973,10 @@ def evaluate_model(
                 'abstract': abstract,
                 'attention_mask': (input_ids != 0).long()
             }
+
+        def __len__(self):
+            """Return the number of samples in the dataset."""
+            return len(self.text_files)
     
     test_dataset = TestDataset(
         test_files,

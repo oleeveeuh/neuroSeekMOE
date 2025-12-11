@@ -288,37 +288,16 @@ class ExpertActivationHook:
                             probs[paper_idx, expert_idx] = 0.0
                 
                 # Find papers that actually have tokens
-                    papers_with_tokens = np.where(token_counts.sum(axis=1) > 0)[0]
-                    if len(papers_with_tokens) > 0:
+                papers_with_tokens = np.where(token_counts.sum(axis=1) > 0)[0]
+                if len(papers_with_tokens) > 0:
+                    # Only print summary statistics every 50th call to reduce noise
+                    if len(self.expert_activations_list) % 50 == 0 or len(self.expert_activations_list) < 5:
                         paper_idx = papers_with_tokens[0]
-                        print(f"  Papers with tokens: {papers_with_tokens[:5]}...")
-                        print(f"  probs for paper {paper_idx}: {probs[paper_idx]}")
-                        print(f"  token_counts for paper {paper_idx}: {token_counts[paper_idx]}")
-                    else:
-                        print(f"  WARNING: No papers have tokens mapped!")
-                    print(f"  expert_probs_all shape: {expert_probs_all.shape}")
-                    print(f"  expert_probs_all sample (expert 0, first 5 tokens): {expert_probs_all[0, :5] if expert_probs_all.shape[1] >= 5 else expert_probs_all[0]}")
-                    
-                    # Show sample token selections
-                    print(f"  Sample token selections:")
-                    for expert_idx in range(min(4, num_experts)):
-                        selected = expert_token_selections[expert_idx]
-                        print(f"    Expert {expert_idx}: selected tokens {selected[:5]}..." if len(selected) > 5 else f"    Expert {expert_idx}: selected tokens {selected}")
-                    
-                    # Check if Expert 2 has lower probabilities in expert_probs_all
-                    if expert_probs_all.shape[0] >= 3:
-                        expert_2_probs = expert_probs_all[2, :]  # All tokens for Expert 2
-                        other_experts_probs = np.concatenate([expert_probs_all[:2, :], expert_probs_all[3:, :]], axis=0)
-                        print(f"  Expert 2 avg prob across all tokens: {np.mean(expert_2_probs):.6f}")
-                        print(f"  Other experts avg prob: {np.mean(other_experts_probs):.6f}")
-                        print(f"  Expert 2 max prob: {np.max(expert_2_probs):.6f}")
-                        print(f"  Other experts max prob: {np.max(other_experts_probs):.6f}")
-                        
-                        # Check how many tokens Expert 2 selected
-                        expert_2_selected = len(expert_token_selections[2])
-                        other_selected = [len(expert_token_selections[i]) for i in range(len(expert_token_selections)) if i != 2]
-                        print(f"  Expert 2 selected {expert_2_selected} tokens")
-                        print(f"  Other experts selected: {other_selected}")
+                        total_activations = activations.sum()
+                        unique_experts_used = len(np.where(probs[paper_idx] > 0)[0])
+                        print(f"  Batch {len(self.expert_activations_list)}: {len(papers_with_tokens)} papers, {total_activations} total activations, {unique_experts_used} experts active for paper {paper_idx}")
+                else:
+                    print(f"  WARNING: No papers have tokens mapped!")
             else:
                 # Fallback: average over sequence (when batch_size == 0)
                 gate_logits_avg = gate_logits_np.mean(axis=0, keepdims=True)

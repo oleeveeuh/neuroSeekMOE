@@ -708,15 +708,26 @@ class InferencePipeline:
         
         for paper in papers:
             paper_id = paper.get('arxiv_id', paper.get('id', 'unknown'))
-            
-            # Load text
-            text_file = os.path.join(dataset_text_dir, f"{paper_id}.txt")
-            if not os.path.exists(text_file):
-                print(f"Warning: Text file not found for {paper_id}, skipping...")
-                continue
-            
-            with open(text_file, 'r', encoding='utf-8') as f:
-                full_text = f.read()
+
+            # Load text - try text file first, then use metadata
+            if dataset_text_dir and os.path.exists(dataset_text_dir):
+                text_file = os.path.join(dataset_text_dir, f"{paper_id}.txt")
+                if os.path.exists(text_file):
+                    with open(text_file, 'r', encoding='utf-8') as f:
+                        full_text = f.read()
+                else:
+                    print(f"Warning: Text file not found for {paper_id}, trying metadata...")
+                    # Use text from metadata (processed_dataset.jsonl)
+                    full_text = paper.get('text', '')
+                    if not full_text:
+                        print(f"Warning: No text in metadata for {paper_id}, skipping...")
+                        continue
+            else:
+                # Use text from metadata (processed_dataset.jsonl)
+                full_text = paper.get('text', '')
+                if not full_text:
+                    print(f"Warning: No text in metadata for {paper_id}, skipping...")
+                    continue
             
             # Prepare input (first max_input_length characters)
             input_text = full_text[:max_input_length]
@@ -1345,15 +1356,26 @@ class InferencePipeline:
         
         for paper in papers:
             paper_id = paper.get('arxiv_id', paper.get('id', 'unknown'))
-            
-            # Load text
-            text_file = os.path.join(dataset_text_dir, f"{paper_id}.txt")
-            if not os.path.exists(text_file):
-                print(f"Warning: Text file not found for {paper_id}, skipping...")
-                continue
-            
-            with open(text_file, 'r', encoding='utf-8') as f:
-                full_text = f.read()
+
+            # Load text - try text file first, then use metadata
+            if dataset_text_dir and os.path.exists(dataset_text_dir):
+                text_file = os.path.join(dataset_text_dir, f"{paper_id}.txt")
+                if os.path.exists(text_file):
+                    with open(text_file, 'r', encoding='utf-8') as f:
+                        full_text = f.read()
+                else:
+                    print(f"Warning: Text file not found for {paper_id}, trying metadata...")
+                    # Use text from metadata (processed_dataset.jsonl)
+                    full_text = paper.get('text', '')
+                    if not full_text:
+                        print(f"Warning: No text in metadata for {paper_id}, skipping...")
+                        continue
+            else:
+                # Use text from metadata (processed_dataset.jsonl)
+                full_text = paper.get('text', '')
+                if not full_text:
+                    print(f"Warning: No text in metadata for {paper_id}, skipping...")
+                    continue
             
             # Prepare input (first max_input_length characters)
             input_text = full_text[:max_input_length]

@@ -531,6 +531,21 @@ def train_baseline_model(
 
     # Create dataloaders - use num_workers=0 for Colab compatibility
     print("Creating dataloaders...")
+
+    # Test if we can access the first sample before creating dataloaders
+    print("Testing dataset access...")
+    try:
+        sample_iter = iter(train_dataset)
+        first_sample = next(sample_iter)
+        print(f"✅ Successfully accessed first sample: {type(first_sample)}")
+        if isinstance(first_sample, dict):
+            print(f"   Keys: {list(first_sample.keys())}")
+            if 'input_ids' in first_sample:
+                print(f"   Input IDs shape: {first_sample['input_ids'].shape}")
+    except Exception as e:
+        print(f"❌ Error accessing dataset: {e}")
+        return None, None, None, None, None, None, None, None, None
+
     train_dataloader = create_dataloader(
         train_dataset,
         batch_size=batch_size,

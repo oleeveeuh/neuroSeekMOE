@@ -327,14 +327,33 @@ def train_baseline_model(
     vocab_size = tokenizer.get_piece_size()
     print(f"Loaded tokenizer (vocab_size={vocab_size})")
     
-    # Create dataset
-    full_dataset = ArXivStreamingDataset(
-        text_dir=dataset_text_dir,
-        metadata_jsonl=dataset_metadata,
-        tokenizer=tokenizer,
-        max_length=512,
-        min_length=64
-    )
+    # Create dataset - handle missing text directory like train_colab.py
+    if dataset_text_dir and not os.path.exists(dataset_text_dir):
+        print(f"Warning: text_dir not found ({dataset_text_dir}), using processed_dataset.jsonl for training")
+        # Try to find processed_dataset.jsonl
+        processed_dataset_path = dataset_metadata.replace('arxiv_papers.jsonl', 'processed_dataset.jsonl')
+        if not os.path.exists(processed_dataset_path):
+            processed_dataset_path = dataset_metadata.replace('metadata', 'processed_dataset')
+
+        if os.path.exists(processed_dataset_path):
+            print(f"Using processed_dataset.jsonl: {processed_dataset_path}")
+            full_dataset = ArXivStreamingDataset(
+                text_dir=None,  # No separate text files
+                metadata_jsonl=processed_dataset_path,
+                tokenizer=tokenizer,
+                max_length=512,
+                min_length=64
+            )
+        else:
+            raise FileNotFoundError(f"Neither text_dir nor processed_dataset.jsonl found. Checked: {processed_dataset_path}")
+    else:
+        full_dataset = ArXivStreamingDataset(
+            text_dir=dataset_text_dir,
+            metadata_jsonl=dataset_metadata,
+            tokenizer=tokenizer,
+            max_length=512,
+            min_length=64
+        )
     
     # Load metadata for stratified split (same as evaluate.py)
     import json
@@ -467,25 +486,41 @@ def train_baseline_model(
     for domain, count in sorted(test_domains.items()):
         print(f"  {domain}: {count} papers ({count/len(test_files)*100:.1f}%)")
     
-    # Create train/test datasets
+    # Create train/test datasets - handle missing text directory
     class SplitDataset(ArXivStreamingDataset):
         def __init__(self, text_files, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.text_files = text_files
-    
+
+    # Determine the correct metadata path (processed_dataset.jsonl if text_dir is missing)
+    actual_metadata = dataset_metadata
+    actual_text_dir = dataset_text_dir
+
+    if dataset_text_dir and not os.path.exists(dataset_text_dir):
+        # Use processed_dataset.jsonl instead
+        processed_dataset_path = dataset_metadata.replace('arxiv_papers.jsonl', 'processed_dataset.jsonl')
+        if not os.path.exists(processed_dataset_path):
+            processed_dataset_path = dataset_metadata.replace('metadata', 'processed_dataset')
+
+        if os.path.exists(processed_dataset_path):
+            actual_metadata = processed_dataset_path
+            actual_text_dir = None
+        else:
+            raise FileNotFoundError(f"Neither text_dir nor processed_dataset.jsonl found. Checked: {processed_dataset_path}")
+
     train_dataset = SplitDataset(
         train_files,
-        text_dir=dataset_text_dir,
-        metadata_jsonl=dataset_metadata,
+        text_dir=actual_text_dir,
+        metadata_jsonl=actual_metadata,
         tokenizer=tokenizer,
         max_length=512,
         min_length=64
     )
-    
+
     test_dataset = SplitDataset(
         test_files,
-        text_dir=dataset_text_dir,
-        metadata_jsonl=dataset_metadata,
+        text_dir=actual_text_dir,
+        metadata_jsonl=actual_metadata,
         tokenizer=tokenizer,
         max_length=512,
         min_length=64

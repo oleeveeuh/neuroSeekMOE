@@ -277,12 +277,36 @@ def train_baseline_model(
 
     # Create dataloader - SAME LOGIC AS TRAIN_COLAB.PY
     print("Creating dataloader...")
+    print(f"Dataset text_files length: {len(dataset.text_files)}")
+    if len(dataset.text_files) > 0:
+        print(f"First few text files: {dataset.text_files[:3]}")
+    else:
+        print("ERROR: No text files found in dataset!")
+
     dataloader = create_dataloader(
         dataset,
         batch_size=batch_size,
         num_workers=0,  # Single-threaded for Colab stability (same as train_colab.py)
         pin_memory=False  # Disable pin_memory for CPU (same as train_colab.py)
     )
+
+    # Test the dataloader immediately
+    print("Testing dataloader...")
+    try:
+        test_batch = next(iter(dataloader))
+        print(f"✅ Test batch successful: {type(test_batch)}, keys: {list(test_batch.keys())}")
+        print(f"Input IDs shape: {test_batch['input_ids'].shape}")
+    except Exception as e:
+        print(f"❌ Dataloader test failed: {e}")
+        print("Trying to debug dataset directly...")
+
+        # Try to get one sample directly from dataset
+        try:
+            sample = next(iter(dataset))
+            print(f"✅ Direct dataset sample: {type(sample)}, keys: {list(sample.keys()) if isinstance(sample, dict) else 'Not a dict'}")
+        except Exception as e2:
+            print(f"❌ Direct dataset access failed: {e2}")
+            return None
 
     # Create model
     print(f"\nCreating baseline transformer model...")

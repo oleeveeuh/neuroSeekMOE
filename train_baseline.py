@@ -204,10 +204,10 @@ def train_baseline_model(
     output_dir: str,
     checkpoint_dir: str,
     model_type: str = "encoder",
-    epochs: int = 10,
+    epochs: int = 10,  # Kept for backward compatibility but not used
     batch_size: int = 8,
     gradient_accumulation: int = 4,
-    max_steps: int = None,
+    max_steps: int = 5000,  # Default to 5000 steps like train_colab.py
     learning_rate: float = 5e-4,
     embedding_dim: int = 256,
     num_layers: int = 6,
@@ -319,17 +319,42 @@ def train_baseline_model(
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
     print("  Optimizer and loss created successfully")
 
-    # Simple training loop (same as train_colab.py - no complex evaluation)
+    # Step-based training loop (same as train_colab.py)
     print("\nStarting training...")
+    print(f"   Device: {device}")
+    print(f"   Batch size: {batch_size}")
+    print(f"   Gradient accumulation: {gradient_accumulation}")
+    print(f"   Effective batch size: {batch_size * gradient_accumulation}")
+    print(f"   Max steps: {max_steps}")
+    print("=" * 60)
+
     model.train()
     global_step = 0
     start_time = time.time()
 
-    for epoch in range(epochs):
-        epoch_loss = 0.0
-        num_batches = 0
+    # Create dataloader iterator (same as train_colab.py)
+    dataloader_iter = iter(dataloader)
+    accumulated_loss = 0.0
 
-        for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")):
+    while global_step < max_steps:
+        # Zero gradients at start of accumulation
+        if global_step % gradient_accumulation == 0:
+            optimizer.zero_grad()
+
+        try:
+            batch = next(dataloader_iter)
+        except StopIteration:
+            print(f"Dataloader exhausted at step {global_step}, restarting...")
+            dataloader_iter = iter(dataloader)
+            try:
+                batch = next(dataloader_iter)
+            except StopIteration:
+                print("ERROR: Dataset appears to be empty after restart!")
+                print(f"Dataset length: {len(dataset)}")
+                print("Breaking training loop...")
+                break
+
+        try:
             # Move batch to device
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch.get('attention_mask')
@@ -337,59 +362,63 @@ def train_baseline_model(
                 attention_mask = attention_mask.to(device)
 
             # Forward pass
-            optimizer.zero_grad()
             logits = model(input_ids, attention_mask=attention_mask)
 
-            # Compute loss (language modeling - predict next token)
-            # Shift input_ids for causal models or use input_ids directly for encoder
+            # Compute loss (language modeling)
             if model_type == "decoder":
                 # For decoder, predict next token
                 targets = input_ids[:, 1:].contiguous()
                 logits = logits[:, :-1, :].contiguous()
             else:
-                # For encoder, use same input (reconstruction or MLM style)
+                # For encoder, use same input
                 targets = input_ids
 
             # Flatten for loss computation
             loss = criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
 
+            # Scale loss for gradient accumulation (same as train_colab.py)
+            loss = loss / gradient_accumulation
+
             # Backward pass
             loss.backward()
 
-            if (batch_idx + 1) % gradient_accumulation == 0:
+            accumulated_loss += loss.item() * gradient_accumulation
+
+            # Step optimizer after accumulation
+            if (global_step + 1) % gradient_accumulation == 0:
                 optimizer.step()
-                optimizer.zero_grad()
 
-            epoch_loss += loss.item()
-            num_batches += 1
-            global_step += 1
+        except RuntimeError as e:
+            print(f"Error in step {global_step}: {e}")
+            continue
 
-            # Print progress
-            if global_step % 100 == 0:
-                current_lr = optimizer.param_groups[0]['lr']
-                elapsed = time.time() - start_time
-                print(f"  Step {global_step}: loss={loss.item():.4f}, lr={current_lr:.6f}, time={elapsed:.1f}s")
+        global_step += 1
 
-            # Save checkpoint
-            if global_step % save_interval == 0:
-                checkpoint_path = os.path.join(checkpoint_dir, f"step_{global_step}.pt")
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'global_step': global_step,
-                    'loss': loss.item(),
-                    'model_type': model_type,
-                    'vocab_size': vocab_size,
-                    'embedding_dim': embedding_dim,
-                    'num_layers': num_layers,
-                    'num_heads': num_heads,
-                    'ff_dim': ff_dim,
-                }, checkpoint_path)
-                print(f"  Checkpoint saved: {checkpoint_path}")
+        # Print progress
+        if global_step % 100 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            avg_loss = accumulated_loss / min(100, global_step) if accumulated_loss > 0 else 0
+            elapsed = time.time() - start_time
+            print(f"  Step {global_step}: loss={avg_loss:.4f}, lr={current_lr:.6f}, time={elapsed:.1f}s")
+            accumulated_loss = 0.0
 
-        # Print epoch summary
-        avg_loss = epoch_loss / num_batches if num_batches > 0 else 0
-        print(f"Epoch {epoch+1} completed - avg loss: {avg_loss:.4f}")
+        # Save checkpoint
+        if global_step % save_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"step_{global_step}.pt")
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'global_step': global_step,
+                'model_type': model_type,
+                'vocab_size': vocab_size,
+                'embedding_dim': embedding_dim,
+                'num_layers': num_layers,
+                'num_heads': num_heads,
+                'ff_dim': ff_dim,
+            }, checkpoint_path)
+            print(f"  Checkpoint saved: {checkpoint_path}")
+
+    print(f"Training completed at step {global_step}")
 
     # Save final model
     final_model_path = os.path.join(checkpoint_dir, f"baseline_{model_type}_final.pt")
@@ -423,10 +452,10 @@ def main():
     parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints/baseline', help="Directory for model checkpoints")
 
     parser.add_argument('--model-type', type=str, default='encoder', choices=['encoder', 'decoder'], help="Model type")
-    parser.add_argument('--epochs', type=int, default=10, help="Number of training epochs")
+    parser.add_argument('--epochs', type=int, default=10, help="Number of training epochs (unused - training is step-based)")
     parser.add_argument('--batch-size', type=int, default=8, help="Batch size")
     parser.add_argument('--gradient-accumulation', type=int, default=4, help="Gradient accumulation steps")
-    parser.add_argument('--max-steps', type=int, default=None, help="Maximum training steps")
+    parser.add_argument('--max-steps', type=int, default=5000, help="Maximum training steps")
     parser.add_argument('--learning-rate', type=float, default=5e-4, help="Learning rate")
 
     parser.add_argument('--embedding-dim', type=int, default=256, help="Embedding dimension")

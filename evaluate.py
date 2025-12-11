@@ -708,13 +708,13 @@ def compute_perplexity(
     activation_hook: Optional[ExpertActivationHook] = None
 ) -> Tuple[float, Dict]:
     """Compute perplexity on test set with domain-specific metrics.
-    
+
     Args:
         model: Trained model
         adapter: Model adapter
         dataloader: DataLoader for test data
         activation_hook: Optional hook to capture expert activations
-        
+
     Returns:
         Tuple of (overall_perplexity, domain_metrics_dict)
         - overall_perplexity: Overall perplexity score
@@ -723,6 +723,67 @@ def compute_perplexity(
     model.eval()
     total_loss = 0.0
     total_tokens = 0
+
+    # Debug: Check dataloader
+    print(f"   🔍 Debugging dataloader...")
+    print(f"      Dataloader length: {len(dataloader)}")
+    print(f"      Batch size: {dataloader.batch_size}")
+    print(f"      Dataset length: {len(dataloader.dataset)}")
+
+    # Debug: Check dataset items
+    if hasattr(dataloader.dataset, 'papers'):
+        print(f"      Dataset papers: {len(dataloader.dataset.papers)}")
+        if dataloader.dataset.papers:
+            first_paper_id, first_paper_path = dataloader.dataset.papers[0]
+            print(f"      First paper: {first_paper_id} -> {first_paper_path}")
+
+    # Debug: Try to process one batch manually
+    print(f"   🔍 Testing first batch...")
+    batch_count = 0
+    try:
+        for i, batch in enumerate(dataloader):
+            batch_count += 1
+            print(f"      Batch {batch_count}: {type(batch)}")
+            if isinstance(batch, dict):
+                print(f"      Batch keys: {list(batch.keys())}")
+                for key, value in batch.items():
+                    if isinstance(value, torch.Tensor):
+                        print(f"         {key}: {value.shape} (dtype: {value.dtype})")
+                        # Check for invalid tensors
+                        if value.numel() == 0:
+                            print(f"         ❌ EMPTY TENSOR for {key}")
+                        if torch.isnan(value).any():
+                            print(f"         ❌ NAN VALUES in {key}")
+                    else:
+                        print(f"         {key}: {type(value)}")
+
+                # Check if input_ids are reasonable
+                if 'input_ids' in batch:
+                    input_ids = batch['input_ids']
+                    print(f"      Input ID range: {input_ids.min().item()} to {input_ids.max().item()}")
+                    if input_ids.max() >= adapter.vocab_size:
+                        print(f"      ❌ VOCAB SIZE MISMATCH: max token {input_ids.max().item()} >= vocab_size {adapter.vocab_size}")
+
+            else:
+                print(f"      Batch type: {type(batch)}")
+
+            if batch_count >= 1:  # Only check first batch
+                break
+    except Exception as e:
+        print(f"   ❌ Error processing batch: {e}")
+        import traceback
+        print(f"      Traceback: {traceback.format_exc()}")
+
+    print(f"   🔍 Actual batches available: {batch_count}")
+
+    if batch_count == 0:
+        print(f"   ❌ DATALOADER ISSUE: No batches yielded!")
+        print(f"   🔧 Possible causes:")
+        print(f"      1. Dataset is empty")
+        print(f"      2. Tokenizer is failing to tokenize text")
+        print(f"      3. All sequences are being filtered out")
+        print(f"      4. Memory issues preventing batch creation")
+        return float('inf'), {}
     
     # Track per-domain metrics
     domain_losses = defaultdict(float)

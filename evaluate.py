@@ -1603,10 +1603,30 @@ def evaluate_model(
         max_length=512,
         min_length=64
     )
-    
+
     # Split into test set with stratified sampling to preserve domain distribution
     all_files = full_dataset.text_files
     metadata = full_dataset.metadata
+
+    # If no text files found (directory missing), create paper list from metadata
+    if not all_files:
+        print("No text files found. Creating paper list from metadata with embedded text...")
+        all_files = []
+        paper_count = 0
+        for arxiv_id, meta in metadata.items():
+            # Check if paper has text content in metadata
+            if meta.get('text') and meta.get('text').strip():
+                # Use embedded text - mark with special prefix
+                all_files.append((arxiv_id, f"embedded_text:{arxiv_id}"))
+                paper_count += 1
+                # Limit to reasonable number for evaluation
+                if paper_count >= 1000:  # Limit to 1000 papers for faster evaluation
+                    break
+
+        print(f"Created {len(all_files)} papers from embedded metadata text")
+
+        if not all_files:
+            raise ValueError("No papers with text content found in metadata. Cannot proceed with evaluation.")
     
     # Classify all papers to get domain distribution
     print("Classifying papers for stratified split...")
@@ -1676,15 +1696,20 @@ def evaluate_model(
         domain_train = files[n_domain_test:]
         
         # Convert back to (arxiv_id, file_path) tuples
+        # Use embedded text from metadata instead of requiring separate text files
         for arxiv_id in domain_test:
-            file_path = os.path.join(dataset_text_dir, f"{arxiv_id}.txt")
-            if os.path.exists(file_path):
-                test_files.append((arxiv_id, file_path))
-        
+            # Check if paper has text content in metadata
+            meta = metadata.get(arxiv_id, {})
+            if meta.get('text') and meta.get('text').strip():
+                # Use arxiv_id as "file path" since we're using embedded text
+                test_files.append((arxiv_id, f"embedded_text:{arxiv_id}"))
+
         for arxiv_id in domain_train:
-            file_path = os.path.join(dataset_text_dir, f"{arxiv_id}.txt")
-            if os.path.exists(file_path):
-                train_files.append((arxiv_id, file_path))
+            # Check if paper has text content in metadata
+            meta = metadata.get(arxiv_id, {})
+            if meta.get('text') and meta.get('text').strip():
+                # Use arxiv_id as "file path" since we're using embedded text
+                train_files.append((arxiv_id, f"embedded_text:{arxiv_id}"))
     
     # Shuffle test files
     random.shuffle(test_files)
@@ -1741,15 +1766,28 @@ def evaluate_model(
             self.min_length = min_length
             self.shuffle_buffer = shuffle_buffer
             self.seed = seed
-            
+
             # Use the metadata dictionary that already has categories loaded
             self.metadata = metadata_dict
             self.text_files = text_files
             self._estimated_length = None
-            
+
         def _get_text_files(self) -> List[Tuple[str, str]]:
             """Override to use the provided text_files instead of scanning directory."""
             return self.text_files
+
+        def _load_text(self, arxiv_id: str, file_path: str) -> str:
+            """Load text from metadata instead of separate files."""
+            if file_path.startswith("embedded_text:"):
+                # Use embedded text from metadata
+                meta = self.metadata.get(arxiv_id, {})
+                text = meta.get('text', '')
+                if not text:
+                    raise ValueError(f"No text found in metadata for {arxiv_id}")
+                return text
+            else:
+                # Fallback to original file-based loading
+                return super()._load_text(arxiv_id, file_path)
     
     test_dataset = TestDataset(
         test_files,

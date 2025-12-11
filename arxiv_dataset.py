@@ -260,9 +260,15 @@ class ArXivStreamingDataset(IterableDataset):
         if self.text_dir is None:
             # Use entries from metadata (processed_dataset.jsonl contains text directly)
             print("Using text data from metadata (processed_dataset.jsonl)")
+            print(f"Processing {len(self.metadata)} metadata entries...")
+            count = 0
             for arxiv_id, metadata in self.metadata.items():
                 if metadata.get('text'):  # Has text content
                     text_files.append((arxiv_id, "metadata"))  # Use "metadata" as placeholder path
+                    count += 1
+                    if count % 10000 == 0:
+                        print(f"   Processed {count} entries...")
+            print(f"   Found {len(text_files)} entries with text content")
             return text_files
 
         if not os.path.exists(self.text_dir):

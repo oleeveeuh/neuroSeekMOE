@@ -1884,10 +1884,9 @@ def evaluate_model(
     
     # Create test dataset (subset)
     # Reuse metadata from full_dataset to avoid reloading and losing categories
-    class TestDataset(ArXivStreamingDataset):
+    class TestDataset(torch.utils.data.Dataset):
         def __init__(self, text_files, metadata_dict, text_dir, metadata_jsonl, tokenizer, max_length=512, min_length=64, shuffle_buffer=100, seed=None):
-            # Don't call super().__init__() which would reload metadata
-            # Instead, manually set up with existing metadata that already has categories
+            # Manual setup for standalone Dataset
             self.text_dir = text_dir
             self.metadata_jsonl = metadata_jsonl
             self.tokenizer = tokenizer
@@ -1900,10 +1899,6 @@ def evaluate_model(
             self.metadata = metadata_dict
             self.text_files = text_files
             self._estimated_length = None
-
-        def _get_text_files(self) -> List[Tuple[str, str]]:
-            """Override to use the provided text_files instead of scanning directory."""
-            return self.text_files
 
         def _load_text(self, arxiv_id: str, file_path: str) -> str:
             """Load text from metadata instead of separate files."""

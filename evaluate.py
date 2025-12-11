@@ -952,8 +952,14 @@ def compute_perplexity(
             total_tokens += num_tokens
     
     if total_tokens == 0:
+        print("\n🚨 CRITICAL ERROR: No tokens processed!")
+        print("   This means:")
+        print("   1. No test samples were loaded OR")
+        print("   2. All sequences were empty after tokenization OR")
+        print("   3. Tokenizer vocabulary mismatch causing all tokens to be <unk>")
+        print(f"   Total batches processed: {len([None for _ in dataloader])}")
         return float('inf'), {}
-    
+
     avg_loss = total_loss / total_tokens
     perplexity = np.exp(avg_loss)
     
@@ -1613,14 +1619,29 @@ def evaluate_model(
         print("No text files found. Creating paper list from metadata with embedded text...")
         all_files = []
         paper_count = 0
+
+        # Debug: Check metadata structure
+        print(f"Total metadata entries: {len(metadata)}")
+        first_few_keys = list(metadata.keys())[:3]
+        print(f"First few paper IDs: {first_few_keys}")
+
         for arxiv_id, meta in metadata.items():
+            # Debug: Show structure of first few papers
+            if paper_count < 3:
+                print(f"\nPaper {arxiv_id}:")
+                print(f"  Available keys: {list(meta.keys())}")
+                print(f"  Has text field: {'text' in meta}")
+                if 'text' in meta:
+                    text_len = len(meta['text']) if meta['text'] else 0
+                    print(f"  Text length: {text_len}")
+
             # Check if paper has text content in metadata
             if meta.get('text') and meta.get('text').strip():
                 # Use embedded text - mark with special prefix
                 all_files.append((arxiv_id, f"embedded_text:{arxiv_id}"))
                 paper_count += 1
                 # Limit to reasonable number for evaluation
-                if paper_count >= 1000:  # Limit to 1000 papers for faster evaluation
+                if paper_count >= 100:  # Reduced to 100 for debugging
                     break
 
         print(f"Created {len(all_files)} papers from embedded metadata text")
@@ -1783,10 +1804,16 @@ def evaluate_model(
                 meta = self.metadata.get(arxiv_id, {})
                 text = meta.get('text', '')
                 if not text:
+                    print(f"DEBUG: No text found in metadata for {arxiv_id}")
                     raise ValueError(f"No text found in metadata for {arxiv_id}")
+
+                # Debug: Show text sample
+                text_sample = text[:100] + "..." if len(text) > 100 else text
+                print(f"DEBUG: Loaded text for {arxiv_id} (length: {len(text)}): {text_sample}")
                 return text
             else:
                 # Fallback to original file-based loading
+                print(f"DEBUG: Using file-based loading for {arxiv_id}")
                 return super()._load_text(arxiv_id, file_path)
     
     test_dataset = TestDataset(
@@ -1800,7 +1827,22 @@ def evaluate_model(
     )
     
     print(f"Created test dataset: {len(test_files)} papers")
-    
+
+    # Debug: Check if we actually have test data
+    if len(test_files) == 0:
+        print("\n🚨 CRITICAL ERROR: No test files found!")
+        print("   This means the test/train split failed to create any test samples.")
+        print("   Possible causes:")
+        print("   1. No papers with embedded text in metadata")
+        print("   2. Test split parameter removed all papers")
+        print("   3. All papers were filtered out during processing")
+        return None
+
+    # Debug: Sample first test paper
+    first_arxiv_id, first_path = test_files[0]
+    print(f"   Sample test paper: {first_arxiv_id}")
+    print(f"   Sample path: {first_path}")
+
     # Create test dataloader
     # Use num_workers=0 to avoid worker serialization issues with metadata dict
     test_dataloader = create_dataloader(

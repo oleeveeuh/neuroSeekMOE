@@ -102,7 +102,7 @@ training:
 
   # Early stopping (optional - will stop before max_steps if converged)
   early_stopping: true
-  early_stopping_patience: 1000  # Stop if no improvement for 1k steps
+  early_stopping_patience: 2000  # Stop if no improvement for 2k steps (4 evaluation windows)
   early_stopping_min_delta: 0.01  # Minimum perplexity improvement threshold
   early_stopping_window: 500  # Evaluate every 500 steps
   

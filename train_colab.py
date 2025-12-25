@@ -439,6 +439,8 @@ def train(
     best_perplexity = float('inf')
     steps_without_improvement = 0
     last_evaluation_step = 0
+    best_model_state = None  # Track best model state
+    best_step = 0  # Track step when best model was saved
 
     # Training state
     model.train()
@@ -582,7 +584,17 @@ def train(
             if current_perplexity < best_perplexity - early_stopping_min_delta:
                 best_perplexity = current_perplexity
                 steps_without_improvement = 0
-                print(f"   ✓ New best perplexity: {best_perplexity:.2f}")
+                best_step = step
+                # Save best model state
+                best_model_state = {
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
+                    'step': step,
+                    'perplexity': best_perplexity
+                }
+                print(f"   ✓ New best perplexity: {best_perplexity:.2f} (saved best model)")
             else:
                 steps_without_improvement += early_stopping_window
                 print(f"   Early stopping: {steps_without_improvement}/{early_stopping_patience} steps without improvement (current: {current_perplexity:.2f}, best: {best_perplexity:.2f})")
@@ -590,7 +602,7 @@ def train(
                 # Check if should stop early
                 if steps_without_improvement >= early_stopping_patience:
                     print(f"\n✅ Early stopping triggered! No improvement for {early_stopping_patience} steps.")
-                    print(f"   Best perplexity: {best_perplexity:.2f}")
+                    print(f"   Best perplexity: {best_perplexity:.2f} at step {best_step}")
                     print(f"   Final step: {step}")
                     break
 
@@ -599,12 +611,25 @@ def train(
 
     # Final checkpoint
     print("\nSaving final checkpoint...")
-    save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
+
+    # If early stopping was used and we have a best model, save it
+    if early_stopping and best_model_state is not None:
+        print(f"Saving best model (perplexity: {best_perplexity:.2f} from step {best_step})...")
+        best_checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pt')
+        torch.save(best_model_state, best_checkpoint_path)
+        print(f"   Best model saved to: {best_checkpoint_path}")
+
+        # Also save as final checkpoint for compatibility
+        save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
+        print(f"   Final checkpoint (step {step}) also saved")
+    else:
+        # No early stopping or no best model saved, save current state
+        save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
 
     print("\nTraining complete!")
     print(f"Training log saved to: {log_file}")
     if early_stopping:
-        print(f"Best perplexity achieved: {best_perplexity:.2f}")
+        print(f"Best perplexity achieved: {best_perplexity:.2f} at step {best_step}")
 
 
 def main():
@@ -951,17 +976,35 @@ def main():
     )
     
     # Start training
+    # Resolve final values (CLI args override config)
+    final_batch_size = args.batch_size if args.batch_size is not None else training_config_defaults['batch_size']
+    final_gradient_accumulation = args.gradient_accumulation if args.gradient_accumulation is not None else training_config_defaults['gradient_accumulation_steps']
+    final_max_steps = args.max_steps if args.max_steps is not None else training_config_defaults['max_steps']
+    final_learning_rate = args.learning_rate if args.learning_rate is not None else training_config_defaults['learning_rate']
+    final_warmup_steps = args.warmup_steps if args.warmup_steps is not None else training_config_defaults['warmup_steps']
+    final_save_interval = args.save_interval if args.save_interval is not None else training_config_defaults['save_interval']
+
+    # Debug: Show which values are being used
+    print(f"\n📋 Final training configuration:")
+    print(f"   batch_size: {final_batch_size} {'(from CLI)' if args.batch_size is not None else '(from config.yaml)'}")
+    print(f"   gradient_accumulation: {final_gradient_accumulation} {'(from CLI)' if args.gradient_accumulation is not None else '(from config.yaml)'}")
+    print(f"   max_steps: {final_max_steps} {'(from CLI)' if args.max_steps is not None else '(from config.yaml)'}")
+    print(f"   learning_rate: {final_learning_rate} {'(from CLI)' if args.learning_rate is not None else '(from config.yaml)'}")
+    print(f"   warmup_steps: {final_warmup_steps} {'(from CLI)' if args.warmup_steps is not None else '(from config.yaml)'}")
+    print(f"   save_interval: {final_save_interval} {'(from CLI)' if args.save_interval is not None else '(from config.yaml)'}")
+    print()
+
     train(
         model=model,
         dataset=dataset,
         adapter=adapter,
         checkpoint_dir=args.output_dir,
-        batch_size=args.batch_size if args.batch_size is not None else training_config_defaults['batch_size'],
-        gradient_accumulation_steps=args.gradient_accumulation if args.gradient_accumulation is not None else training_config_defaults['gradient_accumulation_steps'],
-        max_steps=args.max_steps if args.max_steps is not None else training_config_defaults['max_steps'],
-        learning_rate=args.learning_rate if args.learning_rate is not None else training_config_defaults['learning_rate'],
-        warmup_steps=args.warmup_steps if args.warmup_steps is not None else training_config_defaults['warmup_steps'],
-        save_interval=args.save_interval if args.save_interval is not None else training_config_defaults['save_interval'],
+        batch_size=final_batch_size,
+        gradient_accumulation_steps=final_gradient_accumulation,
+        max_steps=final_max_steps,
+        learning_rate=final_learning_rate,
+        warmup_steps=final_warmup_steps,
+        save_interval=final_save_interval,
         log_interval=args.log_interval,
         domain_log_interval=args.domain_log_interval,
         resume_from_checkpoint=args.resume_from_checkpoint,

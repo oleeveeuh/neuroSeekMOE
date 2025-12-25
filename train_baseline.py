@@ -368,6 +368,8 @@ def train_baseline_model(
     best_perplexity = float('inf')
     steps_without_improvement = 0
     last_evaluation_step = 0
+    best_model_state = None  # Track best model state
+    best_step = 0  # Track step when best model was saved
 
     while global_step < max_steps:
         # Zero gradients at start of accumulation
@@ -488,7 +490,21 @@ def train_baseline_model(
             if current_perplexity < best_perplexity - early_stopping_min_delta:
                 best_perplexity = current_perplexity
                 steps_without_improvement = 0
-                print(f"   ✓ New best perplexity: {best_perplexity:.2f}")
+                best_step = global_step
+                # Save best model state
+                best_model_state = {
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'global_step': global_step,
+                    'model_type': model_type,
+                    'vocab_size': vocab_size,
+                    'embedding_dim': embedding_dim,
+                    'num_layers': num_layers,
+                    'num_heads': num_heads,
+                    'ff_dim': ff_dim,
+                    'perplexity': best_perplexity
+                }
+                print(f"   ✓ New best perplexity: {best_perplexity:.2f} (saved best model)")
             else:
                 steps_without_improvement += early_stopping_window
                 print(f"   Early stopping: {steps_without_improvement}/{early_stopping_patience} steps without improvement (current: {current_perplexity:.2f}, best: {best_perplexity:.2f})")
@@ -496,7 +512,7 @@ def train_baseline_model(
                 # Check if should stop early
                 if steps_without_improvement >= early_stopping_patience:
                     print(f"\n✅ Early stopping triggered! No improvement for {early_stopping_patience} steps.")
-                    print(f"   Best perplexity: {best_perplexity:.2f}")
+                    print(f"   Best perplexity: {best_perplexity:.2f} at step {best_step}")
                     print(f"   Final step: {global_step}")
                     break
 
@@ -506,21 +522,45 @@ def train_baseline_model(
     print(f"Training completed at step {global_step}")
 
     # Save final model
-    final_model_path = os.path.join(checkpoint_dir, f"baseline_{model_type}_final.pt")
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'global_step': global_step,
-        'model_type': model_type,
-        'vocab_size': vocab_size,
-        'embedding_dim': embedding_dim,
-        'num_layers': num_layers,
-        'num_heads': num_heads,
-        'ff_dim': ff_dim,
-    }, final_model_path)
+    if early_stopping and best_model_state is not None:
+        # Save best model
+        best_model_path = os.path.join(checkpoint_dir, f"baseline_{model_type}_best.pt")
+        torch.save(best_model_state, best_model_path)
+        print(f"✅ Best model saved (perplexity: {best_perplexity:.2f} from step {best_step}): {best_model_path}")
+
+        # Also save final checkpoint for compatibility
+        final_model_path = os.path.join(checkpoint_dir, f"baseline_{model_type}_final.pt")
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'global_step': global_step,
+            'model_type': model_type,
+            'vocab_size': vocab_size,
+            'embedding_dim': embedding_dim,
+            'num_layers': num_layers,
+            'num_heads': num_heads,
+            'ff_dim': ff_dim,
+        }, final_model_path)
+        print(f"   Final checkpoint (step {global_step}) also saved: {final_model_path}")
+    else:
+        # No early stopping, save current state
+        final_model_path = os.path.join(checkpoint_dir, f"baseline_{model_type}_final.pt")
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'global_step': global_step,
+            'model_type': model_type,
+            'vocab_size': vocab_size,
+            'embedding_dim': embedding_dim,
+            'num_layers': num_layers,
+            'num_heads': num_heads,
+            'ff_dim': ff_dim,
+        }, final_model_path)
 
     print(f"\n✅ Training completed!")
     print(f"Final model saved to: {final_model_path}")
+    if early_stopping and best_model_state is not None:
+        print(f"Best perplexity: {best_perplexity:.2f} at step {best_step}")
     print(f"Total steps: {global_step}")
     print(f"Total time: {time.time() - start_time:.1f}s")
 

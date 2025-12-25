@@ -433,12 +433,46 @@ git clone https://github.com/yourusername/neuroseek-moe.git
 cd neuroseek-moe
 pip install -r requirements.txt
 
-# One-click training on Colab
-# Open notebooks/ArXiv_Pipeline_Colab.ipynb
+# Step 1: Collect hold-out test set (NO data leakage)
+python collect_test_set.py \
+    --training-metadata ./data/arxiv/arxiv_papers.jsonl \
+    --output-dir ./data/test_set \
+    --max-papers 2000 \
+    --days-back 30
 
-# Or run locally
-python run_pipeline.py --collect --curate --train --evaluate
+# Step 2: Train model
+python train_colab.py \
+    --dataset-text-dir ./data/arxiv/texts \
+    --dataset-metadata ./data/arxiv/arxiv_papers.jsonl \
+    --tokenizer-path "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext" \
+    --output-dir ./checkpoints
+
+# Step 3: Evaluate on hold-out test set
+python evaluate.py \
+    --model-checkpoint ./checkpoints/best_model.pt \
+    --dataset-metadata ./data/test_set/test_metadata_test.jsonl \
+    --output-dir ./evaluations/test_set_results
 ```
+
+### Test Set Collection
+
+**IMPORTANT:** Always collect a fresh test set before training to ensure no data leakage!
+
+```bash
+# Collect new test set from recent ArXiv papers
+python collect_test_set.py \
+    --training-metadata ./data/arxiv/arxiv_papers.jsonl \
+    --output-dir ./data/test_set \
+    --max-papers 2000 \
+    --days-back 30
+
+# This creates:
+# - test_metadata_test.jsonl  (test set)
+# - test_metadata_val.jsonl   (validation set)
+# - test_set_stats.json       (statistics)
+```
+
+See [test_set_README.md](test_set_README.md) for details.
 
 
 ---

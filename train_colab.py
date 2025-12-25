@@ -578,21 +578,27 @@ def train(
                 val_dataloader_iter = iter(val_dataloader)
                 data_source = "validation set"
             else:
-                # Fallback to training data (not ideal, but maintains compatibility)
-                val_dataloader_iter = dataloader_iter
+                val_dataloader_iter = None
                 data_source = "training data (WARNING: no validation set provided)"
 
             with torch.no_grad():
-                for _ in range(eval_batches):
+                for eval_batch_idx in range(eval_batches):
                     try:
-                        eval_batch = next(val_dataloader_iter)
-                    except StopIteration:
                         if val_dataset is not None:
-                            val_dataloader_iter = iter(val_dataloader)
+                            eval_batch = next(val_dataloader_iter)
                         else:
+                            # Sample from training data
+                            eval_batch = next(dataloader_iter)
+                    except StopIteration:
+                        # Dataloader exhausted, recreate iterator
+                        if val_dataset is not None:
+                            # Recreate validation dataloader iterator
+                            val_dataloader_iter = iter(val_dataloader)
+                            eval_batch = next(val_dataloader_iter)
+                        else:
+                            # Recreate training dataloader iterator
                             dataloader_iter = iter(dataloader)
-                            val_dataloader_iter = dataloader_iter
-                        eval_batch = next(val_dataloader_iter)
+                            eval_batch = next(dataloader_iter)
 
                     result = adapter.process_batch(eval_batch)
                     loss = result['loss']

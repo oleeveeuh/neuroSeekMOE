@@ -220,7 +220,8 @@ def train_baseline_model(
     early_stopping: bool = False,
     early_stopping_patience: int = 1000,
     early_stopping_min_delta: float = 0.01,
-    early_stopping_window: int = 500
+    early_stopping_window: int = 500,
+    val_dataset_metadata: str = None  # NEW: Path to validation dataset for early stopping
 ):
     """Train baseline transformer model using the same approach as train_colab.py with early stopping"""
 
@@ -278,6 +279,23 @@ def train_baseline_model(
             raise FileNotFoundError(f"Neither text_dir nor processed_dataset.jsonl found. Checked: {processed_dataset_path}")
 
     print(f"Created dataset with ~{len(dataset)} samples")
+
+    # Load validation dataset if provided (for early stopping)
+    val_dataset = None
+    if val_dataset_metadata is not None:
+        print(f"\nLoading validation dataset for early stopping...")
+        if os.path.exists(val_dataset_metadata):
+            val_dataset = ArXivStreamingDataset(
+                text_dir=None,  # Validation set typically doesn't have separate text files
+                metadata_jsonl=val_dataset_metadata,
+                tokenizer=tokenizer,
+                max_length=512,
+                min_length=64
+            )
+            print(f"Created validation dataset with ~{len(val_dataset)} samples")
+        else:
+            print(f"⚠️  Warning: Validation dataset file not found: {val_dataset_metadata}")
+            print(f"   Will use training data for early stopping evaluation (NOT recommended - may overfit)")
 
     # Create dataloader - SAME LOGIC AS TRAIN_COLAB.PY
     print("Creating dataloader...")
@@ -459,13 +477,41 @@ def train_baseline_model(
             eval_loss = 0.0
             eval_batches = 10  # Evaluate on 10 batches
 
+            # Use validation dataset if provided, otherwise sample from training data
+            if val_dataset is not None:
+                # Create validation dataloader (no shuffle for evaluation)
+                val_dataloader = create_dataloader(
+                    val_dataset,
+                    batch_size=batch_size,
+                    num_workers=0,
+                    pin_memory=False
+                )
+                val_dataloader_iter = iter(val_dataloader)
+                data_source = "validation set"
+            else:
+                val_dataloader_iter = None
+                data_source = "training data (WARNING: no validation set provided)"
+
+            print(f"\n[{global_step}] Evaluating perplexity on {data_source}...")
+
             with torch.no_grad():
-                for _ in range(eval_batches):
+                for eval_batch_idx in range(eval_batches):
                     try:
-                        eval_batch = next(dataloader_iter)
+                        if val_dataset is not None:
+                            eval_batch = next(val_dataloader_iter)
+                        else:
+                            # Sample from training data
+                            eval_batch = next(dataloader_iter)
                     except StopIteration:
-                        dataloader_iter = iter(dataloader)
-                        eval_batch = next(dataloader_iter)
+                        # Dataloader exhausted, recreate iterator
+                        if val_dataset is not None:
+                            # Recreate validation dataloader iterator
+                            val_dataloader_iter = iter(val_dataloader)
+                            eval_batch = next(val_dataloader_iter)
+                        else:
+                            # Recreate training dataloader iterator
+                            dataloader_iter = iter(dataloader)
+                            eval_batch = next(dataloader_iter)
 
                     input_ids = eval_batch['input_ids'].to(device)
                     attention_mask = eval_batch.get('attention_mask')
@@ -596,6 +642,7 @@ def main():
     parser.add_argument('--early-stopping-patience', type=int, default=1000, help="Stop if no improvement for N steps")
     parser.add_argument('--early-stopping-min-delta', type=float, default=0.01, help="Minimum perplexity improvement threshold")
     parser.add_argument('--early-stopping-window', type=int, default=500, help="Evaluate perplexity every N steps")
+    parser.add_argument('--val-dataset', type=str, default=None, help='Path to validation metadata JSONL for early stopping (prevents overfitting)')
 
     args = parser.parse_args()
 
@@ -625,6 +672,7 @@ def main():
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
         early_stopping_window=args.early_stopping_window,
+        val_dataset_metadata=args.val_dataset,
     )
 
     print(f"\n✅ Training complete!")

@@ -92,13 +92,19 @@ training:
   top_k: 2
   
   # Training hyperparameters
-  batch_size: 6
-  gradient_accumulation_steps: 4
-  max_steps: 50000
+  batch_size: 4  # Optimized for Colab T4 with 8 routed experts
+  gradient_accumulation_steps: 8  # Effective batch = 4×8 = 32
+  max_steps: 12000  # Reduced from 50k - sufficient for convergence (~6-8 epochs)
   learning_rate: 5e-4
-  warmup_steps: 2000
+  warmup_steps: 1000  # 8% of training (reduced from 2000)
   weight_decay: 1e-5
   max_grad_norm: 1.0
+
+  # Early stopping (optional - will stop before max_steps if converged)
+  early_stopping: true
+  early_stopping_patience: 1000  # Stop if no improvement for 1k steps
+  early_stopping_min_delta: 0.01  # Minimum perplexity improvement threshold
+  early_stopping_window: 500  # Evaluate every 500 steps
   
   # Dataset configuration
   max_length: 512
@@ -129,8 +135,8 @@ training:
   
   # Checkpointing
   checkpoint_dir: "./checkpoints"  # Local by default; set to "/content/drive/MyDrive/neuroMOE_results/checkpoints" for Colab Drive persistence
-  checkpoint_interval: 5000  # Steps between checkpoints
-  keep_last_n_checkpoints: 2
+  checkpoint_interval: 2000  # Steps between checkpoints (reduced from 5000)
+  keep_last_n_checkpoints: 3  # Keep last 3 checkpoints for best model selection
   
   # Logging
   log_interval: 100  # Steps between log entries

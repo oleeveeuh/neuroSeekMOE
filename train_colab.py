@@ -339,10 +339,14 @@ def train(
     log_interval: int = 100,
     domain_log_interval: int = 1000,
     resume_from_checkpoint: Optional[str] = None,
-    auto_find_batch_size: bool = True
+    auto_find_batch_size: bool = True,
+    early_stopping: bool = False,
+    early_stopping_patience: int = 1000,
+    early_stopping_min_delta: float = 0.01,
+    early_stopping_window: int = 500
 ):
-    """Main training loop optimized for Colab GPU.
-    
+    """Main training loop optimized for Colab GPU with early stopping.
+
     Args:
         model: DeepSeekMoE model
         dataset: ArXiv streaming dataset
@@ -358,15 +362,19 @@ def train(
         domain_log_interval: Steps between domain distribution logging
         resume_from_checkpoint: Path to checkpoint to resume from (auto-detected if None)
         auto_find_batch_size: Whether to auto-detect max batch size
+        early_stopping: Enable early stopping based on perplexity
+        early_stopping_patience: Stop if no improvement for N steps
+        early_stopping_min_delta: Minimum perplexity improvement threshold
+        early_stopping_window: Evaluate perplexity every N steps
     """
     device = adapter.device
-    
+
     # Find maximum batch size if requested
     if auto_find_batch_size and torch.cuda.is_available():
         # We need tokenizer for this, but it's in adapter
         # For now, use provided batch_size
         pass  # Skip auto-detection for now (requires tokenizer access)
-    
+
     # Create dataloader - use 0 workers for Colab memory stability
     dataloader = create_dataloader(
         dataset,
@@ -374,10 +382,10 @@ def train(
         num_workers=0,  # Single-threaded for Colab stability
         pin_memory=False  # Disable pin_memory for CPU
     )
-    
+
     # Setup optimizer
     optimizer = AdamW(model.parameters(), lr=float(learning_rate), weight_decay=0.01)
-    
+
     # Setup scheduler: warmup + cosine annealing
     warmup_scheduler = LinearLR(
         optimizer,
@@ -385,30 +393,30 @@ def train(
         end_factor=1.0,
         total_iters=warmup_steps
     )
-    
+
     cosine_scheduler = CosineAnnealingLR(
         optimizer,
         T_max=max_steps - warmup_steps,
         eta_min=learning_rate * 0.1
     )
-    
+
     scheduler = SequentialLR(
         optimizer,
         schedulers=[warmup_scheduler, cosine_scheduler],
         milestones=[warmup_steps]
     )
-    
+
     # Mixed precision scaler
     scaler = GradScaler()
-    
+
     # Enable gradient checkpointing if available
     if hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
         print("Gradient checkpointing enabled")
-    
+
     # Create checkpoint directory if it doesn't exist
     os.makedirs(checkpoint_dir, exist_ok=True)
-    
+
     # Resume from checkpoint if specified or auto-detect
     start_step = 0
     if resume_from_checkpoint:
@@ -417,11 +425,16 @@ def train(
         latest_checkpoint = find_latest_checkpoint(checkpoint_dir)
         if latest_checkpoint:
             start_step = load_checkpoint(latest_checkpoint, model, optimizer, scheduler, scaler)
-    
+
     # Setup logging
     log_file = os.path.join(checkpoint_dir, 'training_log.csv')
     logger = TrainingLogger(log_file)
-    
+
+    # Early stopping state
+    best_perplexity = float('inf')
+    steps_without_improvement = 0
+    last_evaluation_step = 0
+
     # Training state
     model.train()
     accumulated_loss = 0.0
@@ -537,13 +550,56 @@ def train(
         # Checkpointing
         if step % save_interval == 0:
             save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
-    
+
+        # Early stopping evaluation
+        if early_stopping and (step - last_evaluation_step) >= early_stopping_window:
+            # Evaluate perplexity on a small batch
+            model.eval()
+            eval_loss = 0.0
+            eval_batches = 10  # Evaluate on 10 batches
+
+            with torch.no_grad():
+                for _ in range(eval_batches):
+                    try:
+                        eval_batch = next(dataloader_iter)
+                    except StopIteration:
+                        dataloader_iter = iter(dataloader)
+                        eval_batch = next(dataloader_iter)
+
+                    result = adapter.process_batch(eval_batch)
+                    loss = result['loss']
+                    eval_loss += loss.item()
+
+            avg_eval_loss = eval_loss / eval_batches
+            current_perplexity = torch.exp(torch.tensor(avg_eval_loss)).item()
+
+            # Check for improvement
+            if current_perplexity < best_perplexity - early_stopping_min_delta:
+                best_perplexity = current_perplexity
+                steps_without_improvement = 0
+                print(f"   ✓ New best perplexity: {best_perplexity:.2f}")
+            else:
+                steps_without_improvement += early_stopping_window
+                print(f"   Early stopping: {steps_without_improvement}/{early_stopping_patience} steps without improvement (current: {current_perplexity:.2f}, best: {best_perplexity:.2f})")
+
+                # Check if should stop early
+                if steps_without_improvement >= early_stopping_patience:
+                    print(f"\n✅ Early stopping triggered! No improvement for {early_stopping_patience} steps.")
+                    print(f"   Best perplexity: {best_perplexity:.2f}")
+                    print(f"   Final step: {step}")
+                    break
+
+            last_evaluation_step = step
+            model.train()
+
     # Final checkpoint
     print("\nSaving final checkpoint...")
     save_checkpoint(model, optimizer, scheduler, scaler, step, checkpoint_dir)
-    
+
     print("\nTraining complete!")
     print(f"Training log saved to: {log_file}")
+    if early_stopping:
+        print(f"Best perplexity achieved: {best_perplexity:.2f}")
 
 
 def main():
@@ -714,6 +770,14 @@ def main():
         'temperature_steps': 10000,  # Default: increased for slower decay
     }
 
+    # Early stopping config
+    early_stopping_config = {
+        'early_stopping': False,
+        'early_stopping_patience': 1000,
+        'early_stopping_min_delta': 0.01,
+        'early_stopping_window': 500,
+    }
+
     # Try to load from config.yaml
     try:
         import yaml
@@ -750,6 +814,16 @@ def main():
                     if 'temperature_steps' in training_config:
                         moe_routing_config['temperature_steps'] = training_config['temperature_steps']
 
+                    # Load early stopping parameters
+                    if 'early_stopping' in training_config:
+                        early_stopping_config['early_stopping'] = training_config['early_stopping']
+                    if 'early_stopping_patience' in training_config:
+                        early_stopping_config['early_stopping_patience'] = training_config['early_stopping_patience']
+                    if 'early_stopping_min_delta' in training_config:
+                        early_stopping_config['early_stopping_min_delta'] = training_config['early_stopping_min_delta']
+                    if 'early_stopping_window' in training_config:
+                        early_stopping_config['early_stopping_window'] = training_config['early_stopping_window']
+
                     print(f"✅ Loaded DeepSeek-MoE configuration from config.yaml")
                     print(f"   Architecture:")
                     print(f"      embedding_dim: {moe_arch_config['embedding_dim']}")
@@ -761,6 +835,11 @@ def main():
                     print(f"      load_balance_loss_weight: {moe_routing_config['load_balance_loss_weight']}")
                     print(f"      z_loss_weight: {moe_routing_config['z_loss_weight']}")
                     print(f"      temperature: {moe_routing_config['temperature_start']} → {moe_routing_config['temperature_end']} over {moe_routing_config['temperature_steps']} steps")
+                    if early_stopping_config['early_stopping']:
+                        print(f"   Early Stopping:")
+                        print(f"      patience: {early_stopping_config['early_stopping_patience']}")
+                        print(f"      min_delta: {early_stopping_config['early_stopping_min_delta']}")
+                        print(f"      window: {early_stopping_config['early_stopping_window']}")
     except Exception as e:
         print(f"⚠️  Could not load config.yaml: {e}")
         print(f"   Using default DeepSeek-MoE configuration")
@@ -846,7 +925,11 @@ def main():
         save_interval=args.save_interval,
         log_interval=args.log_interval,
         domain_log_interval=args.domain_log_interval,
-        resume_from_checkpoint=args.resume_from_checkpoint
+        resume_from_checkpoint=args.resume_from_checkpoint,
+        early_stopping=early_stopping_config['early_stopping'],
+        early_stopping_patience=early_stopping_config['early_stopping_patience'],
+        early_stopping_min_delta=early_stopping_config['early_stopping_min_delta'],
+        early_stopping_window=early_stopping_config['early_stopping_window']
     )
 
 

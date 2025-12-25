@@ -58,6 +58,42 @@
 
 Standard transformers allocate computational resources uniformly—wasteful for specialized domains and incompatible with resource-constrained hardware.
 
+### DeepSeek-MoE Architecture
+
+The model uses the **DeepSeek-MoE** architecture with two types of experts:
+
+**Shared Experts** (always active):
+- Process **all tokens** that enter the model
+- Capture **common knowledge** and baseline transformations
+- Help mitigate redundancy among routed experts
+- **Count: 2 shared experts** (always active)
+
+**Routed Experts** (selectively activated):
+- Process only **specific tokens** they specialize in
+- Follow sparse activation via top-k routing
+- Enable **expert specialization** through fine-grained segmentation
+- **Count: 8 routed experts**, with **top_k=2** (select 2 out of 8 per token)
+
+**Key Architecture Parameters**:
+- **Total experts per token**: 2 shared + 2 routed = **4 experts active**
+- **Expert selection rate**: 2/8 = 25% of routed experts used per token
+- **Sparsity**: 75% of routed experts are inactive for any given token
+
+**Why This Configuration**:
+- **8 routed experts** provides enough diversity for meaningful specialization
+- **top_k=2** ensures sparse activation (only 25% of routed experts used)
+- **2 shared experts** maintain stable performance across all inputs
+- This matches the DeepSeek-MoE paper's recommendations for balanced efficiency and specialization
+
+**Configuration in `config.yaml`**:
+```yaml
+training:
+  num_shared_experts: 2
+  num_routed_experts: 8
+  top_k: 2
+  # Each token uses: 2 shared (always) + 2 routed (selected) = 4 experts total
+```
+
 ### Expert Choice Routing
 
 Implemented **Expert Choice routing** (experts select tokens, not vice versa) rather than traditional Token Choice:
@@ -79,11 +115,12 @@ Late training: Low temperature forces specialization and sparse activation
 
 **Architecture**:
 - **12 transformer layers**, 768 embedding dimension, 12 attention heads
-- **4 routed experts + 2 shared experts** using Expert Choice routing
+- **2 shared experts + 8 routed experts** using Expert Choice routing
+- **top_k=2**: Select 2 out of 8 routed experts per token
 - **3.73B total parameters** with **0.332B active per token**
-- **Shared experts** always active (learn common patterns)
-- **Routed experts** selected via top-2 routing per token
-- **Router component**: Learnable gating network with temperature annealing (2.0 → 0.1 over 1k steps)
+- **Shared experts** (2): Always active, capture common patterns
+- **Routed experts** (8): Selectively activated via top-k routing
+- **Router component**: Learnable gating network with temperature annealing (3.0 → 0.3 over 10k steps)
 
 ### Rationale: Inspired by DeepSeekMoE
 

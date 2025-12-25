@@ -165,7 +165,7 @@ class ExpertActivationHook:
     
     def __init__(self, model: nn.Module, text_dir: Optional[str] = None, metadata_dict: Optional[Dict] = None):
         """Initialize hook.
-        
+
         Args:
             model: The model to hook into (should be SimpleMoEModel or wrapper)
             text_dir: Optional path to text files directory (for fallback classification)
@@ -179,12 +179,28 @@ class ExpertActivationHook:
         self.model = model
         self.text_dir = text_dir  # Store text directory for fallback
         self._metadata_dict = metadata_dict  # Store metadata dict for fallback category lookup
-        
-        # Store original forward method
+
+        # Get model configuration for accurate expert counting
         if hasattr(model, 'base_model'):
             self.base_model = model.base_model
         else:
             self.base_model = model
+
+        # Extract num_shared_experts from model
+        self.num_shared_experts = 2  # Default fallback
+        if hasattr(self.base_model, 'shared_experts'):
+            # shared_experts is nn.ModuleList, len() gives count
+            self.num_shared_experts = len(self.base_model.shared_experts)
+        elif hasattr(self.base_model, 'num_shared_experts'):
+            self.num_shared_experts = self.base_model.num_shared_experts
+
+        # Extract num_routed_experts from model
+        self.num_routed_experts = 4  # Default fallback
+        if hasattr(self.base_model, 'routed_experts'):
+            # routed_experts is nn.ModuleList, len() gives count
+            self.num_routed_experts = len(self.base_model.routed_experts)
+        elif hasattr(self.base_model, 'num_routed_experts'):
+            self.num_routed_experts = self.base_model.num_routed_experts
     
     def capture_batch(
         self,
@@ -294,8 +310,12 @@ class ExpertActivationHook:
                     if len(self.expert_activations_list) % 50 == 0 or len(self.expert_activations_list) < 5:
                         paper_idx = papers_with_tokens[0]
                         total_activations = activations.sum()
-                        unique_experts_used = len(np.where(probs[paper_idx] > 0)[0])
-                        print(f"  Batch {len(self.expert_activations_list)}: {len(papers_with_tokens)} papers, {total_activations} total activations, {unique_experts_used} experts active for paper {paper_idx}")
+                        # Count both shared (always active) and routed (selected by gate) experts
+                        # Use activations boolean mask (not probs) to count which experts were actually selected
+                        num_routed_active = int(activations[paper_idx].sum())
+                        num_total_active = self.num_shared_experts + num_routed_active
+                        print(f"  Batch {len(self.expert_activations_list)}: {len(papers_with_tokens)} papers, {total_activations} total activations")
+                        print(f"    → Paper {paper_idx}: {num_total_active} experts active ({self.num_shared_experts} shared + {num_routed_active}/{self.num_routed_experts} routed)")
                 else:
                     print(f"  WARNING: No papers have tokens mapped!")
             else:

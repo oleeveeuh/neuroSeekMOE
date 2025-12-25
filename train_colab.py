@@ -696,17 +696,24 @@ def main():
         
         SimpleMoEModel = DummyModel
     
-    # Load MoE routing parameters from config.yaml if available
-    moe_config = {
-        'noise_scale': 0.7,  # Default: increased for better specialization
-        'load_balance_loss_weight': 0.3,  # Default: increased for better specialization
-        'z_loss_weight': 0.003,  # Default: increased for better specialization
-        'temperature_schedule': 'linear',
-        'temperature_start': 2.0,
-        'temperature_end': 0.5,  # Default: increased to maintain exploration
-        'temperature_steps': 5000,  # Default: increased for slower decay
+    # Load MoE architecture and routing parameters from config.yaml if available
+    moe_arch_config = {
+        'embedding_dim': 256,  # Reduced from default for memory efficiency
+        'num_shared_experts': 2,
+        'num_routed_experts': 8,  # DeepSeek-MoE: 8 routed experts
+        'top_k': 2,  # Select 2 out of 8 routed experts per token
     }
-    
+
+    moe_routing_config = {
+        'noise_scale': 1.0,  # Default: increased for better specialization
+        'load_balance_loss_weight': 0.5,  # Default: increased for better specialization
+        'z_loss_weight': 0.005,  # Default: increased for better specialization
+        'temperature_schedule': 'linear',
+        'temperature_start': 3.0,
+        'temperature_end': 0.3,  # Default: increased to maintain exploration
+        'temperature_steps': 10000,  # Default: increased for slower decay
+    }
+
     # Try to load from config.yaml
     try:
         import yaml
@@ -716,45 +723,63 @@ def main():
                 config = yaml.safe_load(f)
                 if 'training' in config:
                     training_config = config['training']
-                    # Update MoE parameters from config
+
+                    # Load architecture parameters
+                    if 'embedding_dim' in training_config:
+                        moe_arch_config['embedding_dim'] = training_config['embedding_dim']
+                    if 'num_shared_experts' in training_config:
+                        moe_arch_config['num_shared_experts'] = training_config['num_shared_experts']
+                    if 'num_routed_experts' in training_config:
+                        moe_arch_config['num_routed_experts'] = training_config['num_routed_experts']
+                    if 'top_k' in training_config:
+                        moe_arch_config['top_k'] = training_config['top_k']
+
+                    # Load routing parameters
                     if 'noise_scale' in training_config:
-                        moe_config['noise_scale'] = training_config['noise_scale']
+                        moe_routing_config['noise_scale'] = training_config['noise_scale']
                     if 'load_balance_loss_weight' in training_config:
-                        moe_config['load_balance_loss_weight'] = training_config['load_balance_loss_weight']
+                        moe_routing_config['load_balance_loss_weight'] = training_config['load_balance_loss_weight']
                     if 'z_loss_weight' in training_config:
-                        moe_config['z_loss_weight'] = training_config['z_loss_weight']
+                        moe_routing_config['z_loss_weight'] = training_config['z_loss_weight']
                     if 'temperature_schedule' in training_config:
-                        moe_config['temperature_schedule'] = training_config['temperature_schedule']
+                        moe_routing_config['temperature_schedule'] = training_config['temperature_schedule']
                     if 'temperature_start' in training_config:
-                        moe_config['temperature_start'] = training_config['temperature_start']
+                        moe_routing_config['temperature_start'] = training_config['temperature_start']
                     if 'temperature_end' in training_config:
-                        moe_config['temperature_end'] = training_config['temperature_end']
+                        moe_routing_config['temperature_end'] = training_config['temperature_end']
                     if 'temperature_steps' in training_config:
-                        moe_config['temperature_steps'] = training_config['temperature_steps']
-                    print(f"✅ Loaded MoE routing parameters from config.yaml")
-                    print(f"   noise_scale: {moe_config['noise_scale']}")
-                    print(f"   load_balance_loss_weight: {moe_config['load_balance_loss_weight']}")
-                    print(f"   z_loss_weight: {moe_config['z_loss_weight']}")
-                    print(f"   temperature: {moe_config['temperature_start']} → {moe_config['temperature_end']} over {moe_config['temperature_steps']} steps")
+                        moe_routing_config['temperature_steps'] = training_config['temperature_steps']
+
+                    print(f"✅ Loaded DeepSeek-MoE configuration from config.yaml")
+                    print(f"   Architecture:")
+                    print(f"      embedding_dim: {moe_arch_config['embedding_dim']}")
+                    print(f"      num_shared_experts: {moe_arch_config['num_shared_experts']}")
+                    print(f"      num_routed_experts: {moe_arch_config['num_routed_experts']}")
+                    print(f"      top_k: {moe_arch_config['top_k']}")
+                    print(f"   Routing:")
+                    print(f"      noise_scale: {moe_routing_config['noise_scale']}")
+                    print(f"      load_balance_loss_weight: {moe_routing_config['load_balance_loss_weight']}")
+                    print(f"      z_loss_weight: {moe_routing_config['z_loss_weight']}")
+                    print(f"      temperature: {moe_routing_config['temperature_start']} → {moe_routing_config['temperature_end']} over {moe_routing_config['temperature_steps']} steps")
     except Exception as e:
         print(f"⚠️  Could not load config.yaml: {e}")
-        print(f"   Using default MoE parameters (optimized for specialization)")
-    
-    # Create model with DeepSeek-MoE configuration
-    # Optimized for Colab T4 (12GB VRAM): smaller embedding_dim, fewer experts
+        print(f"   Using default DeepSeek-MoE configuration")
+
+    # Create model with DeepSeek-MoE configuration from config.yaml
+    # Proper DeepSeek-MoE: 8 routed experts with top_k=2 (select 2 out of 8)
     model = SimpleMoEModel(
         vocab_size=vocab_size,
-        embedding_dim=256,  # Reduced from default for memory efficiency
-        num_shared_experts=2,
-        num_routed_experts=4,  # Small number for Colab
-        top_k=2,
-        noise_scale=moe_config['noise_scale'],
-        load_balance_loss_weight=moe_config['load_balance_loss_weight'],
-        z_loss_weight=moe_config['z_loss_weight'],
-        temperature_schedule=moe_config['temperature_schedule'],
-        temperature_start=moe_config['temperature_start'],
-        temperature_end=moe_config['temperature_end'],
-        temperature_steps=moe_config['temperature_steps'],
+        embedding_dim=moe_arch_config['embedding_dim'],
+        num_shared_experts=moe_arch_config['num_shared_experts'],
+        num_routed_experts=moe_arch_config['num_routed_experts'],
+        top_k=moe_arch_config['top_k'],
+        noise_scale=moe_routing_config['noise_scale'],
+        load_balance_loss_weight=moe_routing_config['load_balance_loss_weight'],
+        z_loss_weight=moe_routing_config['z_loss_weight'],
+        temperature_schedule=moe_routing_config['temperature_schedule'],
+        temperature_start=moe_routing_config['temperature_start'],
+        temperature_end=moe_routing_config['temperature_end'],
+        temperature_steps=moe_routing_config['temperature_steps'],
     )
     
     # Wrap model to match expected signature: model(input_ids) -> logits

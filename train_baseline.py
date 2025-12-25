@@ -216,9 +216,13 @@ def train_baseline_model(
     device: str = "auto",
     test_split: float = 0.1,
     save_interval: int = 5000,
-    keep_last_n_checkpoints: int = 2
+    keep_last_n_checkpoints: int = 2,
+    early_stopping: bool = False,
+    early_stopping_patience: int = 1000,
+    early_stopping_min_delta: float = 0.01,
+    early_stopping_window: int = 500
 ):
-    """Train baseline transformer model using the same approach as train_colab.py"""
+    """Train baseline transformer model using the same approach as train_colab.py with early stopping"""
 
     # Set device
     if device == "auto":
@@ -360,6 +364,11 @@ def train_baseline_model(
     dataloader_iter = iter(dataloader)
     accumulated_loss = 0.0
 
+    # Early stopping state
+    best_perplexity = float('inf')
+    steps_without_improvement = 0
+    last_evaluation_step = 0
+
     while global_step < max_steps:
         # Zero gradients at start of accumulation
         if global_step % gradient_accumulation == 0:
@@ -442,6 +451,58 @@ def train_baseline_model(
             }, checkpoint_path)
             print(f"  Checkpoint saved: {checkpoint_path}")
 
+        # Early stopping evaluation
+        if early_stopping and (global_step - last_evaluation_step) >= early_stopping_window:
+            model.eval()
+            eval_loss = 0.0
+            eval_batches = 10  # Evaluate on 10 batches
+
+            with torch.no_grad():
+                for _ in range(eval_batches):
+                    try:
+                        eval_batch = next(dataloader_iter)
+                    except StopIteration:
+                        dataloader_iter = iter(dataloader)
+                        eval_batch = next(dataloader_iter)
+
+                    input_ids = eval_batch['input_ids'].to(device)
+                    attention_mask = eval_batch.get('attention_mask')
+                    if attention_mask is not None:
+                        attention_mask = attention_mask.to(device)
+
+                    logits = model(input_ids, attention_mask=attention_mask)
+
+                    if model_type == "decoder":
+                        targets = input_ids[:, 1:].contiguous()
+                        logits = logits[:, :-1, :].contiguous()
+                    else:
+                        targets = input_ids
+
+                    loss = criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
+                    eval_loss += loss.item()
+
+            avg_eval_loss = eval_loss / eval_batches
+            current_perplexity = torch.exp(torch.tensor(avg_eval_loss)).item()
+
+            # Check for improvement
+            if current_perplexity < best_perplexity - early_stopping_min_delta:
+                best_perplexity = current_perplexity
+                steps_without_improvement = 0
+                print(f"   ✓ New best perplexity: {best_perplexity:.2f}")
+            else:
+                steps_without_improvement += early_stopping_window
+                print(f"   Early stopping: {steps_without_improvement}/{early_stopping_patience} steps without improvement (current: {current_perplexity:.2f}, best: {best_perplexity:.2f})")
+
+                # Check if should stop early
+                if steps_without_improvement >= early_stopping_patience:
+                    print(f"\n✅ Early stopping triggered! No improvement for {early_stopping_patience} steps.")
+                    print(f"   Best perplexity: {best_perplexity:.2f}")
+                    print(f"   Final step: {global_step}")
+                    break
+
+            last_evaluation_step = global_step
+            model.train()
+
     print(f"Training completed at step {global_step}")
 
     # Save final model
@@ -490,6 +551,12 @@ def main():
     parser.add_argument('--device', type=str, default='auto', help="Device (auto, cpu, cuda)")
     parser.add_argument('--save-interval', type=int, default=5000, help="Save checkpoint every N steps")
 
+    # Early stopping arguments
+    parser.add_argument('--early-stopping', action='store_true', help="Enable early stopping")
+    parser.add_argument('--early-stopping-patience', type=int, default=1000, help="Stop if no improvement for N steps")
+    parser.add_argument('--early-stopping-min-delta', type=float, default=0.01, help="Minimum perplexity improvement threshold")
+    parser.add_argument('--early-stopping-window', type=int, default=500, help="Evaluate perplexity every N steps")
+
     args = parser.parse_args()
 
     print("=" * 60)
@@ -514,6 +581,10 @@ def main():
         ff_dim=args.ff_dim,
         device=args.device,
         save_interval=args.save_interval,
+        early_stopping=args.early_stopping,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
+        early_stopping_window=args.early_stopping_window,
     )
 
     print(f"\n✅ Training complete!")

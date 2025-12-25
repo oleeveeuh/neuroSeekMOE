@@ -369,6 +369,11 @@ def train(
     """
     device = adapter.device
 
+    # Ensure numeric types for scheduler (fix for YAML loading)
+    learning_rate = float(learning_rate)
+    max_steps = int(max_steps)
+    warmup_steps = int(warmup_steps)
+
     # Find maximum batch size if requested
     if auto_find_batch_size and torch.cuda.is_available():
         # We need tokenizer for this, but it's in adapter

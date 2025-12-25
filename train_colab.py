@@ -343,13 +343,14 @@ def train(
     early_stopping: bool = False,
     early_stopping_patience: int = 1000,
     early_stopping_min_delta: float = 0.01,
-    early_stopping_window: int = 500
+    early_stopping_window: int = 500,
+    val_dataset: Optional[ArXivStreamingDataset] = None
 ):
     """Main training loop optimized for Colab GPU with early stopping.
 
     Args:
         model: DeepSeekMoE model
-        dataset: ArXiv streaming dataset
+        dataset: ArXiv streaming dataset (training)
         adapter: Model adapter
         checkpoint_dir: Directory for checkpoints
         batch_size: Batch size (will be auto-adjusted if needed)
@@ -366,6 +367,7 @@ def train(
         early_stopping_patience: Stop if no improvement for N steps
         early_stopping_min_delta: Minimum perplexity improvement threshold
         early_stopping_window: Evaluate perplexity every N steps
+        val_dataset: Validation dataset for early stopping (prevents overfitting to training data)
     """
     device = adapter.device
 
@@ -560,18 +562,38 @@ def train(
 
         # Early stopping evaluation
         if early_stopping and (step - last_evaluation_step) >= early_stopping_window:
-            # Evaluate perplexity on a small batch
             model.eval()
             eval_loss = 0.0
             eval_batches = 10  # Evaluate on 10 batches
 
+            # Use validation dataset if provided, otherwise sample from training data
+            if val_dataset is not None:
+                # Create validation dataloader
+                val_dataloader = create_dataloader(
+                    val_dataset,
+                    batch_size=batch_size,
+                    num_workers=0,
+                    pin_memory=False,
+                    shuffle=True  # Shuffle to get different samples each time
+                )
+                val_dataloader_iter = iter(val_dataloader)
+                data_source = "validation set"
+            else:
+                # Fallback to training data (not ideal, but maintains compatibility)
+                val_dataloader_iter = dataloader_iter
+                data_source = "training data (WARNING: no validation set provided)"
+
             with torch.no_grad():
                 for _ in range(eval_batches):
                     try:
-                        eval_batch = next(dataloader_iter)
+                        eval_batch = next(val_dataloader_iter)
                     except StopIteration:
-                        dataloader_iter = iter(dataloader)
-                        eval_batch = next(dataloader_iter)
+                        if val_dataset is not None:
+                            val_dataloader_iter = iter(val_dataloader)
+                        else:
+                            dataloader_iter = iter(dataloader)
+                            val_dataloader_iter = dataloader_iter
+                        eval_batch = next(val_dataloader_iter)
 
                     result = adapter.process_batch(eval_batch)
                     loss = result['loss']
@@ -594,10 +616,10 @@ def train(
                     'step': step,
                     'perplexity': best_perplexity
                 }
-                print(f"   ✓ New best perplexity: {best_perplexity:.2f} (saved best model)")
+                print(f"   ✓ New best perplexity: {best_perplexity:.2f} ({data_source})")
             else:
                 steps_without_improvement += early_stopping_window
-                print(f"   Early stopping: {steps_without_improvement}/{early_stopping_patience} steps without improvement (current: {current_perplexity:.2f}, best: {best_perplexity:.2f})")
+                print(f"   Early stopping ({data_source}): {steps_without_improvement}/{early_stopping_patience} steps without improvement (current: {current_perplexity:.2f}, best: {best_perplexity:.2f})")
 
                 # Check if should stop early
                 if steps_without_improvement >= early_stopping_patience:
@@ -648,7 +670,9 @@ def main():
                        help='JSONL file with paper metadata')
     parser.add_argument('--tokenizer-path', type=str, required=True,
                        help='Path to SentencePiece tokenizer model')
-    
+    parser.add_argument('--val-dataset', type=str, default=None,
+                       help='Path to validation metadata JSONL for early stopping (prevents overfitting)')
+
     # Training config
     parser.add_argument('--output-dir', type=str, default='./checkpoints',
                        help='Output directory for checkpoints')
@@ -760,7 +784,24 @@ def main():
         else:
             raise FileNotFoundError(f"Neither text_dir nor processed_dataset.jsonl found. Checked: {processed_dataset_path}")
     print(f"Created dataset with ~{len(dataset)} samples")
-    
+
+    # Load validation dataset if provided (for early stopping)
+    val_dataset = None
+    if args.val_dataset:
+        print(f"\nLoading validation dataset for early stopping...")
+        if os.path.exists(args.val_dataset):
+            val_dataset = ArXivStreamingDataset(
+                text_dir=None,  # Validation set typically doesn't have separate text files
+                metadata_jsonl=args.val_dataset,
+                tokenizer=tokenizer,
+                max_length=512,
+                min_length=64
+            )
+            print(f"Created validation dataset with ~{len(val_dataset)} samples")
+        else:
+            print(f"⚠️  Warning: Validation dataset file not found: {args.val_dataset}")
+            print(f"   Will use training data for early stopping evaluation (NOT recommended - may overfit)")
+
     # Load model - use SimpleMoEModel from train_real.py
     # vocab_size already set above
     
@@ -997,6 +1038,7 @@ def main():
     train(
         model=model,
         dataset=dataset,
+        val_dataset=val_dataset,
         adapter=adapter,
         checkpoint_dir=args.output_dir,
         batch_size=final_batch_size,

@@ -568,13 +568,12 @@ def train(
 
             # Use validation dataset if provided, otherwise sample from training data
             if val_dataset is not None:
-                # Create validation dataloader
+                # Create validation dataloader (no shuffle for evaluation)
                 val_dataloader = create_dataloader(
                     val_dataset,
                     batch_size=batch_size,
                     num_workers=0,
-                    pin_memory=False,
-                    shuffle=True  # Shuffle to get different samples each time
+                    pin_memory=False
                 )
                 val_dataloader_iter = iter(val_dataloader)
                 data_source = "validation set"

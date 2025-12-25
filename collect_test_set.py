@@ -104,6 +104,7 @@ def fetch_arxiv_papers(
                     'arxiv_id': arxiv_id,
                     'title': title,
                     'abstract': summary,
+                    'text': f"{title}\n\n{summary}",  # Add text field for ArXivStreamingDataset
                     'categories': categories,
                     'authors': authors,
                     'published': entry.find('atom:published', ns).text,

@@ -624,22 +624,22 @@ def main():
                        help='Output directory for checkpoints')
     parser.add_argument('--checkpoint-dir', type=str, default=None,
                        help='Alias for --output-dir (deprecated, use --output-dir)')
-    parser.add_argument('--batch-size', type=int, default=6,
-                       help='Batch size (default: 6)')
-    parser.add_argument('--gradient-accumulation', type=int, default=4,
-                       help='Gradient accumulation steps (default: 4)')
+    parser.add_argument('--batch-size', type=int, default=None,
+                       help=f'Batch size (default: from config.yaml or 6)')
+    parser.add_argument('--gradient-accumulation', type=int, default=None,
+                       help=f'Gradient accumulation steps (default: from config.yaml or 4)')
     parser.add_argument('--gradient-accumulation-steps', type=int, default=None,
                        help='Alias for --gradient-accumulation (deprecated, use --gradient-accumulation)')
-    parser.add_argument('--max-steps', type=int, default=50000,
-                       help='Maximum training steps (default: 50000)')
-    parser.add_argument('--learning-rate', type=float, default=5e-4,
-                       help='Learning rate (default: 5e-4)')
-    parser.add_argument('--warmup-steps', type=int, default=2000,
-                       help='Warmup steps (default: 2000)')
-    
+    parser.add_argument('--max-steps', type=int, default=None,
+                       help=f'Maximum training steps (default: from config.yaml or 50000)')
+    parser.add_argument('--learning-rate', type=float, default=None,
+                       help=f'Learning rate (default: from config.yaml or 5e-4)')
+    parser.add_argument('--warmup-steps', type=int, default=None,
+                       help=f'Warmup steps (default: from config.yaml or 2000)')
+
     # Checkpointing and logging
-    parser.add_argument('--save-interval', type=int, default=5000,
-                       help='Steps between checkpoints (default: 5000)')
+    parser.add_argument('--save-interval', type=int, default=None,
+                       help=f'Steps between checkpoints (default: from config.yaml or 5000)')
     parser.add_argument('--log-interval', type=int, default=100,
                        help='Steps between logging (default: 100)')
     parser.add_argument('--domain-log-interval', type=int, default=1000,
@@ -654,15 +654,21 @@ def main():
                        help='Loss weight for neuroscience papers (default: 1.2)')
     
     args = parser.parse_args()
-    
+
     # Handle deprecated/alias arguments
     if args.checkpoint_dir is not None:
         args.output_dir = args.checkpoint_dir
         print("Warning: --checkpoint-dir is deprecated, use --output-dir instead")
-    
+
     if args.gradient_accumulation_steps is not None:
         args.gradient_accumulation = args.gradient_accumulation_steps
         print("Warning: --gradient-accumulation-steps is deprecated, use --gradient-accumulation instead")
+
+    # Apply config.yaml defaults if CLI args not provided
+    # (config values are loaded earlier in training_config_defaults)
+    if 'training_config_defaults' in locals() or 'training_config_defaults' in globals():
+        # We're in the main() function, need to use the loaded config
+        pass  # Config will be applied after loading in main()
     
     # Load tokenizer (try HuggingFace first, fallback to SentencePiece)
     if TOKENIZER_WRAPPER_AVAILABLE:
@@ -778,6 +784,16 @@ def main():
         'early_stopping_window': 500,
     }
 
+    # Training hyperparameters config (for overriding CLI defaults)
+    training_config_defaults = {
+        'batch_size': 6,
+        'gradient_accumulation_steps': 4,
+        'max_steps': 50000,
+        'learning_rate': 5e-4,
+        'warmup_steps': 2000,
+        'save_interval': 5000,
+    }
+
     # Try to load from config.yaml
     try:
         import yaml
@@ -824,6 +840,20 @@ def main():
                     if 'early_stopping_window' in training_config:
                         early_stopping_config['early_stopping_window'] = training_config['early_stopping_window']
 
+                    # Load training hyperparameters (will override CLI defaults)
+                    if 'batch_size' in training_config:
+                        training_config_defaults['batch_size'] = training_config['batch_size']
+                    if 'gradient_accumulation_steps' in training_config:
+                        training_config_defaults['gradient_accumulation_steps'] = training_config['gradient_accumulation_steps']
+                    if 'max_steps' in training_config:
+                        training_config_defaults['max_steps'] = training_config['max_steps']
+                    if 'learning_rate' in training_config:
+                        training_config_defaults['learning_rate'] = training_config['learning_rate']
+                    if 'warmup_steps' in training_config:
+                        training_config_defaults['warmup_steps'] = training_config['warmup_steps']
+                    if 'checkpoint_interval' in training_config:
+                        training_config_defaults['save_interval'] = training_config['checkpoint_interval']
+
                     print(f"✅ Loaded DeepSeek-MoE configuration from config.yaml")
                     print(f"   Architecture:")
                     print(f"      embedding_dim: {moe_arch_config['embedding_dim']}")
@@ -835,6 +865,10 @@ def main():
                     print(f"      load_balance_loss_weight: {moe_routing_config['load_balance_loss_weight']}")
                     print(f"      z_loss_weight: {moe_routing_config['z_loss_weight']}")
                     print(f"      temperature: {moe_routing_config['temperature_start']} → {moe_routing_config['temperature_end']} over {moe_routing_config['temperature_steps']} steps")
+                    print(f"   Training:")
+                    print(f"      batch_size: {training_config_defaults['batch_size']}")
+                    print(f"      gradient_accumulation: {training_config_defaults['gradient_accumulation_steps']}")
+                    print(f"      max_steps: {training_config_defaults['max_steps']}")
                     if early_stopping_config['early_stopping']:
                         print(f"   Early Stopping:")
                         print(f"      patience: {early_stopping_config['early_stopping_patience']}")
@@ -917,12 +951,12 @@ def main():
         dataset=dataset,
         adapter=adapter,
         checkpoint_dir=args.output_dir,
-        batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation,
-        max_steps=args.max_steps,
-        learning_rate=args.learning_rate,
-        warmup_steps=args.warmup_steps,
-        save_interval=args.save_interval,
+        batch_size=args.batch_size if args.batch_size is not None else training_config_defaults['batch_size'],
+        gradient_accumulation_steps=args.gradient_accumulation if args.gradient_accumulation is not None else training_config_defaults['gradient_accumulation_steps'],
+        max_steps=args.max_steps if args.max_steps is not None else training_config_defaults['max_steps'],
+        learning_rate=args.learning_rate if args.learning_rate is not None else training_config_defaults['learning_rate'],
+        warmup_steps=args.warmup_steps if args.warmup_steps is not None else training_config_defaults['warmup_steps'],
+        save_interval=args.save_interval if args.save_interval is not None else training_config_defaults['save_interval'],
         log_interval=args.log_interval,
         domain_log_interval=args.domain_log_interval,
         resume_from_checkpoint=args.resume_from_checkpoint,

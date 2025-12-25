@@ -831,7 +831,7 @@ def main():
     
     # Load MoE architecture and routing parameters from config.yaml if available
     moe_arch_config = {
-        'embedding_dim': 256,  # Reduced from default for memory efficiency
+        'embedding_dim': 768,  # Default from config.yaml
         'num_shared_experts': 2,
         'num_routed_experts': 8,  # DeepSeek-MoE: 8 routed experts
         'top_k': 2,  # Select 2 out of 8 routed experts per token

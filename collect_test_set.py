@@ -181,34 +181,38 @@ def classify_domains(
     return domains
 
 
-def load_training_papers(metadata_path: str) -> Set[str]:
-    """Load ArXiv IDs from training set to exclude from test set.
+def load_papers_to_exclude(metadata_paths: List[str]) -> Set[str]:
+    """Load ArXiv IDs from multiple metadata files to exclude from test set.
 
     Args:
-        metadata_path: Path to training metadata JSONL
+        metadata_paths: List of paths to metadata JSONL files (training, val, test)
 
     Returns:
         Set of ArXiv IDs
     """
     seen_papers = set()
 
-    if not os.path.exists(metadata_path):
-        print(f"Warning: Training metadata not found at {metadata_path}")
-        print(f"Will not filter out training papers from test set")
-        return seen_papers
+    for metadata_path in metadata_paths:
+        if not os.path.exists(metadata_path):
+            print(f"Warning: Metadata not found at {metadata_path}")
+            continue
 
-    print(f"Loading training papers from: {metadata_path}")
-    with open(metadata_path, 'r', encoding='utf-8') as open_f:
-        for line in open_f:
-            try:
-                paper = json.loads(line)
-                arxiv_id = paper.get('arxiv_id') or paper.get('id')
-                if arxiv_id:
-                    seen_papers.add(arxiv_id)
-            except Exception as e:
-                continue
+        print(f"Loading papers from: {metadata_path}")
+        count = 0
+        with open(metadata_path, 'r', encoding='utf-8') as open_f:
+            for line in open_f:
+                try:
+                    paper = json.loads(line)
+                    arxiv_id = paper.get('arxiv_id') or paper.get('id')
+                    if arxiv_id:
+                        seen_papers.add(arxiv_id)
+                        count += 1
+                except Exception as e:
+                    continue
 
-    print(f"  Loaded {len(seen_papers)} training papers to exclude")
+        print(f"  Loaded {count} papers from {metadata_path}")
+
+    print(f"  Total unique papers to exclude: {len(seen_papers)}")
     return seen_papers
 
 
@@ -216,15 +220,17 @@ def save_test_set(
     papers: List[Dict],
     output_dir: str,
     metadata_file: str,
-    split_ratio: float = 0.5
+    split_ratio: float = 0.5,
+    create_validation: bool = True
 ):
-    """Save test set with stratified split.
+    """Save test set with optional validation split.
 
     Args:
         papers: List of paper metadata
         output_dir: Output directory
         metadata_file: Metadata filename
-        split_ratio: Ratio for test/validation split
+        split_ratio: Ratio for test/validation split (if create_validation=True)
+        create_validation: If True, split into test/val; if False, all papers to test
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -240,43 +246,51 @@ def save_test_set(
     for domain, group in domain_groups.items():
         print(f"  {domain}: {len(group)} papers")
 
-    # Split into test and validation
-    test_papers = []
-    val_papers = []
+    # Optionally split into test and validation
+    if create_validation:
+        test_papers = []
+        val_papers = []
 
-    random.seed(42)  # Reproducible split
+        random.seed(42)  # Reproducible split
 
-    for domain, group in domain_groups.items():
-        n_val = max(1, int(len(group) * split_ratio))
-        random.shuffle(group)
+        for domain, group in domain_groups.items():
+            n_val = max(1, int(len(group) * split_ratio))
+            random.shuffle(group)
 
-        val_papers.extend(group[:n_val])
-        test_papers.extend(group[n_val:])
+            val_papers.extend(group[:n_val])
+            test_papers.extend(group[n_val:])
 
-    print(f"\nFinal split:")
-    print(f"  Test: {len(test_papers)} papers")
-    print(f"  Validation: {len(val_papers)} papers")
+        print(f"\nFinal split:")
+        print(f"  Test: {len(test_papers)} papers")
+        print(f"  Validation: {len(val_papers)} papers")
+    else:
+        # All papers go to test set (no validation split)
+        test_papers = papers
+        val_papers = []
+        print(f"\nFinal test set: {len(test_papers)} papers (no validation split)")
 
     # Save metadata
     test_metadata_path = os.path.join(output_dir, metadata_file.replace('.jsonl', '_test.jsonl'))
-    val_metadata_path = os.path.join(output_dir, metadata_file.replace('.jsonl', '_val.jsonl'))
 
     with open(test_metadata_path, 'w', encoding='utf-8') as f:
         for paper in test_papers:
             f.write(json.dumps(paper) + '\n')
 
-    with open(val_metadata_path, 'w', encoding='utf-8') as f:
-        for paper in val_papers:
-            f.write(json.dumps(paper) + '\n')
-
     print(f"\n✅ Test set saved to: {test_metadata_path}")
-    print(f"✅ Validation set saved to: {val_metadata_path}")
+
+    if create_validation:
+        val_metadata_path = os.path.join(output_dir, metadata_file.replace('.jsonl', '_val.jsonl'))
+        with open(val_metadata_path, 'w', encoding='utf-8') as f:
+            for paper in val_papers:
+                f.write(json.dumps(paper) + '\n')
+        print(f"✅ Validation set saved to: {val_metadata_path}")
 
     # Save summary stats
     stats = {
         'collected_date': datetime.now().isoformat(),
         'total_test_papers': len(test_papers),
-        'total_val_papers': len(val_papers),
+        'total_val_papers': len(val_papers) if create_validation else 0,
+        'has_validation_split': create_validation,
         'domain_distribution': {
             domain: len([p for p in test_papers if domain in p.get('domains', [])])
             for domain in domain_groups.keys()
@@ -295,10 +309,11 @@ def main():
         description="Collect new test set from ArXiv (no data leakage)"
     )
     parser.add_argument(
-        '--training-metadata',
+        '--exclude-metadata',
         type=str,
+        nargs='+',
         required=True,
-        help='Path to training metadata JSONL (to exclude those papers)'
+        help='Path(s) to metadata JSONL files to exclude (training, val, test, etc.)'
     )
     parser.add_argument(
         '--output-dir',
@@ -328,7 +343,12 @@ def main():
         '--split-ratio',
         type=float,
         default=0.5,
-        help='Test/validation split ratio (default: 0.5 = 50/50)'
+        help='Test/validation split ratio when using --validation (default: 0.5 = 50/50)'
+    )
+    parser.add_argument(
+        '--no-validation',
+        action='store_true',
+        help='Do not create validation split; save all papers to test set only'
     )
 
     args = parser.parse_args()
@@ -341,9 +361,9 @@ def main():
     print(f"Days back: {args.days_back}")
     print()
 
-    # Load training papers to exclude
+    # Load papers to exclude (training, val, test, etc.)
     global seen_papers
-    seen_papers = load_training_papers(args.training_metadata)
+    seen_papers = load_papers_to_exclude(args.exclude_metadata)
 
     # Define search queries for healthcare+ML
     queries = [
@@ -399,7 +419,8 @@ def main():
         papers=unique_papers,
         output_dir=args.output_dir,
         metadata_file=args.metadata_file,
-        split_ratio=args.split_ratio
+        split_ratio=args.split_ratio,
+        create_validation=not args.no_validation
     )
 
     print("\n" + "=" * 60)

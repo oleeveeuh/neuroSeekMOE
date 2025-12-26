@@ -150,7 +150,7 @@ def save_checkpoint(
     max_checkpoints: int = 2
 ):
     """Save training checkpoint.
-    
+
     Args:
         model: Model to save
         optimizer: Optimizer state
@@ -161,17 +161,33 @@ def save_checkpoint(
         max_checkpoints: Maximum number of checkpoints to keep
     """
     os.makedirs(checkpoint_dir, exist_ok=True)
-    
+
     checkpoint_path = os.path.join(checkpoint_dir, f'step_{step}.pt')
-    
+
+    # Clear GPU cache before saving to prevent OOM
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # Move state to CPU before saving to reduce GPU memory pressure
+    def tensor_to_cpu(obj):
+        """Recursively move tensors to CPU."""
+        if torch.is_tensor(obj):
+            return obj.cpu()
+        elif isinstance(obj, dict):
+            return {k: tensor_to_cpu(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(tensor_to_cpu(v) for v in obj)
+        return obj
+
     checkpoint = {
         'step': step,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
+        'model_state_dict': {k: v.cpu() for k, v in model.state_dict().items()},
+        'optimizer_state_dict': tensor_to_cpu(optimizer.state_dict()),
         'scheduler_state_dict': scheduler.state_dict(),
         'scaler_state_dict': scaler.state_dict(),
     }
-    
+
     torch.save(checkpoint, checkpoint_path)
     print(f"Saved checkpoint: {checkpoint_path}")
     
@@ -201,27 +217,42 @@ def load_checkpoint(
     scaler: GradScaler
 ) -> int:
     """Load training checkpoint.
-    
+
     Args:
         checkpoint_path: Path to checkpoint file
         model: Model to load state into
         optimizer: Optimizer to load state into
         scheduler: Scheduler to load state into
         scaler: GradScaler to load state into
-        
+
     Returns:
         Step number from checkpoint
     """
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    
+
+    # Load model state (automatically moves to model's device)
     model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    # Move optimizer state tensors to the correct device recursively
+    def tensor_to_device(obj, device):
+        """Recursively move tensors to device."""
+        if torch.is_tensor(obj):
+            return obj.to(device)
+        elif isinstance(obj, dict):
+            return {k: tensor_to_device(v, device) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(tensor_to_device(v, device) for v in obj)
+        return obj
+
+    optimizer_state = tensor_to_device(checkpoint['optimizer_state_dict'], model.device)
+    optimizer.load_state_dict(optimizer_state)
+
     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     scaler.load_state_dict(checkpoint['scaler_state_dict'])
-    
+
     step = checkpoint.get('step', 0)
     print(f"Loaded checkpoint from step {step}: {checkpoint_path}")
-    
+
     return step
 
 
@@ -623,10 +654,20 @@ def train(
                 best_perplexity = current_perplexity
                 steps_without_improvement = 0
                 best_step = step
-                # Save best model state
+                # Save best model state - move to CPU first to avoid OOM
+                def tensor_to_cpu(obj):
+                    """Recursively move tensors to CPU."""
+                    if torch.is_tensor(obj):
+                        return obj.cpu()
+                    elif isinstance(obj, dict):
+                        return {k: tensor_to_cpu(v) for k, v in obj.items()}
+                    elif isinstance(obj, (list, tuple)):
+                        return type(obj)(tensor_to_cpu(v) for v in obj)
+                    return obj
+
                 best_model_state = {
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
+                    'model_state_dict': {k: v.cpu() for k, v in model.state_dict().items()},
+                    'optimizer_state_dict': tensor_to_cpu(optimizer.state_dict()),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'scaler_state_dict': scaler.state_dict(),
                     'step': step,
@@ -647,8 +688,20 @@ def train(
             last_evaluation_step = step
             model.train()
 
+    # Training loop completed
+    print(f"\n{'='*60}")
+    print(f"Training loop completed at step {step}")
+    print(f"{'='*60}")
+
     # Final checkpoint
     print("\nSaving final checkpoint...")
+
+    # Clear GPU memory before final save to prevent OOM
+    print("  Clearing GPU cache...")
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("  GPU cache cleared.")
 
     # If early stopping was used and we have a best model, save it
     if early_stopping and best_model_state is not None:

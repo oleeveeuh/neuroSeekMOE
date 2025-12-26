@@ -496,22 +496,21 @@ def train_baseline_model(
 
             with torch.no_grad():
                 for eval_batch_idx in range(eval_batches):
-                    try:
-                        if val_dataset is not None:
-                            eval_batch = next(val_dataloader_iter)
-                        else:
-                            # Sample from training data
-                            eval_batch = next(dataloader_iter)
-                    except StopIteration:
-                        # Dataloader exhausted, recreate iterator
-                        if val_dataset is not None:
-                            # Recreate validation dataloader iterator
-                            val_dataloader_iter = iter(val_dataloader)
-                            eval_batch = next(val_dataloader_iter)
-                        else:
-                            # Recreate training dataloader iterator
-                            dataloader_iter = iter(dataloader)
-                            eval_batch = next(dataloader_iter)
+                    # Keep trying to get a batch (recreate iterator if exhausted)
+                    while True:
+                        try:
+                            if val_dataset is not None:
+                                eval_batch = next(val_dataloader_iter)
+                            else:
+                                # Sample from training data
+                                eval_batch = next(dataloader_iter)
+                            break  # Got a batch, exit the while loop
+                        except StopIteration:
+                            # Dataloader exhausted, recreate iterator and try again
+                            if val_dataset is not None:
+                                val_dataloader_iter = iter(val_dataloader)
+                            else:
+                                dataloader_iter = iter(dataloader)
 
                     input_ids = eval_batch['input_ids'].to(device)
                     attention_mask = eval_batch.get('attention_mask')

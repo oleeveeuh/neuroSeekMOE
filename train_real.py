@@ -1059,20 +1059,23 @@ class SimpleMoEModel(nn.Module):
             max_recommended_top_k = min(10, num_routed_experts)  # Cap at 10 or num_routed_experts, whichever is smaller
             recommended_top_k = min(recommended_top_k, max_recommended_top_k)
             
-            # If the provided top_k is too small, increase it
-            if top_k < recommended_top_k:
-                print(f"Adjusting top_k for Expert Choice routing:")
-                print(f"   Original top_k: {top_k}")
-                print(f"   Recommended top_k: {recommended_top_k}")
-                print(f"   With {num_routed_experts} experts × {recommended_top_k} tokens = {num_routed_experts * recommended_top_k} tokens routed")
-                print(f"   Coverage: {(num_routed_experts * recommended_top_k) / estimated_tokens_per_batch * 100:.1f}%")
-                
-                top_k = recommended_top_k
-            else:
-                # Log current coverage for visibility
-                current_coverage = (num_routed_experts * top_k) / estimated_tokens_per_batch * 100
-                print(f"top_k ({top_k}) is sufficient for {num_routed_experts} experts")
-                print(f"   Coverage: {current_coverage:.1f}%")
+            # DISABLED: Auto-adjustment of top_k for DeepSeek-MoE
+            # In DeepSeek-MoE, top_k should be set explicitly (usually 2 out of 8 experts)
+            # The original code was designed for a different routing mechanism
+            #
+            # if top_k < recommended_top_k:
+            #     print(f"Adjusting top_k for Expert Choice routing:")
+            #     print(f"   Original top_k: {top_k}")
+            #     print(f"   Recommended top_k: {recommended_top_k}")
+            #     print(f"   With {num_routed_experts} experts × {recommended_top_k} tokens = {num_routed_experts * recommended_top_k} tokens routed")
+            #     print(f"   Coverage: {(num_routed_experts * recommended_top_k) / estimated_tokens_per_batch * 100:.1f}%")
+            #     top_k = recommended_top_k
+            # else:
+            #     current_coverage = (num_routed_experts * top_k) / estimated_tokens_per_batch * 100
+            #     print(f"top_k ({top_k}) is sufficient for {num_routed_experts} experts")
+            #     print(f"   Coverage: {current_coverage:.1f}%")
+
+            print(f"DeepSeek-MoE Config: {num_shared_experts} shared, {num_routed_experts} routed, top_k={top_k}, noise_scale={noise_scale}, load_balance_weight={load_balance_loss_weight}")
         
         # Validate top_k parameter (controls how many tokens each expert selects)
         if top_k < 1:

@@ -569,22 +569,28 @@ def train(
             # Use validation dataset if provided, otherwise sample from training data
             if val_dataset is not None:
                 # Create validation dataloader (no shuffle for evaluation)
+                print(f"  Creating validation dataloader...")
                 val_dataloader = create_dataloader(
                     val_dataset,
                     batch_size=batch_size,
                     num_workers=0,
                     pin_memory=False
                 )
+                print(f"  Validation dataloader created, getting first batch...")
                 val_dataloader_iter = iter(val_dataloader)
                 data_source = "validation set"
             else:
                 val_dataloader_iter = None
                 data_source = "training data (WARNING: no validation set provided)"
 
+            print(f"  Starting evaluation on {data_source} ({eval_batches} batches)...")
+
             with torch.no_grad():
                 for eval_batch_idx in range(eval_batches):
                     # Keep trying to get a batch (recreate iterator if exhausted)
-                    while True:
+                    attempts = 0
+                    max_attempts = 10  # Safety check to prevent infinite loops
+                    while attempts < max_attempts:
                         try:
                             if val_dataset is not None:
                                 eval_batch = next(val_dataloader_iter)
@@ -594,10 +600,16 @@ def train(
                             break  # Got a batch, exit the while loop
                         except StopIteration:
                             # Dataloader exhausted, recreate iterator and try again
+                            attempts += 1
                             if val_dataset is not None:
                                 val_dataloader_iter = iter(val_dataloader)
                             else:
                                 dataloader_iter = iter(dataloader)
+
+                    if attempts >= max_attempts:
+                        print(f"  ERROR: Could not get batch after {max_attempts} attempts!")
+                        print(f"  Validation dataset may be empty or corrupted. Skipping evaluation.")
+                        break
 
                     result = adapter.process_batch(eval_batch)
                     loss = result['loss']

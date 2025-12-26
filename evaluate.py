@@ -2071,6 +2071,18 @@ def evaluate_model(
     # Create test dataloader using standard PyTorch DataLoader
     # Use num_workers=0 to avoid worker serialization issues with metadata dict
     from torch.utils.data import DataLoader, SequentialSampler
+    import torch.nn.functional as F
+
+    def pad_sequence(batch, key, pad_value=0):
+        """Pad sequences to the same length."""
+        sequences = [item[key] for item in batch]
+        lengths = [seq.size(0) for seq in sequences]
+        max_len = max(lengths)
+        padded = torch.full((len(sequences), max_len), pad_value, dtype=sequences[0].dtype)
+        for i, seq in enumerate(sequences):
+            padded[i, :seq.size(0)] = seq
+        return padded
+
     test_dataloader = DataLoader(
         test_dataset,
         batch_size=batch_size,
@@ -2079,9 +2091,9 @@ def evaluate_model(
         num_workers=0,  # Single process to avoid metadata sharing issues
         pin_memory=True,
         collate_fn=lambda batch: {
-            'input_ids': torch.stack([item['input_ids'] for item in batch]),
-            'target_ids': torch.stack([item['target_ids'] for item in batch]),
-            'attention_mask': torch.stack([item['attention_mask'] for item in batch]),
+            'input_ids': pad_sequence(batch, 'input_ids', 0),
+            'target_ids': pad_sequence(batch, 'target_ids', 0),
+            'attention_mask': pad_sequence(batch, 'attention_mask', 0),
             'arxiv_ids': [item['arxiv_id'] for item in batch],
             'domains': [item['domains'] for item in batch],
             'categories': [item['categories'] for item in batch],
